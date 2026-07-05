@@ -134,43 +134,11 @@ export default function Dashboard() {
             {asleep ? (
               <Asleep />
             ) : (
-              <div className="relative">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  key={streamKey}
-                  src={STREAM_URL}
-                  alt="Live annotated driveway feed"
-                  className={`block aspect-video w-full bg-black object-contain transition-[opacity,filter] duration-500 ${
-                    paused || reconnecting ? "opacity-30 grayscale" : ""
-                  }`}
-                />
-                {/* Veil: the stream freezes on its last frame whenever it isn't
-                    live -- stood down (engine idle) or reconnecting (camera
-                    dropped). Dim + stamp it so a frozen frame is never mistaken
-                    for a live one (the old-timestamp confusion). */}
-                {paused && (
-                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
-                    <PauseIcon className="h-12 w-12 text-ink/80" />
-                    <span className="stamp text-sm text-inkdim">
-                      watch on stand down
-                    </span>
-                    <span className="text-xs text-inkfaint">
-                      last frame shown · perception engine idle
-                    </span>
-                  </div>
-                )}
-                {reconnecting && (
-                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
-                    <span className="lamp h-10 w-10 rounded-full border-4 border-turkey text-turkey" />
-                    <span className="stamp text-sm text-turkey">
-                      reconnecting to camera…
-                    </span>
-                    <span className="text-xs text-inkfaint">
-                      last frame shown · the feed dropped, retrying
-                    </span>
-                  </div>
-                )}
-              </div>
+              <VideoFeed
+                paused={paused}
+                reconnecting={reconnecting}
+                streamKey={streamKey}
+              />
             )}
           </section>
 
@@ -439,6 +407,134 @@ function Button({
     >
       {children}
     </button>
+  );
+}
+
+function VideoFeed({
+  paused,
+  reconnecting,
+  streamKey,
+}: {
+  paused: boolean;
+  reconnecting: boolean;
+  streamKey: number;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [isFull, setIsFull] = useState(false);
+  const dimmed = paused || reconnecting;
+
+  // Track native fullscreen state (also catches Escape, which the browser
+  // handles for us -- no keydown listener needed).
+  useEffect(() => {
+    const onChange = () =>
+      setIsFull(document.fullscreenElement === containerRef.current);
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
+
+  const toggleFull = useCallback(() => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      containerRef.current?.requestFullscreen?.();
+    }
+  }, []);
+
+  return (
+    <div
+      ref={containerRef}
+      onDoubleClick={toggleFull}
+      className={`group relative bg-black ${
+        isFull ? "flex h-full items-center justify-center" : ""
+      }`}
+    >
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        key={streamKey}
+        src={STREAM_URL}
+        alt="Live annotated driveway feed"
+        className={`block bg-black object-contain transition-[opacity,filter] duration-500 ${
+          isFull ? "h-full w-full" : "aspect-video w-full"
+        } ${dimmed ? "opacity-30 grayscale" : ""}`}
+      />
+
+      {/* Veil: the stream freezes on its last frame whenever it isn't live --
+          stood down (engine idle) or reconnecting (camera dropped). Dim + stamp
+          it so a frozen frame is never mistaken for a live one. */}
+      {paused && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
+          <PauseIcon className="h-12 w-12 text-ink/80" />
+          <span className="stamp text-sm text-inkdim">watch on stand down</span>
+          <span className="text-xs text-inkfaint">
+            last frame shown · perception engine idle
+          </span>
+        </div>
+      )}
+      {reconnecting && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
+          <span className="lamp h-10 w-10 rounded-full border-4 border-turkey text-turkey" />
+          <span className="stamp text-sm text-turkey">
+            reconnecting to camera…
+          </span>
+          <span className="text-xs text-inkfaint">
+            last frame shown · the feed dropped, retrying
+          </span>
+        </div>
+      )}
+
+      {/* Fullscreen toggle, YouTube-style: fades in on hover, lives bottom-right
+          so it's reachable in fullscreen too. Escape or double-click also exit. */}
+      <button
+        type="button"
+        onClick={toggleFull}
+        aria-label={isFull ? "Exit full screen" : "Full screen"}
+        className="absolute bottom-3 right-3 rounded-sm bg-black/50 p-2 text-ink/80 opacity-0 backdrop-blur-sm transition-opacity hover:text-squirrel focus-visible:opacity-100 group-hover:opacity-100"
+      >
+        {isFull ? <CompressIcon /> : <ExpandIcon />}
+      </button>
+    </div>
+  );
+}
+
+function ExpandIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="18"
+      height="18"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+      <path d="M16 3h3a2 2 0 0 1 2 2v3" />
+      <path d="M8 21H5a2 2 0 0 1-2-2v-3" />
+      <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+    </svg>
+  );
+}
+
+function CompressIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="18"
+      height="18"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M8 3v3a2 2 0 0 1-2 2H3" />
+      <path d="M21 8h-3a2 2 0 0 1-2-2V3" />
+      <path d="M3 16h3a2 2 0 0 1 2 2v3" />
+      <path d="M16 21v-3a2 2 0 0 1 2-2h3" />
+    </svg>
   );
 }
 
