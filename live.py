@@ -47,8 +47,18 @@ if sys.platform == "win32":
     ctypes.windll.winmm.timeBeginPeriod(1)
     atexit.register(ctypes.windll.winmm.timeEndPeriod, 1)
 
-# Load your trained model.
-model = YOLO("C:/WEBDEV/project-squirrel/runs/detect/train-16/weights/best.pt")
+# Load the deployed model. It lives in models/ -- the promoted-weights shelf,
+# kept separate from the runs/ training scratch. By default we load
+# models/current.pt (a copy of whichever training run is live); promoting a new
+# model is just copying its best.pt over current.pt -- no code edit here. Set
+# MERLE_MODEL to point at a versioned file instead (e.g. to A/B a candidate).
+MODEL_PATH = os.environ.get("MERLE_MODEL", "models/current.pt")
+if not os.path.exists(MODEL_PATH):
+    print(f"Model not found: {MODEL_PATH}")
+    print("Copy a trained best.pt into models/current.pt (see models/README.md),")
+    print("or set MERLE_MODEL to a model file. Training weights live under runs/.")
+    raise SystemExit
+model = YOLO(MODEL_PATH)
 
 # --- Camera source: Amcrest PoE camera over RTSP --------------------------
 # The USB webcam (and its MSMF/MJPG backend dance) is retired; video now comes
