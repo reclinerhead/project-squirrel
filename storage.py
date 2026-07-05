@@ -91,6 +91,12 @@ def connect(path):
     """
     conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    # WAL lets the daemon's perception thread write while request threads read
+    # without "database is locked" -- a real on-disk DB only. (:memory: has no
+    # WAL and would just report "memory", so skip it there.)
+    if path != ":memory:":
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(SCHEMA)
     conn.commit()
     return conn

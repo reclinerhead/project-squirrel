@@ -54,11 +54,29 @@ The daemon's persistent memory is a single SQLite file (stdlib `sqlite3`, no ser
 - **`events`** — notable moments (hard frame saved, crowd snapshot, clip recorded). `kind` classifies; `details` is a free-form JSON blob so new event types need no schema change. Per the filesystem rule, an event records a frame's *path*, not the frame.
 - **`training_runs`** — one row per training round for the dashboard's metrics-over-time panel. Headline `map50`/`recall`/`map50_95` are columns; per-class detail is JSON in `metrics`. Keyed by `run_name` (PK) so seeding is idempotent. Seeded with the train-15 and train-16 baseline (0705 valid split).
 
-Pure-logic tests in `test_storage.py` run in CI (stdlib-only, no model/camera).
+Pure-logic tests in `test_storage.py` run in CI (stdlib-only, no model/camera). `connect()` enables WAL (on-disk only) so the perception thread can write while request threads read.
+
+### The daemon (`merle_daemon.py`) and frame sources (`frames.py`)
+
+The daemon is a FastAPI app. A background `Worker` thread runs the perception loop — pull a frame + its detections from a **frame source**, annotate, JPEG-encode, publish to a lock-guarded `SharedState`, and persist sightings/events — while request handlers read that state. Endpoints:
+
+- `GET /state` — session id, control flags, live counts/tracks/fps, run totals, recent events (JSON).
+- `GET /stream` — the annotated feed as `multipart/x-mixed-replace` MJPEG (an `<img src>` in the browser; no player). Async + `is_disconnected()` so a closed tab frees the generator.
+- `GET /snapshot` — the latest annotated frame, one JPEG.
+- `POST /control` — `start`/`stop` the loop, `record_on`/`record_off`, `set_crowd_threshold`.
+
+The **frame source** (`frames.py`) is the seam that keeps perception swappable. `FrameSource.read()` returns `(frame, [Detection, ...])`; the daemon's annotation/encoding/persistence has one implementation regardless of source, so the synthetic and real paths can't drift. Sources:
+
+- `SyntheticFrameSource` — camera-free (a couple of squirrels + a visiting chipmunk, motion a pure function of a frame counter so it's deterministic). Powers the tests, local dev, and MCC frontend work with no camera or model. Imports no ultralytics, so CI stays light.
+- Real RTSP + YOLO + ByteTrack source — **Phase 2b-ii**, same interface.
+
+`test_daemon.py` drives the app via FastAPI `TestClient` against the synthetic source + an in-memory DB (no camera/model), so the full HTTP surface runs in CI. The live MJPEG stream can't be consumed cleanly through TestClient (infinite multipart blocks it), so the frame framing is unit-tested via `mjpeg_frame()` and the stream is verified end-to-end by running uvicorn.
+
+Deps for the daemon are in `requirements.txt` (fastapi, uvicorn, opencv, numpy); ultralytics/torch stay out (installed per-machine, GPU-specific). CI installs headless opencv.
 
 ## Repo layout
 
-- Root: Python vision stack (flat scripts, `.venv`, no packaging — deliberate for a single-machine project). `storage.py` + `test_storage.py` are the daemon's storage layer and its tests.
+- Root: Python vision stack (flat scripts, `.venv`, no packaging — deliberate for a single-machine project). The daemon is `merle_daemon.py` (FastAPI app) + `frames.py` (frame sources) + `storage.py` (SQLite); `test_daemon.py` and `test_storage.py` are their tests; `requirements.txt` pins the daemon deps.
 - `models/`: deployed-weights shelf — `current.pt` (what the app loads) plus versioned `merle-trainNN.pt` copies. Only its README is tracked; the `.pt` files are gitignored. See `models/README.md`.
 - `mcc/`: Next.js 16 App Router, TypeScript, Tailwind 4, pnpm. Tests: Vitest (`pnpm test`), CI runs them on every PR (`.github/workflows/tests.yml`).
 - Not in git: datasets (`training/`), weights (`*.pt`, including `models/`), captures (`hard_frames/`, `snapshots/`, `debug_frames/`), `.venv/`.
