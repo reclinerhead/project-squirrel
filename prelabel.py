@@ -16,6 +16,7 @@
 # =============================================================================
 
 import argparse
+import os
 from pathlib import Path
 from ultralytics import YOLO
 from label_utils import dedupe_boxes
@@ -31,7 +32,13 @@ folder = Path(args.dir)
 if not folder.is_dir():
     raise SystemExit(f"No such folder: {folder}")
 
-model = YOLO("C:/WEBDEV/project-squirrel/runs/detect/train-15/weights/best.pt")
+# Same deployed model live.py uses -- models/current.pt by default (override
+# with MERLE_MODEL). Pre-labeling with the newest model means better pre-drawn
+# boxes; the old hardcoded runs/ path silently lagged a training round behind.
+MODEL_PATH = os.environ.get("MERLE_MODEL", "models/current.pt")
+if not os.path.exists(MODEL_PATH):
+    raise SystemExit(f"Model not found: {MODEL_PATH} -- see models/README.md")
+model = YOLO(MODEL_PATH)
 
 # classes.txt: the id->name mapping this model (and these labels) use.
 names = model.names

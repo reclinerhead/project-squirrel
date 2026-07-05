@@ -23,7 +23,7 @@ Amcrest ──RTSP──▶ Merle daemon (YOLO + ByteTrack + FastAPI + SQLite)
 ## Vision pipeline (current)
 
 - **Camera**: Amcrest PoE at `192.168.1.102`, RTSP main stream over TCP (`OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;tcp` — UDP drops packets under load and smears frames). Camera image settings live in its web UI; `cap.set()` is ignored for RTSP. Credentials come from the `MERLE_RTSP_PASS` env var (`MERLE_RTSP_USER` optional, defaults `admin`) — never committed.
-- **Model**: YOLO26s fine-tuned on driveway data (`runs/detect/train-16/weights/best.pt`, not in git). Inference at `imgsz=1920` so distant animals survive the downscale from 4K.
+- **Model**: YOLO26s fine-tuned on driveway data. The deployed weights live in `models/` (the promoted-weights shelf), loaded from `models/current.pt` by default or `MERLE_MODEL` if set — `runs/` is training scratch and is never loaded directly. Weights are not in git (`*.pt` ignored). See `models/README.md` for the promote-a-new-model steps. Inference at `imgsz=1920` so distant animals survive the downscale from 4K.
 - **Important: the model is NMS-free** (end-to-end head). The ultralytics `iou=` argument is a no-op; duplicate boxes on one animal are possible and must be removed explicitly — `dedupe_boxes()` in `label_utils.py` (greedy, class-agnostic, IoU ≥ 0.7).
 - **Tracking**: ByteTrack (`bytetrack_squirrel.yaml`). `DETECT_FLOOR=0.10` deliberately low — weak detections sustain existing tracks through confidence dips (tracks only *start* at ≥ 0.5). Lost tracks coast for 15 frames (~1s) to paper over single-frame misses; pruned after 90.
 - **Classes**: `0=chipmunk, 1=squirrel, 2=turkey` — **append-only**. New classes get new trailing IDs; never reorder (every YOLO label file on disk depends on the mapping).
@@ -49,8 +49,9 @@ Design rules:
 ## Repo layout
 
 - Root: Python vision stack (flat scripts, `.venv`, no packaging — deliberate for a single-machine project).
+- `models/`: deployed-weights shelf — `current.pt` (what the app loads) plus versioned `merle-trainNN.pt` copies. Only its README is tracked; the `.pt` files are gitignored. See `models/README.md`.
 - `mcc/`: Next.js 16 App Router, TypeScript, Tailwind 4, pnpm. Tests: Vitest (`pnpm test`), CI runs them on every PR (`.github/workflows/tests.yml`).
-- Not in git: datasets (`training/`), weights (`*.pt`), captures (`hard_frames/`, `snapshots/`, `debug_frames/`), `.venv/`.
+- Not in git: datasets (`training/`), weights (`*.pt`, including `models/`), captures (`hard_frames/`, `snapshots/`, `debug_frames/`), `.venv/`.
 
 ## Project context
 
