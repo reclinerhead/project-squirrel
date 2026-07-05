@@ -17,19 +17,25 @@
 # =============================================================================
 
 import math
+import os
 from dataclasses import dataclass
 
 import cv2
 import numpy as np
 
+import perception
+
 
 @dataclass
 class Detection:
-    """One tracked animal in one frame. `box` is (x1, y1, x2, y2) in pixels."""
+    """One tracked animal in one frame. `box` is (x1, y1, x2, y2) in pixels.
+    `coasting` is True for a briefly-lost track still being drawn (greyed) until
+    it re-matches or ages out -- the synthetic source never coasts."""
     track_id: int
     species: str
     box: tuple
     conf: float
+    coasting: bool = False
 
 
 class FrameSource:
@@ -78,3 +84,52 @@ class SyntheticFrameSource(FrameSource):
             dets.append(Detection(3, "chipmunk", (cx - 26, cy - 20, cx + 26, cy + 20), 0.41))
 
         return frame, dets
+
+
+class RTSPFrameSource(FrameSource):
+    """The real perception source: the Amcrest RTSP feed through the same model +
+    tracker as live.py, sharing perception.py so the two can't drift. Reads the
+    camera password from MERLE_RTSP_PASS (never hardcoded) and the model from
+    MERLE_MODEL (default models/current.pt). ultralytics is imported lazily here
+    so the daemon and its tests stay importable without torch installed."""
+
+    def __init__(self):
+        from ultralytics import YOLO   # lazy: heavy, GPU-specific, camera-only path
+
+        user = os.environ.get("MERLE_RTSP_USER", "admin")
+        pw = os.environ.get("MERLE_RTSP_PASS")
+        if not pw:
+            raise RuntimeError("MERLE_RTSP_PASS is not set -- needed for the camera source.")
+        host = os.environ.get("MERLE_RTSP_HOST", "192.168.1.102")
+        url = (f"rtsp://{user}:{pw}@{host}:554/cam/realmonitor?channel=1&subtype=0")
+        # Force RTSP over TCP before opening (FFmpeg reads this once at open time);
+        # UDP silently drops packets under load and smears frames.
+        os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
+
+        self.cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"Could not open the RTSP stream at {host}. Check the "
+                               "camera is reachable and MERLE_RTSP_* are correct.")
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)   # newest frame only -> low latency
+
+        self.model = YOLO(os.environ.get("MERLE_MODEL", "models/current.pt"))
+        self.names = self.model.names
+        self.tm = perception.TrackMemory()
+
+    def read(self):
+        ok, frame = self.cap.read()
+        if not ok:
+            return None, []
+        results = self.model.track(frame, conf=perception.DETECT_FLOOR,
+                                   imgsz=perception.IMGSZ, persist=True,
+                                   tracker=perception.TRACKER_YAML, verbose=False)
+        live, coasting = self.tm.ingest(
+            perception.extract_detections(results[0], self.names))
+        dets = [Detection(tid, perception.voted(t), tuple(t["xyxy"]), t["conf"])
+                for tid, t in live]
+        dets += [Detection(tid, perception.voted(t), tuple(t["xyxy"]), t["conf"],
+                           coasting=True) for tid, t in coasting]
+        return frame, dets
+
+    def close(self):
+        self.cap.release()

@@ -65,10 +65,14 @@ The daemon is a FastAPI app. A background `Worker` thread runs the perception lo
 - `GET /snapshot` — the latest annotated frame, one JPEG.
 - `POST /control` — `start`/`stop` the loop, `record_on`/`record_off`, `set_crowd_threshold`.
 
-The **frame source** (`frames.py`) is the seam that keeps perception swappable. `FrameSource.read()` returns `(frame, [Detection, ...])`; the daemon's annotation/encoding/persistence has one implementation regardless of source, so the synthetic and real paths can't drift. Sources:
+The **frame source** (`frames.py`) is the seam that keeps perception swappable. `FrameSource.read()` returns `(frame, [Detection, ...])` (each `Detection` has a `coasting` flag); the daemon's annotation/encoding/persistence has one implementation regardless of source, so the synthetic and real paths can't drift. Selected at startup by `MERLE_SOURCE` (`camera` → real feed; anything else → synthetic). Sources:
 
 - `SyntheticFrameSource` — camera-free (a couple of squirrels + a visiting chipmunk, motion a pure function of a frame counter so it's deterministic). Powers the tests, local dev, and MCC frontend work with no camera or model. Imports no ultralytics, so CI stays light.
-- Real RTSP + YOLO + ByteTrack source — **Phase 2b-ii**, same interface.
+- `RTSPFrameSource` — the real Amcrest feed through the same model + tracker as live.py, sharing `perception.py`. Reads the password from `MERLE_RTSP_PASS`, the model from `MERLE_MODEL`; lazy-imports ultralytics so the daemon stays importable without torch. Coasting tracks are flagged (drawn grey, and not counted as matched frames in `sightings`).
+
+### Shared perception (`perception.py`)
+
+The tracker bookkeeping and box-drawing are shared by **both** live.py and `RTSPFrameSource` so they can never drift (a real bug we already hit once between two files). It holds the detector/tracker config (`DETECT_FLOOR`, `IMGSZ`, tracker yaml, coasting windows, the hard-example flicker band, class colors), `extract_detections()` (pull ID-carrying detections out of a `model.track` result, ignoring the ID-less leak), `TrackMemory` (the coast/prune/vote bookkeeping + the `seen` run-total census), and `draw_tracks()` (boxes + labels; `scale=1.0` is tuned for 4K — the daemon passes `frame_height/2160`). Imports no ultralytics, so `test_perception.py` covers the bookkeeping camera-free. live.py is now a thin consumer of it; the model inference and RTSP capture (the untestable-in-CI parts) live in `RTSPFrameSource` and are verified against the real camera.
 
 `test_daemon.py` drives the app via FastAPI `TestClient` against the synthetic source + an in-memory DB (no camera/model), so the full HTTP surface runs in CI. The live MJPEG stream can't be consumed cleanly through TestClient (infinite multipart blocks it), so the frame framing is unit-tested via `mjpeg_frame()` and the stream is verified end-to-end by running uvicorn.
 
@@ -76,7 +80,7 @@ Deps for the daemon are in `requirements.txt` (fastapi, uvicorn, opencv, numpy);
 
 ## Repo layout
 
-- Root: Python vision stack (flat scripts, `.venv`, no packaging — deliberate for a single-machine project). The daemon is `merle_daemon.py` (FastAPI app) + `frames.py` (frame sources) + `storage.py` (SQLite); `test_daemon.py` and `test_storage.py` are their tests; `requirements.txt` pins the daemon deps.
+- Root: Python vision stack (flat scripts, `.venv`, no packaging — deliberate for a single-machine project). `perception.py` is the shared tracker/annotation brain (used by live.py and the daemon). The daemon is `merle_daemon.py` (FastAPI app) + `frames.py` (frame sources) + `storage.py` (SQLite); `test_perception.py` / `test_daemon.py` / `test_storage.py` are the tests; `requirements.txt` pins the daemon deps.
 - `models/`: deployed-weights shelf — `current.pt` (what the app loads) plus versioned `merle-trainNN.pt` copies. Only its README is tracked; the `.pt` files are gitignored. See `models/README.md`.
 - `mcc/`: Next.js 16 App Router, TypeScript, Tailwind 4, pnpm. Tests: Vitest (`pnpm test`), CI runs them on every PR (`.github/workflows/tests.yml`).
 - Not in git: datasets (`training/`), weights (`*.pt`, including `models/`), captures (`hard_frames/`, `snapshots/`, `debug_frames/`), `.venv/`.

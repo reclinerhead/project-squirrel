@@ -23,6 +23,7 @@ from datetime import datetime
 from collections import deque, Counter
 from ultralytics import YOLO
 from label_utils import dedupe_boxes
+import perception
 
 # --- Single-instance guard ------------------------------------------------
 # A second copy of this script -- or a crashed/zombie one that never let go --
@@ -124,20 +125,10 @@ print(f"Capture: {int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x"
       f"{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))} @ "
       f"{cap.get(cv2.CAP_PROP_FPS):.0f}fps ({fourcc})")
 
-# --- Detection confidence & the tracker ---------------------------------
-# DETECT_FLOOR is the lowest score a detection needs just to REACH the tracker.
-# Keep it low (0.10). Counter-intuitive, but deliberate: ByteTrack (configured
-# in bytetrack_squirrel.yaml) re-uses these weak detections to hold an
-# already-established track together through the low-confidence frames of a
-# walking or turning animal -- the exact cause of the box flickering off
-# mid-stride. 0.10 matches track_low_thresh in the yaml, so ByteTrack's whole
-# second-stage recovery band actually reaches it (at the old 0.15 floor,
-# detections in 0.10-0.15 were filtered out before the tracker could use them).
-# A low floor does NOT spawn junk tracks: a brand-new track only starts from a
-# CONFIDENT detection (new_track_thresh: 0.5 in the yaml). So confident
-# detections start tracks; weak ones only sustain existing ones.
-DETECT_FLOOR = 0.10
-TRACKER_YAML = "C:/WEBDEV/project-squirrel/bytetrack_squirrel.yaml"
+# The detection floor, tracker config, inference size, coasting windows, class
+# colors, the hard-example flicker band, and the box-drawing all live in
+# perception.py now -- shared with the daemon's camera source so the two can't
+# drift. See there for the rationale behind each.
 
 # Snapshot settings: save a picture when a crowd of animals is in frame. The
 # threshold counts every detection regardless of class (squirrel, chipmunk,
@@ -198,40 +189,22 @@ recording = False
 video_writer = None
 RECORD_FPS = 15   # the camera runs ~15fps; playback speed is therefore approximate
 
-# Rolling tally of every distinct animal seen this run: maps each ByteTrack ID
-# to its class name, so len(seen_ids) is the cumulative unique count and
-# Counter(seen_ids.values()) breaks it down per class. Caveat: this counts track
-# IDs, so it OVER-counts whenever the tracker fragments one animal into a new ID
-# -- after a long occlusion, or when two look-alike squirrels cross and swap.
-# Treat it as a lively upper estimate, not an exact census.
-seen_ids = {}
+# The tracker's coasting + class-voting bookkeeping lives in
+# perception.TrackMemory (shared with the daemon). Inside it, tm.seen is the
+# run-total census: every distinct ByteTrack ID this run mapped to its voted
+# class. Caveat: it counts track IDs, so it OVER-counts when the tracker
+# fragments one animal into a new ID (after a long occlusion, or when two
+# look-alikes cross and swap) -- a lively upper estimate, not an exact census.
+tm = perception.TrackMemory()
 
-# --- Track memory: coasted boxes and per-track class votes ----------------
-# ByteTrack keeps a lost track alive internally (track_buffer in the yaml) but
-# only OUTPUTS tracks that matched a detection THIS frame -- so a single missed
-# frame used to blink the box off even though the tracker never lost the
-# animal. Remember each track's last box and keep drawing it (greyed) for
-# COAST_FRAMES after its last match: at the camera's ~15fps that's ~1 second,
-# which papers over exactly the one-or-two-frame detector misses that cause
-# the flicker. A feeding animal barely moves, so the coasted box stays honest.
-COAST_FRAMES = 15            # keep drawing a lost track for this many frames
-PRUNE_FRAMES = 90            # forget it entirely after ~6s unseen
-track_memory = {}            # tid -> {"xyxy", "conf", "last_frame", "votes"}
-frame_idx = 0
-
-# Stable per-class box colors (BGR), assigned once from the model's own class
-# list so each class keeps its color from run to run. Coasted boxes draw grey.
-PALETTE = [(56, 56, 255), (31, 112, 255), (49, 210, 207), (10, 249, 72),
-           (255, 149, 0), (255, 0, 170), (29, 178, 255)]
-CLASS_COLORS = {name: PALETTE[i % len(PALETTE)] for i, name in model.names.items()}
+CLASS_COLORS = perception.class_colors(model.names)
 NAME_TO_ID = {name: i for i, name in model.names.items()}  # for YOLO label sidecars
 
 # --- Hard-example saver ----------------------------------------------------
-# When a LIVE track's confidence sits in the "flicker band", the model is
-# telling us this exact frame is hard for it. Save the raw frame (no boxes) to
-# hard_frames/ for labeling -- for the next training round these are worth far
-# more than another hundred easy, well-lit squirrel frames.
-HARD_LO, HARD_HI = 0.15, 0.50
+# When a LIVE track's confidence sits in the "flicker band" (perception.HARD_LO
+# .. HARD_HI), the model is telling us this exact frame is hard for it. Save the
+# raw frame (no boxes) to hard_frames/ for labeling -- for the next training
+# round these are worth far more than another hundred easy, well-lit squirrels.
 HARD_COOLDOWN = 5.0          # seconds between saves
 last_hard = 0.0
 
@@ -268,58 +241,23 @@ while True:
     # calls. ByteTrack is the tracker: when a walking squirrel's score dips, its
     # weak detection (down to DETECT_FLOOR) is re-used to keep its existing track
     # alive -- so the box stays put through the dip instead of blinking off.
-    results = model.track(frame, conf=DETECT_FLOOR, imgsz=1920, persist=True,
-                          tracker=TRACKER_YAML, verbose=False)
+    results = model.track(frame, conf=perception.DETECT_FLOOR, imgsz=perception.IMGSZ,
+                          persist=True, tracker=perception.TRACKER_YAML, verbose=False)
     raw = results[0].boxes
     names = results[0].names
-    frame_idx += 1
 
-    # Only boxes carrying a track ID count as real animals. This guard matters:
-    # on a frame where the tracker matches NOTHING, ultralytics skips its
-    # filtering step entirely (`if len(tracks) == 0: continue` in trackers/
-    # track.py), so every raw detection down to DETECT_FLOOR leaks through,
-    # ID-less. Counting or drawing those is what caused one-frame phantom boxes.
-    if raw.id is not None:
-        for tid, cls_id, score, xyxy in zip(raw.id.int().tolist(), raw.cls,
-                                            raw.conf, raw.xyxy):
-            t = track_memory.setdefault(tid, {"votes": Counter()})
-            t["xyxy"] = [int(v) for v in xyxy]
-            t["conf"] = float(score)
-            t["last_frame"] = frame_idx
-            # Majority-vote the class over the track's lifetime, so one animal
-            # can't flicker between "squirrel" and "chipmunk" frame to frame.
-            # The same voted label feeds the run-total census below.
-            t["votes"][names[int(cls_id)]] += 1
-            seen_ids[tid] = t["votes"].most_common(1)[0][0]
-
-    # Split remembered tracks into live (matched this frame) and coasting
-    # (missed recently -- still drawn, greyed, until COAST_FRAMES runs out).
-    live_tracks, coasting = [], []
-    for tid, t in list(track_memory.items()):
-        age = frame_idx - t["last_frame"]
-        if age == 0:
-            live_tracks.append((tid, t))
-        elif age <= COAST_FRAMES:
-            coasting.append((tid, t))
-        elif age > PRUNE_FRAMES:
-            del track_memory[tid]
+    # Feed this frame's ID-carrying detections into the shared tracker memory,
+    # which returns the live (matched now) / coasting (missed recently, still
+    # drawn greyed) split and keeps the class votes + run-total census (tm.seen).
+    live_tracks, coasting = tm.ingest(perception.extract_detections(results[0], names))
 
     # Draw boxes ourselves instead of results[0].plot(): plot() only knows this
     # frame's matches, so it can neither coast a briefly-lost track nor use the
-    # voted label. Font scale 1.3 / thickness 3 matches what plot(line_width=4)
-    # rendered at 4K, so the look is unchanged.
+    # voted label. At full 4K, scale=1.0 renders the same as before.
     annotated = frame.copy()
-    for tid, t in live_tracks + coasting:
-        label = t["votes"].most_common(1)[0][0]
-        color = CLASS_COLORS[label] if t["last_frame"] == frame_idx else (128, 128, 128)
-        x1, y1, x2, y2 = t["xyxy"]
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 4)
-        tag = f"{label} #{tid}"
-        (tw, th), tb = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 1.3, 3)
-        ty = y1 - 10 if y1 - th - tb - 10 >= 0 else y2 + th + tb + 10  # flip below if clipped
-        cv2.rectangle(annotated, (x1, ty - th - tb), (x1 + tw + 8, ty + tb), color, -1)
-        cv2.putText(annotated, tag, (x1 + 4, ty), cv2.FONT_HERSHEY_SIMPLEX, 1.3,
-                    (255, 255, 255), 3, cv2.LINE_AA)
+    items = [(tid, perception.voted(t), t["xyxy"], True) for tid, t in live_tracks]
+    items += [(tid, perception.voted(t), t["xyxy"], False) for tid, t in coasting]
+    perception.draw_tracks(annotated, items, CLASS_COLORS, scale=1.0)
 
     # An animal counts while its track is live OR coasting -- the same
     # hysteresis the boxes get, so the readout doesn't dip on a missed frame.
@@ -343,7 +281,8 @@ while True:
     # teach the next model "that's background", which is worse than a box a few
     # frames stale. Every sidecar gets human review before training anyway.
     if (time.time() - last_hard >= HARD_COOLDOWN
-            and any(HARD_LO <= t["conf"] < HARD_HI for _, t in live_tracks)):
+            and any(perception.HARD_LO <= t["conf"] < perception.HARD_HI
+                    for _, t in live_tracks)):
         os.makedirs("hard_frames", exist_ok=True)
         stem = f"hard_frames/hard_{datetime.now():%Y%m%d_%H%M%S}"
         cv2.imwrite(stem + ".jpg", frame)
@@ -409,7 +348,7 @@ while True:
     readout = f"{readout}   {sum(fps_history) / len(fps_history):.0f} fps"
 
     # Second line: cumulative distinct animals seen since startup, per class.
-    run_counts = Counter(seen_ids.values())
+    run_counts = Counter(tm.seen.values())
     if run_counts:
         line2 = "run total: " + "   ".join(f"{n} {name}"
                                             for name, n in sorted(run_counts.items()))
