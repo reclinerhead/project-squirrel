@@ -42,6 +42,7 @@ CLASS_COLORS = perception.class_colors({0: "chipmunk", 1: "squirrel", 2: "turkey
 
 TARGET_FPS = 15          # cap the loop; the real camera runs ~15fps anyway
 CROWD_COOLDOWN = 10.0    # seconds between crowd-snapshot events, like live.py
+NO_FRAME_RETRY = 0.25    # pause between reads while the source has no frame
 
 
 def mjpeg_frame(jpeg):
@@ -79,25 +80,61 @@ class SharedState:
         self.counts = {}            # live per-class counts
         self.tracks = []            # live tracks: [{track_id, species, conf, box}]
         self.fps = 0.0
+        self.signal = True          # is the source currently delivering frames?
 
 
 class Worker(threading.Thread):
     """The perception loop, headless. Pulls frames from the source, annotates,
     encodes, publishes to SharedState, and persists sightings/events to SQLite."""
 
-    def __init__(self, source, state, conn, control):
+    def __init__(self, source, state, conn, control, db_lock):
         super().__init__(daemon=True)
         self.source = source
         self.state = state
         self.conn = conn
         self.control = control
+        self.db_lock = db_lock   # serialize DB access with the request threads
         self._stop = threading.Event()
         self._last_crowd = 0.0
         self._loop_times = deque(maxlen=30)   # wall-clock interval between loops
         self._prev_loop = None
+        self.writer = None                    # cv2.VideoWriter while recording
+        self.clip_path = None
 
     def stop(self):
         self._stop.set()
+
+    def _record(self, annotated, ts):
+        """Drive the clip recorder off control.recording. Records the ANNOTATED
+        stream (boxes and all): the dashboard's clips are for watching/sharing a
+        moment. live.py's V key still writes RAW clips, which is what you sample
+        for training stills. All handled in this one worker thread, so the
+        VideoWriter is never touched cross-thread."""
+        if self.control.recording:
+            if self.writer is None:
+                os.makedirs("debug_frames", exist_ok=True)
+                self.clip_path = f"debug_frames/clip_{datetime.now():%Y%m%d_%H%M%S}.mp4"
+                h, w = annotated.shape[:2]
+                writer = cv2.VideoWriter(self.clip_path,
+                                         cv2.VideoWriter_fourcc(*"mp4v"),
+                                         TARGET_FPS, (w, h))
+                if not writer.isOpened():
+                    print(f"Recording failed to open: {self.clip_path}")
+                    self.control.recording = False   # flip back so /state is honest
+                    self.clip_path = None
+                    return
+                self.writer = writer
+            self.writer.write(annotated)
+        elif self.writer is not None:
+            self._finish_clip(ts)
+
+    def _finish_clip(self, ts):
+        self.writer.release()
+        with self.db_lock:
+            storage.record_event(self.conn, ts, "clip_recorded", {"path": self.clip_path})
+        print(f"Clip saved: {self.clip_path}")
+        self.writer = None
+        self.clip_path = None
 
     def run(self):
         while not self._stop.is_set():
@@ -116,24 +153,35 @@ class Worker(threading.Thread):
 
             frame, dets = self.source.read()
             if frame is None:
-                break
+                # No frame this cycle -- the source is reconnecting (e.g. the
+                # camera restarted after a settings change). Flag "no signal" and
+                # keep the loop ALIVE; a single dropped read must never kill
+                # perception (that used to freeze the feed until a full restart).
+                # The source reconnects itself; we just keep asking.
+                with self.state.lock:
+                    self.state.signal = False
+                time.sleep(NO_FRAME_RETRY)
+                continue
 
             ts = datetime.now().isoformat(timespec="seconds")
-            for d in dets:
-                if d.coasting:
-                    continue   # bank only frames the animal was actually matched
-                storage.upsert_sighting(self.conn, self.state.session_id,
-                                        d.track_id, d.species, ts, d.conf)
+            with self.db_lock:
+                for d in dets:
+                    if d.coasting:
+                        continue   # bank only frames the animal was actually matched
+                    storage.upsert_sighting(self.conn, self.state.session_id,
+                                            d.track_id, d.species, ts, d.conf)
 
             # Crowd moment: enough animals at once, and cooled down since the last.
             now = time.time()
             if len(dets) >= self.control.crowd_threshold and now - self._last_crowd >= CROWD_COOLDOWN:
                 counts = dict(Counter(d.species for d in dets))
-                storage.record_event(self.conn, ts, "crowd_snapshot",
-                                     {"total": len(dets), "counts": counts})
+                with self.db_lock:
+                    storage.record_event(self.conn, ts, "crowd_snapshot",
+                                         {"total": len(dets), "counts": counts})
                 self._last_crowd = now
 
             annotated = annotate(frame, dets)
+            self._record(annotated, ts)
             ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
 
             counts = dict(Counter(d.species for d in dets))
@@ -141,6 +189,7 @@ class Worker(threading.Thread):
                        "conf": round(d.conf, 3), "box": list(d.box),
                        "coasting": d.coasting} for d in dets]
             with self.state.lock:
+                self.state.signal = True
                 if ok:
                     self.state.jpeg = buf.tobytes()
                 self.state.counts = counts
@@ -152,10 +201,24 @@ class Worker(threading.Thread):
             dt = time.perf_counter() - t0
             time.sleep(max(0.0, 1.0 / TARGET_FPS - dt))
 
+        # Loop ended (stop or lost feed): close any open clip so it isn't left
+        # truncated.
+        if self.writer is not None:
+            self._finish_clip(datetime.now().isoformat(timespec="seconds"))
+
 
 class ControlCommand(BaseModel):
     action: str                      # start | stop | record_on | record_off | set_crowd_threshold
     value: int | None = None
+
+
+def _read_db_summary(conn, session_id, db_lock):
+    """The DB-backed part of /state, read under the shared lock."""
+    with db_lock:
+        return {
+            "totals": storage.species_totals(conn, session_id),
+            "recent_events": storage.recent_events(conn, 10),
+        }
 
 
 def create_app(source, conn):
@@ -165,15 +228,27 @@ def create_app(source, conn):
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     state = SharedState(session_id)
     control = Control()
-    worker = Worker(source, state, conn, control)
+    # One SQLite connection is shared between the worker thread (writing every
+    # frame) and the request threadpool (reading /state). A single connection is
+    # NOT safe for concurrent use across threads -- check_same_thread=False only
+    # silences the guard, it doesn't serialize access, and the race surfaces as
+    # "sqlite3.InterfaceError: bad parameter or other API misuse". This lock is
+    # held around every DB access so no two threads touch the connection at once.
+    db_lock = threading.Lock()
 
     @asynccontextmanager
     async def lifespan(app):
+        # `source` may be a FrameSource (tests pass one directly) OR a zero-arg
+        # factory. The runtime app passes a factory so that IMPORTING this module
+        # never opens the camera or loads the model -- that only happens here, at
+        # server startup, which pytest/CI never trigger for the module-level app.
+        src = source() if callable(source) else source
+        worker = Worker(src, state, conn, control, db_lock)
         worker.start()
         yield
         worker.stop()
         worker.join(timeout=2)
-        source.close()
+        src.close()
 
     app = FastAPI(title="Merle daemon", lifespan=lifespan)
     # Exposed for tests to reach the worker/control directly.
@@ -185,15 +260,15 @@ def create_app(source, conn):
         with state.lock:
             live = {"counts": dict(state.counts),
                     "tracks": list(state.tracks),
-                    "fps": state.fps}
+                    "fps": state.fps,
+                    "signal": state.signal}
         return {
             "session_id": session_id,
             "running": control.running,
             "recording": control.recording,
             "crowd_threshold": control.crowd_threshold,
             "live": live,
-            "totals": storage.species_totals(conn, session_id),
-            "recent_events": storage.recent_events(conn, 10),
+            **_read_db_summary(conn, session_id, db_lock),
         }
 
     @app.get("/snapshot")
@@ -244,15 +319,17 @@ def create_app(source, conn):
 
 
 def make_source():
-    """Pick the frame source from MERLE_SOURCE: 'camera' for the real Amcrest
-    feed (lazy-imports ultralytics), anything else (default) for the synthetic
-    source. The synthetic default keeps `uvicorn merle_daemon:app`, tests, and
-    MCC frontend work camera-free."""
-    if os.environ.get("MERLE_SOURCE") == "camera":
-        from frames import RTSPFrameSource
-        return RTSPFrameSource()
-    return SyntheticFrameSource()
+    """Pick the frame source from MERLE_SOURCE. Default is 'camera' (the real
+    Amcrest feed) so `uvicorn merle_daemon:app` just works day to day; set
+    MERLE_SOURCE=synthetic for the camera-free test world. Called at startup, not
+    at import, so importing this module never opens the camera or loads the model."""
+    if os.environ.get("MERLE_SOURCE", "camera") == "synthetic":
+        return SyntheticFrameSource()
+    from frames import RTSPFrameSource   # lazy: heavy + camera-only
+    return RTSPFrameSource()
 
 
-# Module-level app for `uvicorn merle_daemon:app`.
-app = create_app(make_source(), storage.connect(os.environ.get("MERLE_DB", "merle.db")))
+# Module-level app for `uvicorn merle_daemon:app`. make_source is passed as a
+# FACTORY (not called here) so import stays side-effect-free; the lifespan calls
+# it at startup.
+app = create_app(make_source, storage.connect(os.environ.get("MERLE_DB", "merle.db")))

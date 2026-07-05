@@ -18,12 +18,15 @@
 
 import math
 import os
+import time
 from dataclasses import dataclass
 
 import cv2
 import numpy as np
 
 import perception
+
+RECONNECT_INTERVAL = 3.0   # seconds between RTSP reconnect attempts
 
 
 @dataclass
@@ -100,25 +103,45 @@ class RTSPFrameSource(FrameSource):
         pw = os.environ.get("MERLE_RTSP_PASS")
         if not pw:
             raise RuntimeError("MERLE_RTSP_PASS is not set -- needed for the camera source.")
-        host = os.environ.get("MERLE_RTSP_HOST", "192.168.1.102")
-        url = (f"rtsp://{user}:{pw}@{host}:554/cam/realmonitor?channel=1&subtype=0")
+        self.host = os.environ.get("MERLE_RTSP_HOST", "192.168.1.102")
+        self.url = (f"rtsp://{user}:{pw}@{self.host}:554"
+                    "/cam/realmonitor?channel=1&subtype=0")
         # Force RTSP over TCP before opening (FFmpeg reads this once at open time);
         # UDP silently drops packets under load and smears frames.
         os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
 
-        self.cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+        self.cap = self._open()
         if not self.cap.isOpened():
-            raise RuntimeError(f"Could not open the RTSP stream at {host}. Check the "
-                               "camera is reachable and MERLE_RTSP_* are correct.")
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)   # newest frame only -> low latency
+            raise RuntimeError(f"Could not open the RTSP stream at {self.host}. Check "
+                               "the camera is reachable and MERLE_RTSP_* are correct.")
+        self._last_reopen = 0.0
 
         self.model = YOLO(os.environ.get("MERLE_MODEL", "models/current.pt"))
         self.names = self.model.names
         self.tm = perception.TrackMemory()
 
+    def _open(self):
+        cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)   # newest frame only -> low latency
+        return cap
+
+    def _maybe_reopen(self):
+        """A dropped/reconfigured stream (e.g. the camera restarting after a
+        settings change) makes reads fail indefinitely until the capture is
+        re-opened. Retry on an interval so we recover on our own instead of
+        freezing on the last frame -- but not so fast we thrash FFmpeg."""
+        now = time.time()
+        if now - self._last_reopen < RECONNECT_INTERVAL:
+            return
+        self._last_reopen = now
+        print(f"RTSP read failed -- reconnecting to {self.host}…")
+        self.cap.release()
+        self.cap = self._open()
+
     def read(self):
         ok, frame = self.cap.read()
         if not ok:
+            self._maybe_reopen()
             return None, []
         results = self.model.track(frame, conf=perception.DETECT_FLOOR,
                                    imgsz=perception.IMGSZ, persist=True,

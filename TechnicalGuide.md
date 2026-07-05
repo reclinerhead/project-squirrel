@@ -63,12 +63,12 @@ The daemon is a FastAPI app. A background `Worker` thread runs the perception lo
 - `GET /state` — session id, control flags, live counts/tracks/fps, run totals, recent events (JSON).
 - `GET /stream` — the annotated feed as `multipart/x-mixed-replace` MJPEG (an `<img src>` in the browser; no player). Async + `is_disconnected()` so a closed tab frees the generator.
 - `GET /snapshot` — the latest annotated frame, one JPEG.
-- `POST /control` — `start`/`stop` the loop, `record_on`/`record_off`, `set_crowd_threshold`.
+- `POST /control` — `start`/`stop` the loop, `record_on`/`record_off`, `set_crowd_threshold`. Recording writes the **annotated** stream to `debug_frames/clip_*.mp4` (mp4v) from the worker thread — for watching/sharing a moment. (live.py's `V` key still writes *raw* clips, which is what you sample for training stills.) The writer is closed cleanly on `record_off`, lost feed, or shutdown, and a `clip_recorded` event is logged.
 
-The **frame source** (`frames.py`) is the seam that keeps perception swappable. `FrameSource.read()` returns `(frame, [Detection, ...])` (each `Detection` has a `coasting` flag); the daemon's annotation/encoding/persistence has one implementation regardless of source, so the synthetic and real paths can't drift. Selected at startup by `MERLE_SOURCE` (`camera` → real feed; anything else → synthetic). Sources:
+The **frame source** (`frames.py`) is the seam that keeps perception swappable. `FrameSource.read()` returns `(frame, [Detection, ...])` (each `Detection` has a `coasting` flag); the daemon's annotation/encoding/persistence has one implementation regardless of source, so the synthetic and real paths can't drift. Selected by `MERLE_SOURCE` — **default `camera`** (the real feed, so `uvicorn merle_daemon:app` just works); set `MERLE_SOURCE=synthetic` for the camera-free world. The source is built lazily **at server startup** (the module-level app passes a factory, not an instance), so importing the daemon never opens the camera or loads the model — that's what keeps tests/CI camera-free even with a camera default. Sources:
 
 - `SyntheticFrameSource` — camera-free (a couple of squirrels + a visiting chipmunk, motion a pure function of a frame counter so it's deterministic). Powers the tests, local dev, and MCC frontend work with no camera or model. Imports no ultralytics, so CI stays light.
-- `RTSPFrameSource` — the real Amcrest feed through the same model + tracker as live.py, sharing `perception.py`. Reads the password from `MERLE_RTSP_PASS`, the model from `MERLE_MODEL`; lazy-imports ultralytics so the daemon stays importable without torch. Coasting tracks are flagged (drawn grey, and not counted as matched frames in `sightings`).
+- `RTSPFrameSource` — the real Amcrest feed through the same model + tracker as live.py, sharing `perception.py`. Reads the password from `MERLE_RTSP_PASS`, the model from `MERLE_MODEL`; lazy-imports ultralytics so the daemon stays importable without torch. Coasting tracks are flagged (drawn grey, and not counted as matched frames in `sightings`). **Self-healing**: a failed read (camera restarted after a settings change, network blip) triggers a throttled reconnect (`RECONNECT_INTERVAL`) instead of freezing forever. The worker treats a `None` frame as transient — it flags `live.signal=false` and keeps polling rather than exiting, so a dropped stream never kills perception (it used to `break`, which froze the feed until a manual restart). The dashboard shows a distinct "reconnecting" veil while `signal` is false.
 
 ### Shared perception (`perception.py`)
 
@@ -77,6 +77,16 @@ The tracker bookkeeping and box-drawing are shared by **both** live.py and `RTSP
 `test_daemon.py` drives the app via FastAPI `TestClient` against the synthetic source + an in-memory DB (no camera/model), so the full HTTP surface runs in CI. The live MJPEG stream can't be consumed cleanly through TestClient (infinite multipart blocks it), so the frame framing is unit-tested via `mjpeg_frame()` and the stream is verified end-to-end by running uvicorn.
 
 Deps for the daemon are in `requirements.txt` (fastapi, uvicorn, opencv, numpy); ultralytics/torch stay out (installed per-machine, GPU-specific). CI installs headless opencv.
+
+### The MCC dashboard (`mcc/`)
+
+The daemon's face: a Next.js App Router app, one page, one client component (`components/Dashboard.tsx`) that polls `/daemon/state` every second and renders the live MJPEG stream plus the instrument rail (current counts, run census, controls, event log, and coming-soon placeholders for future panels).
+
+- **All daemon traffic goes through a rewrite proxy** (`next.config.ts`: `/daemon/:path*` → `MERLE_DAEMON_URL`, default `localhost:8000`). The browser stays same-origin — no CORS in the daemon — and a phone on the LAN reaching the dev server also reaches the daemon through it. Verified that the infinite MJPEG stream flows through the rewrite un-buffered.
+- **Design language: "Ranger Station, Night Watch"** — pine-black panels with topographic-contour background, Fraunces display type + Sometype Mono telemetry, and species accent colors that are the *actual box colors* the vision stack draws (squirrel `#FF7031`, chipmunk `#FF3838`, turkey `#CFD231`), so the UI and stream read as one instrument. Tokens live as CSS variables in `app/globals.css`.
+- **Daemon-down UX**: a failed `/state` poll shows the "Merle is asleep" panel with the wake command; when polls recover, the `<img>` is remounted (key bump) to reconnect the stream.
+- Pure display logic (event-line formatting, count sorting) lives in `lib/daemon.ts` with Vitest coverage; components themselves are visual and untested per the testing policy.
+- Known UI gotchas encoded in comments: no `Date.now()` in render (SSR/client hydration mismatch), and rapid threshold-stepper clicks go through a ref so they compound instead of re-sending one stale value.
 
 ## Repo layout
 
