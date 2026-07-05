@@ -195,9 +195,18 @@ export default function Dashboard() {
               <Button
                 onClick={() => control(state?.running ? "stop" : "start")}
                 disabled={!state || asleep}
-                tone={state?.running ? "dim" : "go"}
+                // Neutral (not green/"resume") until we actually know the state
+                // -- before the first poll lands the button would otherwise look
+                // paused even while the feed is live (very visible on mobile).
+                tone={!state || asleep ? undefined : state.running ? "dim" : "go"}
               >
-                {state?.running ? "◼ stand down" : "▶ resume watch"}
+                {asleep
+                  ? "daemon asleep"
+                  : !state
+                    ? "connecting…"
+                    : state.running
+                      ? "◼ stand down"
+                      : "▶ resume watch"}
               </Button>
               <div className="flex gap-2">
                 {/* A still camera to grab one frame, a movie camera to roll a
@@ -420,33 +429,57 @@ function VideoFeed({
   streamKey: number;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [isFull, setIsFull] = useState(false);
+  const [nativeFull, setNativeFull] = useState(false);
+  // iOS Safari can't fullscreen a non-<video> element (requestFullscreen is
+  // absent on the container), so where the native API is unavailable we fall
+  // back to a CSS overlay that fills the viewport. `full` covers both.
+  const [cssFull, setCssFull] = useState(false);
+  const full = nativeFull || cssFull;
   const dimmed = paused || reconnecting;
 
-  // Track native fullscreen state (also catches Escape, which the browser
-  // handles for us -- no keydown listener needed).
+  // Track native fullscreen state (also catches Escape, handled by the browser).
   useEffect(() => {
     const onChange = () =>
-      setIsFull(document.fullscreenElement === containerRef.current);
+      setNativeFull(document.fullscreenElement === containerRef.current);
     document.addEventListener("fullscreenchange", onChange);
     return () => document.removeEventListener("fullscreenchange", onChange);
   }, []);
 
+  // For the CSS-overlay path, wire Escape ourselves (the native path already has
+  // it) and lock body scroll while the overlay is up.
+  useEffect(() => {
+    if (!cssFull) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setCssFull(false);
+    window.addEventListener("keydown", onKey);
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = "";
+    };
+  }, [cssFull]);
+
   const toggleFull = useCallback(() => {
     if (document.fullscreenElement) {
       document.exitFullscreen();
+    } else if (cssFull) {
+      setCssFull(false);
+    } else if (containerRef.current?.requestFullscreen) {
+      containerRef.current.requestFullscreen().catch(() => setCssFull(true));
     } else {
-      containerRef.current?.requestFullscreen?.();
+      setCssFull(true); // iOS Safari and other no-API browsers
     }
-  }, []);
+  }, [cssFull]);
 
   return (
     <div
       ref={containerRef}
       onDoubleClick={toggleFull}
-      className={`group relative bg-black ${
-        isFull ? "flex h-full items-center justify-center" : ""
-      }`}
+      // `relative` and `fixed` are both position values -- apply exactly one, or
+      // they conflict and `relative` wins, trapping the CSS-fullscreen overlay
+      // at panel size instead of filling the viewport.
+      className={`group bg-black ${
+        full ? "flex items-center justify-center" : ""
+      } ${cssFull ? "fixed inset-0 z-50" : "relative"}`}
     >
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
@@ -454,7 +487,7 @@ function VideoFeed({
         src={STREAM_URL}
         alt="Live annotated driveway feed"
         className={`block bg-black object-contain transition-[opacity,filter] duration-500 ${
-          isFull ? "h-full w-full" : "aspect-video w-full"
+          full ? "h-full max-h-full w-full" : "aspect-video w-full"
         } ${dimmed ? "opacity-30 grayscale" : ""}`}
       />
 
@@ -482,15 +515,16 @@ function VideoFeed({
         </div>
       )}
 
-      {/* Fullscreen toggle, YouTube-style: fades in on hover, lives bottom-right
-          so it's reachable in fullscreen too. Escape or double-click also exit. */}
+      {/* Fullscreen toggle, YouTube-style, bottom-right (reachable in fullscreen
+          too). Always visible on touch (no hover there); hover-revealed on
+          desktop. Escape or double-click also exit. */}
       <button
         type="button"
         onClick={toggleFull}
-        aria-label={isFull ? "Exit full screen" : "Full screen"}
-        className="absolute bottom-3 right-3 rounded-sm bg-black/50 p-2 text-ink/80 opacity-0 backdrop-blur-sm transition-opacity hover:text-squirrel focus-visible:opacity-100 group-hover:opacity-100"
+        aria-label={full ? "Exit full screen" : "Full screen"}
+        className="absolute bottom-3 right-3 rounded-sm bg-black/50 p-2 text-ink/80 opacity-100 backdrop-blur-sm transition-opacity hover:text-squirrel focus-visible:opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
       >
-        {isFull ? <CompressIcon /> : <ExpandIcon />}
+        {full ? <CompressIcon /> : <ExpandIcon />}
       </button>
     </div>
   );
