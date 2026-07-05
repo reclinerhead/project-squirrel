@@ -46,9 +46,19 @@ Design rules:
 - **Video to the browser is MJPEG** (`/stream`, downscale-then-encode, q≈85) — browsers can't speak RTSP. Full-res single frames via `/snapshot`. WebRTC only if remote/multi-viewer needs appear.
 - **Runtime is local-only.** The MCC is not hostable on Vercel (needs LAN camera + GPU). Remote access later = Tailscale.
 
+### Storage (`storage.py`)
+
+The daemon's persistent memory is a single SQLite file (stdlib `sqlite3`, no server, no extra deps — back it up by copying the file). Timestamps are ISO-8601 strings passed in by the caller, never generated inside storage, so every function is pure and deterministic for tests. Three tables:
+
+- **`sightings`** — one row per tracked animal, keyed by `(session_id, track_id)`. ByteTrack ids only mean something within a single daemon run (they reset on restart), so `session_id` (the run identifier) disambiguates. Accumulates `frames`, `first/last_seen`, and running `max_conf`; `species` holds the latest voted class.
+- **`events`** — notable moments (hard frame saved, crowd snapshot, clip recorded). `kind` classifies; `details` is a free-form JSON blob so new event types need no schema change. Per the filesystem rule, an event records a frame's *path*, not the frame.
+- **`training_runs`** — one row per training round for the dashboard's metrics-over-time panel. Headline `map50`/`recall`/`map50_95` are columns; per-class detail is JSON in `metrics`. Keyed by `run_name` (PK) so seeding is idempotent. Seeded with the train-15 and train-16 baseline (0705 valid split).
+
+Pure-logic tests in `test_storage.py` run in CI (stdlib-only, no model/camera).
+
 ## Repo layout
 
-- Root: Python vision stack (flat scripts, `.venv`, no packaging — deliberate for a single-machine project).
+- Root: Python vision stack (flat scripts, `.venv`, no packaging — deliberate for a single-machine project). `storage.py` + `test_storage.py` are the daemon's storage layer and its tests.
 - `models/`: deployed-weights shelf — `current.pt` (what the app loads) plus versioned `merle-trainNN.pt` copies. Only its README is tracked; the `.pt` files are gitignored. See `models/README.md`.
 - `mcc/`: Next.js 16 App Router, TypeScript, Tailwind 4, pnpm. Tests: Vitest (`pnpm test`), CI runs them on every PR (`.github/workflows/tests.yml`).
 - Not in git: datasets (`training/`), weights (`*.pt`, including `models/`), captures (`hard_frames/`, `snapshots/`, `debug_frames/`), `.venv/`.
