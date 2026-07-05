@@ -224,15 +224,20 @@ def create_app(source, conn):
     # "sqlite3.InterfaceError: bad parameter or other API misuse". This lock is
     # held around every DB access so no two threads touch the connection at once.
     db_lock = threading.Lock()
-    worker = Worker(source, state, conn, control, db_lock)
 
     @asynccontextmanager
     async def lifespan(app):
+        # `source` may be a FrameSource (tests pass one directly) OR a zero-arg
+        # factory. The runtime app passes a factory so that IMPORTING this module
+        # never opens the camera or loads the model -- that only happens here, at
+        # server startup, which pytest/CI never trigger for the module-level app.
+        src = source() if callable(source) else source
+        worker = Worker(src, state, conn, control, db_lock)
         worker.start()
         yield
         worker.stop()
         worker.join(timeout=2)
-        source.close()
+        src.close()
 
     app = FastAPI(title="Merle daemon", lifespan=lifespan)
     # Exposed for tests to reach the worker/control directly.
@@ -302,15 +307,17 @@ def create_app(source, conn):
 
 
 def make_source():
-    """Pick the frame source from MERLE_SOURCE: 'camera' for the real Amcrest
-    feed (lazy-imports ultralytics), anything else (default) for the synthetic
-    source. The synthetic default keeps `uvicorn merle_daemon:app`, tests, and
-    MCC frontend work camera-free."""
-    if os.environ.get("MERLE_SOURCE") == "camera":
-        from frames import RTSPFrameSource
-        return RTSPFrameSource()
-    return SyntheticFrameSource()
+    """Pick the frame source from MERLE_SOURCE. Default is 'camera' (the real
+    Amcrest feed) so `uvicorn merle_daemon:app` just works day to day; set
+    MERLE_SOURCE=synthetic for the camera-free test world. Called at startup, not
+    at import, so importing this module never opens the camera or loads the model."""
+    if os.environ.get("MERLE_SOURCE", "camera") == "synthetic":
+        return SyntheticFrameSource()
+    from frames import RTSPFrameSource   # lazy: heavy + camera-only
+    return RTSPFrameSource()
 
 
-# Module-level app for `uvicorn merle_daemon:app`.
-app = create_app(make_source(), storage.connect(os.environ.get("MERLE_DB", "merle.db")))
+# Module-level app for `uvicorn merle_daemon:app`. make_source is passed as a
+# FACTORY (not called here) so import stays side-effect-free; the lifespan calls
+# it at startup.
+app = create_app(make_source, storage.connect(os.environ.get("MERLE_DB", "merle.db")))
