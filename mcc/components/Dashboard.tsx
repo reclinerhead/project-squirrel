@@ -59,6 +59,57 @@ export default function Dashboard() {
     return () => clearInterval(id);
   }, [poll]);
 
+  // Mobile browsers kill the long-lived MJPEG socket when the app is
+  // backgrounded; an <img> never retries on its own, so returning to the tab
+  // showed a broken image under a happy LIVE badge (the /state poll, being
+  // fresh requests, recovers by itself). Reconnect when the app comes back.
+  //
+  // Two hard-won iOS details:
+  // - Listen to pageshow and focus as well as visibilitychange (iOS Chrome is
+  //   inconsistent about which fires on app-switch return), but only reconnect
+  //   if we actually went away first -- otherwise desktop would flash-reconnect
+  //   the stream on every window focus.
+  // - The reconnect must change the URL (see ?v= in VideoFeed): WebKit
+  //   coalesces image loads by URL, so remounting with the same src can reuse
+  //   the dead connection instead of opening a new one.
+  const wentAway = useRef(false);
+  useEffect(() => {
+    const goneAway = () => {
+      wentAway.current = true;
+    };
+    const cameBack = () => {
+      if (document.visibilityState !== "visible") return;
+      if (!wentAway.current) return;
+      wentAway.current = false;
+      setStreamKey((k) => k + 1);
+    };
+    const onVis = () =>
+      document.visibilityState === "hidden" ? goneAway() : cameBack();
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("pagehide", goneAway);
+    window.addEventListener("pageshow", cameBack);
+    window.addEventListener("focus", cameBack);
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("pagehide", goneAway);
+      window.removeEventListener("pageshow", cameBack);
+      window.removeEventListener("focus", cameBack);
+    };
+  }, []);
+
+  // Belt-and-suspenders: if the <img> itself errors (dead socket without a
+  // visibility change), retry after a beat. Ref-guarded so a persistently-down
+  // stream schedules one retry at a time, not an avalanche.
+  const streamRetryPending = useRef(false);
+  const onStreamError = useCallback(() => {
+    if (streamRetryPending.current) return;
+    streamRetryPending.current = true;
+    setTimeout(() => {
+      streamRetryPending.current = false;
+      setStreamKey((k) => k + 1);
+    }, 2000);
+  }, []);
+
   const control = useCallback(
     async (action: string, value?: number) => {
       try {
@@ -134,43 +185,12 @@ export default function Dashboard() {
             {asleep ? (
               <Asleep />
             ) : (
-              <div className="relative">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  key={streamKey}
-                  src={STREAM_URL}
-                  alt="Live annotated driveway feed"
-                  className={`block aspect-video w-full bg-black object-contain transition-[opacity,filter] duration-500 ${
-                    paused || reconnecting ? "opacity-30 grayscale" : ""
-                  }`}
-                />
-                {/* Veil: the stream freezes on its last frame whenever it isn't
-                    live -- stood down (engine idle) or reconnecting (camera
-                    dropped). Dim + stamp it so a frozen frame is never mistaken
-                    for a live one (the old-timestamp confusion). */}
-                {paused && (
-                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
-                    <PauseIcon className="h-12 w-12 text-ink/80" />
-                    <span className="stamp text-sm text-inkdim">
-                      watch on stand down
-                    </span>
-                    <span className="text-xs text-inkfaint">
-                      last frame shown · perception engine idle
-                    </span>
-                  </div>
-                )}
-                {reconnecting && (
-                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
-                    <span className="lamp h-10 w-10 rounded-full border-4 border-turkey text-turkey" />
-                    <span className="stamp text-sm text-turkey">
-                      reconnecting to camera…
-                    </span>
-                    <span className="text-xs text-inkfaint">
-                      last frame shown · the feed dropped, retrying
-                    </span>
-                  </div>
-                )}
-              </div>
+              <VideoFeed
+                paused={paused}
+                reconnecting={reconnecting}
+                streamKey={streamKey}
+                onStreamError={onStreamError}
+              />
             )}
           </section>
 
@@ -227,9 +247,18 @@ export default function Dashboard() {
               <Button
                 onClick={() => control(state?.running ? "stop" : "start")}
                 disabled={!state || asleep}
-                tone={state?.running ? "dim" : "go"}
+                // Neutral (not green/"resume") until we actually know the state
+                // -- before the first poll lands the button would otherwise look
+                // paused even while the feed is live (very visible on mobile).
+                tone={!state || asleep ? undefined : state.running ? "dim" : "go"}
               >
-                {state?.running ? "◼ stand down" : "▶ resume watch"}
+                {asleep
+                  ? "daemon asleep"
+                  : !state
+                    ? "connecting…"
+                    : state.running
+                      ? "◼ stand down"
+                      : "▶ resume watch"}
               </Button>
               <div className="flex gap-2">
                 {/* A still camera to grab one frame, a movie camera to roll a
@@ -439,6 +468,168 @@ function Button({
     >
       {children}
     </button>
+  );
+}
+
+function VideoFeed({
+  paused,
+  reconnecting,
+  streamKey,
+  onStreamError,
+}: {
+  paused: boolean;
+  reconnecting: boolean;
+  streamKey: number;
+  onStreamError: () => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [nativeFull, setNativeFull] = useState(false);
+  // iOS Safari can't fullscreen a non-<video> element (requestFullscreen is
+  // absent on the container), so where the native API is unavailable we fall
+  // back to a CSS overlay that fills the viewport. `full` covers both.
+  const [cssFull, setCssFull] = useState(false);
+  const full = nativeFull || cssFull;
+  const dimmed = paused || reconnecting;
+
+  // Track native fullscreen state (also catches Escape, handled by the browser).
+  useEffect(() => {
+    const onChange = () =>
+      setNativeFull(document.fullscreenElement === containerRef.current);
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
+
+  // For the CSS-overlay path, wire Escape ourselves (the native path already has
+  // it) and lock body scroll while the overlay is up.
+  useEffect(() => {
+    if (!cssFull) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setCssFull(false);
+    window.addEventListener("keydown", onKey);
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = "";
+    };
+  }, [cssFull]);
+
+  const toggleFull = useCallback(() => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else if (cssFull) {
+      setCssFull(false);
+    } else if (containerRef.current?.requestFullscreen) {
+      containerRef.current.requestFullscreen().catch(() => setCssFull(true));
+    } else {
+      setCssFull(true); // iOS Safari and other no-API browsers
+    }
+  }, [cssFull]);
+
+  return (
+    <div
+      ref={containerRef}
+      onDoubleClick={toggleFull}
+      // `relative` and `fixed` are both position values -- apply exactly one, or
+      // they conflict and `relative` wins, trapping the CSS-fullscreen overlay
+      // at panel size instead of filling the viewport.
+      className={`group bg-black ${
+        full ? "flex items-center justify-center" : ""
+      } ${cssFull ? "fixed inset-0 z-50" : "relative"}`}
+    >
+      {/* ?v= cache-buster: WebKit (iOS Chrome/Safari) coalesces image loads by
+          URL, so a remounted <img> with the SAME src can be handed the dead
+          connection back instead of opening a new one -- observed as "black box
+          until Chrome is fully killed". A changed URL forces a real new request.
+          Deterministic (streamKey starts 0 on server and client), so no
+          hydration mismatch. */}
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        key={streamKey}
+        src={`${STREAM_URL}?v=${streamKey}`}
+        alt="Live annotated driveway feed"
+        onError={onStreamError}
+        className={`block bg-black object-contain transition-[opacity,filter] duration-500 ${
+          full ? "h-full max-h-full w-full" : "aspect-video w-full"
+        } ${dimmed ? "opacity-30 grayscale" : ""}`}
+      />
+
+      {/* Veil: the stream freezes on its last frame whenever it isn't live --
+          stood down (engine idle) or reconnecting (camera dropped). Dim + stamp
+          it so a frozen frame is never mistaken for a live one. */}
+      {paused && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
+          <PauseIcon className="h-12 w-12 text-ink/80" />
+          <span className="stamp text-sm text-inkdim">watch on stand down</span>
+          <span className="text-xs text-inkfaint">
+            last frame shown · perception engine idle
+          </span>
+        </div>
+      )}
+      {reconnecting && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
+          <span className="lamp h-10 w-10 rounded-full border-4 border-turkey text-turkey" />
+          <span className="stamp text-sm text-turkey">
+            reconnecting to camera…
+          </span>
+          <span className="text-xs text-inkfaint">
+            last frame shown · the feed dropped, retrying
+          </span>
+        </div>
+      )}
+
+      {/* Fullscreen toggle, YouTube-style, bottom-right (reachable in fullscreen
+          too). Always visible on touch (no hover there); hover-revealed on
+          desktop. Escape or double-click also exit. */}
+      <button
+        type="button"
+        onClick={toggleFull}
+        aria-label={full ? "Exit full screen" : "Full screen"}
+        className="absolute bottom-3 right-3 rounded-sm bg-black/50 p-2 text-ink/80 opacity-100 backdrop-blur-sm transition-opacity hover:text-squirrel focus-visible:opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
+      >
+        {full ? <CompressIcon /> : <ExpandIcon />}
+      </button>
+    </div>
+  );
+}
+
+function ExpandIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="18"
+      height="18"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+      <path d="M16 3h3a2 2 0 0 1 2 2v3" />
+      <path d="M8 21H5a2 2 0 0 1-2-2v-3" />
+      <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+    </svg>
+  );
+}
+
+function CompressIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="18"
+      height="18"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M8 3v3a2 2 0 0 1-2 2H3" />
+      <path d="M21 8h-3a2 2 0 0 1-2-2V3" />
+      <path d="M3 16h3a2 2 0 0 1 2 2v3" />
+      <path d="M16 21v-3a2 2 0 0 1 2-2h3" />
+    </svg>
   );
 }
 
