@@ -63,7 +63,7 @@ The daemon is a FastAPI app. A background `Worker` thread runs the perception lo
 - `GET /state` — session id, control flags, live counts/tracks/fps, run totals, recent events (JSON).
 - `GET /stream` — the annotated feed as `multipart/x-mixed-replace` MJPEG (an `<img src>` in the browser; no player). Async + `is_disconnected()` so a closed tab frees the generator.
 - `GET /snapshot` — the latest annotated frame, one JPEG.
-- `POST /control` — `start`/`stop` the loop, `record_on`/`record_off`, `set_crowd_threshold`.
+- `POST /control` — `start`/`stop` the loop, `record_on`/`record_off`, `set_crowd_threshold`. Recording writes the **annotated** stream to `debug_frames/clip_*.mp4` (mp4v) from the worker thread — for watching/sharing a moment. (live.py's `V` key still writes *raw* clips, which is what you sample for training stills.) The writer is closed cleanly on `record_off`, lost feed, or shutdown, and a `clip_recorded` event is logged.
 
 The **frame source** (`frames.py`) is the seam that keeps perception swappable. `FrameSource.read()` returns `(frame, [Detection, ...])` (each `Detection` has a `coasting` flag); the daemon's annotation/encoding/persistence has one implementation regardless of source, so the synthetic and real paths can't drift. Selected at startup by `MERLE_SOURCE` (`camera` → real feed; anything else → synthetic). Sources:
 

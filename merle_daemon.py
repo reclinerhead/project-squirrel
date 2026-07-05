@@ -95,9 +95,42 @@ class Worker(threading.Thread):
         self._last_crowd = 0.0
         self._loop_times = deque(maxlen=30)   # wall-clock interval between loops
         self._prev_loop = None
+        self.writer = None                    # cv2.VideoWriter while recording
+        self.clip_path = None
 
     def stop(self):
         self._stop.set()
+
+    def _record(self, annotated, ts):
+        """Drive the clip recorder off control.recording. Records the ANNOTATED
+        stream (boxes and all): the dashboard's clips are for watching/sharing a
+        moment. live.py's V key still writes RAW clips, which is what you sample
+        for training stills. All handled in this one worker thread, so the
+        VideoWriter is never touched cross-thread."""
+        if self.control.recording:
+            if self.writer is None:
+                os.makedirs("debug_frames", exist_ok=True)
+                self.clip_path = f"debug_frames/clip_{datetime.now():%Y%m%d_%H%M%S}.mp4"
+                h, w = annotated.shape[:2]
+                writer = cv2.VideoWriter(self.clip_path,
+                                         cv2.VideoWriter_fourcc(*"mp4v"),
+                                         TARGET_FPS, (w, h))
+                if not writer.isOpened():
+                    print(f"Recording failed to open: {self.clip_path}")
+                    self.control.recording = False   # flip back so /state is honest
+                    self.clip_path = None
+                    return
+                self.writer = writer
+            self.writer.write(annotated)
+        elif self.writer is not None:
+            self._finish_clip(ts)
+
+    def _finish_clip(self, ts):
+        self.writer.release()
+        storage.record_event(self.conn, ts, "clip_recorded", {"path": self.clip_path})
+        print(f"Clip saved: {self.clip_path}")
+        self.writer = None
+        self.clip_path = None
 
     def run(self):
         while not self._stop.is_set():
@@ -134,6 +167,7 @@ class Worker(threading.Thread):
                 self._last_crowd = now
 
             annotated = annotate(frame, dets)
+            self._record(annotated, ts)
             ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
 
             counts = dict(Counter(d.species for d in dets))
@@ -151,6 +185,11 @@ class Worker(threading.Thread):
             # Pace to TARGET_FPS (measured into the next loop's interval above).
             dt = time.perf_counter() - t0
             time.sleep(max(0.0, 1.0 / TARGET_FPS - dt))
+
+        # Loop ended (stop or lost feed): close any open clip so it isn't left
+        # truncated.
+        if self.writer is not None:
+            self._finish_clip(datetime.now().isoformat(timespec="seconds"))
 
 
 class ControlCommand(BaseModel):

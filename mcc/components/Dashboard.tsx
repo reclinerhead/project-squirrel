@@ -23,6 +23,10 @@ const speciesColor = (name: string) => SPECIES_COLOR[name] ?? "var(--ink)";
 
 const POLL_MS = 1000;
 
+// Shared look for the snapshot / record pair so they sit as a matched set.
+const CTRL_BTN =
+  "inline-flex flex-1 items-center justify-center gap-2 rounded-sm border px-3 py-2 text-center text-sm transition-colors";
+
 export default function Dashboard() {
   const [state, setState] = useState<DaemonState | null>(null);
   const [asleep, setAsleep] = useState(false);
@@ -100,6 +104,12 @@ export default function Dashboard() {
                         {state.live.fps.toFixed(0)} fps
                       </span>
                     )}
+                    {state?.recording && (
+                      <span className="flex items-center gap-1 text-chipmunk">
+                        <span className="lamp inline-block h-2 w-2 rounded-full bg-chipmunk text-chipmunk" />
+                        <span className="stamp">rec</span>
+                      </span>
+                    )}
                   </span>
                 )
               }
@@ -167,24 +177,50 @@ export default function Dashboard() {
           <section className="panel rounded-sm border border-line bg-panel">
             <PanelLabel title="Station Controls" />
             <div className="flex flex-col gap-3 px-4 pb-4">
+              <Button
+                onClick={() => control(state?.running ? "stop" : "start")}
+                disabled={!state || asleep}
+                tone={state?.running ? "dim" : "go"}
+              >
+                {state?.running ? "◼ stand down" : "▶ resume watch"}
+              </Button>
               <div className="flex gap-2">
-                <Button
-                  onClick={() => control(state?.running ? "stop" : "start")}
-                  disabled={!state || asleep}
-                  tone={state?.running ? "dim" : "go"}
-                >
-                  {state?.running ? "◼ stand down" : "▶ resume watch"}
-                </Button>
-                {/* Static filename: a Date.now() here differs between server
-                    render and hydration (learned the hard way). The browser
-                    de-dupes repeat downloads with (1), (2)... suffixes. */}
+                {/* A still camera to grab one frame, a movie camera to roll a
+                    clip -- the pair reads at a glance. Static download name: a
+                    Date.now() here mismatches between SSR and hydration (learned
+                    the hard way); the browser de-dupes repeats with (1), (2)… */}
                 <a
                   href={SNAPSHOT_URL}
                   download="merle_snapshot.jpg"
-                  className={`inline-flex flex-1 items-center justify-center rounded-sm border border-linebright px-3 py-2 text-center text-sm text-ink transition-colors hover:border-squirrel hover:text-squirrel ${asleep ? "pointer-events-none opacity-40" : ""}`}
+                  className={`${CTRL_BTN} border-linebright text-ink hover:border-squirrel hover:text-squirrel ${asleep ? "pointer-events-none opacity-40" : ""}`}
                 >
-                  ⬇ snapshot
+                  <StillCameraIcon />
+                  snapshot
                 </a>
+                <button
+                  type="button"
+                  onClick={() =>
+                    control(state?.recording ? "record_off" : "record_on")
+                  }
+                  disabled={!state || asleep}
+                  className={`${CTRL_BTN} disabled:pointer-events-none disabled:opacity-40 ${
+                    state?.recording
+                      ? "border-chipmunk bg-chipmunk/10 text-chipmunk"
+                      : "border-linebright text-ink hover:border-chipmunk hover:text-chipmunk"
+                  }`}
+                >
+                  {state?.recording ? (
+                    <>
+                      <span className="lamp inline-block h-2.5 w-2.5 rounded-full bg-chipmunk text-chipmunk" />
+                      stop
+                    </>
+                  ) : (
+                    <>
+                      <VideoCameraIcon />
+                      record
+                    </>
+                  )}
+                </button>
               </div>
               <div className="flex items-center justify-between gap-2 border-t border-line pt-3">
                 <span className="stamp text-xs text-inkdim">crowd alert at</span>
@@ -356,6 +392,45 @@ function Button({
     >
       {children}
     </button>
+  );
+}
+
+// Functional button icons (camera glyphs), themeable via currentColor.
+function StillCameraIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="15"
+      height="15"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M4 8h3l1.4-2h7.2L17 8h3v11H4z" />
+      <circle cx="12" cy="13" r="3.2" />
+    </svg>
+  );
+}
+
+function VideoCameraIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="15"
+      height="15"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="3" y="7" width="12" height="10" rx="1.5" />
+      <path d="M15 10.5 20.5 8v8L15 13.5z" />
+    </svg>
   );
 }
 
