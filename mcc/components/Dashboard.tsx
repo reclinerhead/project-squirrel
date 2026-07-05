@@ -82,6 +82,9 @@ export default function Dashboard() {
     [control],
   );
 
+  // Stand-down: daemon reachable but the perception engine is idle.
+  const paused = !asleep && state !== null && !state.running;
+
   return (
     <div className="mx-auto w-full max-w-[1500px] px-4 pb-10 sm:px-6">
       <Header state={state} asleep={asleep} />
@@ -95,6 +98,11 @@ export default function Dashboard() {
               right={
                 asleep ? (
                   <span className="stamp text-xs text-inkfaint">no signal</span>
+                ) : paused ? (
+                  <span className="flex items-center gap-2 text-xs text-inkdim">
+                    <PauseIcon className="h-3 w-3" />
+                    <span className="stamp">standing down</span>
+                  </span>
                 ) : (
                   <span className="flex items-center gap-2 text-xs text-squirrel">
                     <span className="lamp inline-block h-2 w-2 rounded-full bg-squirrel text-squirrel" />
@@ -117,13 +125,31 @@ export default function Dashboard() {
             {asleep ? (
               <Asleep />
             ) : (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                key={streamKey}
-                src={STREAM_URL}
-                alt="Live annotated driveway feed"
-                className="block aspect-video w-full bg-black object-contain"
-              />
+              <div className="relative">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  key={streamKey}
+                  src={STREAM_URL}
+                  alt="Live annotated driveway feed"
+                  className={`block aspect-video w-full bg-black object-contain transition-[opacity,filter] duration-500 ${
+                    paused ? "opacity-30 grayscale" : ""
+                  }`}
+                />
+                {/* Stand-down veil: the stream freezes on its last frame when
+                    the engine stops, which looks deceptively "live" -- dim it
+                    and stamp it so a paused watch can't be mistaken for one. */}
+                {paused && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
+                    <PauseIcon className="h-12 w-12 text-ink/80" />
+                    <span className="stamp text-sm text-inkdim">
+                      watch on stand down
+                    </span>
+                    <span className="text-xs text-inkfaint">
+                      last frame shown · perception engine idle
+                    </span>
+                  </div>
+                )}
+              </div>
             )}
           </section>
 
@@ -392,6 +418,20 @@ function Button({
     >
       {children}
     </button>
+  );
+}
+
+function PauseIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      className={className}
+      aria-hidden="true"
+    >
+      <rect x="6" y="4" width="4.5" height="16" rx="1" />
+      <rect x="13.5" y="4" width="4.5" height="16" rx="1" />
+    </svg>
   );
 }
 
