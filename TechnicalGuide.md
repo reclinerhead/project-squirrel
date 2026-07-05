@@ -78,6 +78,16 @@ The tracker bookkeeping and box-drawing are shared by **both** live.py and `RTSP
 
 Deps for the daemon are in `requirements.txt` (fastapi, uvicorn, opencv, numpy); ultralytics/torch stay out (installed per-machine, GPU-specific). CI installs headless opencv.
 
+### The MCC dashboard (`mcc/`)
+
+The daemon's face: a Next.js App Router app, one page, one client component (`components/Dashboard.tsx`) that polls `/daemon/state` every second and renders the live MJPEG stream plus the instrument rail (current counts, run census, controls, event log, and coming-soon placeholders for future panels).
+
+- **All daemon traffic goes through a rewrite proxy** (`next.config.ts`: `/daemon/:path*` → `MERLE_DAEMON_URL`, default `localhost:8000`). The browser stays same-origin — no CORS in the daemon — and a phone on the LAN reaching the dev server also reaches the daemon through it. Verified that the infinite MJPEG stream flows through the rewrite un-buffered.
+- **Design language: "Ranger Station, Night Watch"** — pine-black panels with topographic-contour background, Fraunces display type + Sometype Mono telemetry, and species accent colors that are the *actual box colors* the vision stack draws (squirrel `#FF7031`, chipmunk `#FF3838`, turkey `#CFD231`), so the UI and stream read as one instrument. Tokens live as CSS variables in `app/globals.css`.
+- **Daemon-down UX**: a failed `/state` poll shows the "Merle is asleep" panel with the wake command; when polls recover, the `<img>` is remounted (key bump) to reconnect the stream.
+- Pure display logic (event-line formatting, count sorting) lives in `lib/daemon.ts` with Vitest coverage; components themselves are visual and untested per the testing policy.
+- Known UI gotchas encoded in comments: no `Date.now()` in render (SSR/client hydration mismatch), and rapid threshold-stepper clicks go through a ref so they compound instead of re-sending one stale value.
+
 ## Repo layout
 
 - Root: Python vision stack (flat scripts, `.venv`, no packaging — deliberate for a single-machine project). `perception.py` is the shared tracker/annotation brain (used by live.py and the daemon). The daemon is `merle_daemon.py` (FastAPI app) + `frames.py` (frame sources) + `storage.py` (SQLite); `test_perception.py` / `test_daemon.py` / `test_storage.py` are the tests; `requirements.txt` pins the daemon deps.
