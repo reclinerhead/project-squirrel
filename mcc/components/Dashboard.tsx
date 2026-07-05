@@ -62,14 +62,39 @@ export default function Dashboard() {
   // Mobile browsers kill the long-lived MJPEG socket when the app is
   // backgrounded; an <img> never retries on its own, so returning to the tab
   // showed a broken image under a happy LIVE badge (the /state poll, being
-  // fresh requests, recovers by itself). Remount the stream whenever the page
-  // becomes visible again.
+  // fresh requests, recovers by itself). Reconnect when the app comes back.
+  //
+  // Two hard-won iOS details:
+  // - Listen to pageshow and focus as well as visibilitychange (iOS Chrome is
+  //   inconsistent about which fires on app-switch return), but only reconnect
+  //   if we actually went away first -- otherwise desktop would flash-reconnect
+  //   the stream on every window focus.
+  // - The reconnect must change the URL (see ?v= in VideoFeed): WebKit
+  //   coalesces image loads by URL, so remounting with the same src can reuse
+  //   the dead connection instead of opening a new one.
+  const wentAway = useRef(false);
   useEffect(() => {
-    const onVis = () => {
-      if (document.visibilityState === "visible") setStreamKey((k) => k + 1);
+    const goneAway = () => {
+      wentAway.current = true;
     };
+    const cameBack = () => {
+      if (document.visibilityState !== "visible") return;
+      if (!wentAway.current) return;
+      wentAway.current = false;
+      setStreamKey((k) => k + 1);
+    };
+    const onVis = () =>
+      document.visibilityState === "hidden" ? goneAway() : cameBack();
     document.addEventListener("visibilitychange", onVis);
-    return () => document.removeEventListener("visibilitychange", onVis);
+    window.addEventListener("pagehide", goneAway);
+    window.addEventListener("pageshow", cameBack);
+    window.addEventListener("focus", cameBack);
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("pagehide", goneAway);
+      window.removeEventListener("pageshow", cameBack);
+      window.removeEventListener("focus", cameBack);
+    };
   }, []);
 
   // Belt-and-suspenders: if the <img> itself errors (dead socket without a
@@ -510,10 +535,16 @@ function VideoFeed({
         full ? "flex items-center justify-center" : ""
       } ${cssFull ? "fixed inset-0 z-50" : "relative"}`}
     >
+      {/* ?v= cache-buster: WebKit (iOS Chrome/Safari) coalesces image loads by
+          URL, so a remounted <img> with the SAME src can be handed the dead
+          connection back instead of opening a new one -- observed as "black box
+          until Chrome is fully killed". A changed URL forces a real new request.
+          Deterministic (streamKey starts 0 on server and client), so no
+          hydration mismatch. */}
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
         key={streamKey}
-        src={STREAM_URL}
+        src={`${STREAM_URL}?v=${streamKey}`}
         alt="Live annotated driveway feed"
         onError={onStreamError}
         className={`block bg-black object-contain transition-[opacity,filter] duration-500 ${
