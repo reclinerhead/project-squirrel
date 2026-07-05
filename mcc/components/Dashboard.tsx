@@ -59,6 +59,32 @@ export default function Dashboard() {
     return () => clearInterval(id);
   }, [poll]);
 
+  // Mobile browsers kill the long-lived MJPEG socket when the app is
+  // backgrounded; an <img> never retries on its own, so returning to the tab
+  // showed a broken image under a happy LIVE badge (the /state poll, being
+  // fresh requests, recovers by itself). Remount the stream whenever the page
+  // becomes visible again.
+  useEffect(() => {
+    const onVis = () => {
+      if (document.visibilityState === "visible") setStreamKey((k) => k + 1);
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, []);
+
+  // Belt-and-suspenders: if the <img> itself errors (dead socket without a
+  // visibility change), retry after a beat. Ref-guarded so a persistently-down
+  // stream schedules one retry at a time, not an avalanche.
+  const streamRetryPending = useRef(false);
+  const onStreamError = useCallback(() => {
+    if (streamRetryPending.current) return;
+    streamRetryPending.current = true;
+    setTimeout(() => {
+      streamRetryPending.current = false;
+      setStreamKey((k) => k + 1);
+    }, 2000);
+  }, []);
+
   const control = useCallback(
     async (action: string, value?: number) => {
       try {
@@ -138,6 +164,7 @@ export default function Dashboard() {
                 paused={paused}
                 reconnecting={reconnecting}
                 streamKey={streamKey}
+                onStreamError={onStreamError}
               />
             )}
           </section>
@@ -423,10 +450,12 @@ function VideoFeed({
   paused,
   reconnecting,
   streamKey,
+  onStreamError,
 }: {
   paused: boolean;
   reconnecting: boolean;
   streamKey: number;
+  onStreamError: () => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [nativeFull, setNativeFull] = useState(false);
@@ -486,6 +515,7 @@ function VideoFeed({
         key={streamKey}
         src={STREAM_URL}
         alt="Live annotated driveway feed"
+        onError={onStreamError}
         className={`block bg-black object-contain transition-[opacity,filter] duration-500 ${
           full ? "h-full max-h-full w-full" : "aspect-video w-full"
         } ${dimmed ? "opacity-30 grayscale" : ""}`}
