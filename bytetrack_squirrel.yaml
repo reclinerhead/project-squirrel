@@ -1,0 +1,14 @@
+# project-squirrel ByteTrack config -- tuned from ultralytics' stock
+# bytetrack.yaml for a fixed camera watching slow feeder traffic at ~15fps.
+# live.py points here via TRACKER_YAML.
+tracker_type: bytetrack
+track_high_thresh: 0.25 # first-stage match floor (stock value)
+track_low_thresh: 0.1 # second-stage recovery band; DETECT_FLOOR in live.py is
+                      # set to match, so this whole band actually reaches the tracker
+new_track_thresh: 0.5 # birth needs real confidence -- stock 0.25 let a single
+                      # junk detection mint a brand-new track ID
+track_buffer: 60 # keep lost tracks ~4s at 15fps (stock 30 = ~2s), so a feeding
+                 # squirrel that dips out briefly keeps its ID instead of minting
+                 # a new one (which also inflated the run-total census)
+match_thresh: 0.8 # association IoU (stock value)
+fuse_score: True # weigh detection score into matching (stock value)
