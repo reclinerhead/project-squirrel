@@ -32,14 +32,13 @@ from fastapi import FastAPI, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
+import perception
 import storage
 from frames import SyntheticFrameSource
 
-# Stable per-class colors (BGR), matching live.py's palette family so the daemon
-# stream reads the same as the desktop window.
-CLASS_COLORS = {"chipmunk": (56, 56, 255), "squirrel": (31, 112, 255),
-                "turkey": (49, 210, 207)}
-DEFAULT_COLOR = (200, 200, 200)
+# Per-class colors from the shared palette (same ordering as live.py) so the
+# daemon stream reads the same as the desktop window.
+CLASS_COLORS = perception.class_colors({0: "chipmunk", 1: "squirrel", 2: "turkey"})
 
 TARGET_FPS = 15          # cap the loop; the real camera runs ~15fps anyway
 CROWD_COOLDOWN = 10.0    # seconds between crowd-snapshot events, like live.py
@@ -51,20 +50,12 @@ def mjpeg_frame(jpeg):
 
 
 def annotate(frame, dets):
-    """Draw boxes + labels for the stream. Deliberately simple in 2b-i -- the
-    full coasting/readout overlay from live.py gets extracted into a shared
-    function in 2b-ii, when the real perception source lands."""
-    for d in dets:
-        color = CLASS_COLORS.get(d.species, DEFAULT_COLOR)
-        x1, y1, x2, y2 = d.box
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
-        tag = f"{d.species} #{d.track_id}"
-        (tw, th), tb = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
-        ty = y1 - 8 if y1 - th - tb - 8 >= 0 else y2 + th + tb + 8
-        cv2.rectangle(frame, (x1, ty - th - tb), (x1 + tw + 6, ty + tb), color, -1)
-        cv2.putText(frame, tag, (x1 + 3, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                    (255, 255, 255), 2, cv2.LINE_AA)
-    return frame
+    """Draw boxes + labels via the shared drawer, so the stream matches live.py
+    (coasting tracks grey; annotations scaled for the frame size, since it's
+    tuned for 4K)."""
+    items = [(d.track_id, d.species, d.box, not d.coasting) for d in dets]
+    scale = frame.shape[0] / 2160
+    return perception.draw_tracks(frame, items, CLASS_COLORS, scale=scale)
 
 
 class Control:
@@ -129,6 +120,8 @@ class Worker(threading.Thread):
 
             ts = datetime.now().isoformat(timespec="seconds")
             for d in dets:
+                if d.coasting:
+                    continue   # bank only frames the animal was actually matched
                 storage.upsert_sighting(self.conn, self.state.session_id,
                                         d.track_id, d.species, ts, d.conf)
 
@@ -145,7 +138,8 @@ class Worker(threading.Thread):
 
             counts = dict(Counter(d.species for d in dets))
             tracks = [{"track_id": d.track_id, "species": d.species,
-                       "conf": round(d.conf, 3), "box": list(d.box)} for d in dets]
+                       "conf": round(d.conf, 3), "box": list(d.box),
+                       "coasting": d.coasting} for d in dets]
             with self.state.lock:
                 if ok:
                     self.state.jpeg = buf.tobytes()
@@ -249,6 +243,16 @@ def create_app(source, conn):
     return app
 
 
-# Module-level app for `uvicorn merle_daemon:app`. Phase 2b-i defaults to the
-# synthetic source; 2b-ii will select the real RTSP source via env.
-app = create_app(SyntheticFrameSource(), storage.connect(os.environ.get("MERLE_DB", "merle.db")))
+def make_source():
+    """Pick the frame source from MERLE_SOURCE: 'camera' for the real Amcrest
+    feed (lazy-imports ultralytics), anything else (default) for the synthetic
+    source. The synthetic default keeps `uvicorn merle_daemon:app`, tests, and
+    MCC frontend work camera-free."""
+    if os.environ.get("MERLE_SOURCE") == "camera":
+        from frames import RTSPFrameSource
+        return RTSPFrameSource()
+    return SyntheticFrameSource()
+
+
+# Module-level app for `uvicorn merle_daemon:app`.
+app = create_app(make_source(), storage.connect(os.environ.get("MERLE_DB", "merle.db")))
