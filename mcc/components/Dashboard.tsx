@@ -84,6 +84,10 @@ export default function Dashboard() {
 
   // Stand-down: daemon reachable but the perception engine is idle.
   const paused = !asleep && state !== null && !state.running;
+  // Reconnecting: engine running but the source isn't delivering frames (camera
+  // dropped/restarted). The feed is frozen on its last frame, not live.
+  const reconnecting =
+    !asleep && state !== null && state.running && !state.live.signal;
 
   return (
     <div className="mx-auto w-full max-w-[1500px] px-4 pb-10 sm:px-6">
@@ -102,6 +106,11 @@ export default function Dashboard() {
                   <span className="flex items-center gap-2 text-xs text-inkdim">
                     <PauseIcon className="h-3 w-3" />
                     <span className="stamp">standing down</span>
+                  </span>
+                ) : reconnecting ? (
+                  <span className="flex items-center gap-2 text-xs text-turkey">
+                    <span className="lamp inline-block h-2 w-2 rounded-full bg-turkey text-turkey" />
+                    <span className="stamp">reconnecting</span>
                   </span>
                 ) : (
                   <span className="flex items-center gap-2 text-xs text-squirrel">
@@ -132,12 +141,13 @@ export default function Dashboard() {
                   src={STREAM_URL}
                   alt="Live annotated driveway feed"
                   className={`block aspect-video w-full bg-black object-contain transition-[opacity,filter] duration-500 ${
-                    paused ? "opacity-30 grayscale" : ""
+                    paused || reconnecting ? "opacity-30 grayscale" : ""
                   }`}
                 />
-                {/* Stand-down veil: the stream freezes on its last frame when
-                    the engine stops, which looks deceptively "live" -- dim it
-                    and stamp it so a paused watch can't be mistaken for one. */}
+                {/* Veil: the stream freezes on its last frame whenever it isn't
+                    live -- stood down (engine idle) or reconnecting (camera
+                    dropped). Dim + stamp it so a frozen frame is never mistaken
+                    for a live one (the old-timestamp confusion). */}
                 {paused && (
                   <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
                     <PauseIcon className="h-12 w-12 text-ink/80" />
@@ -146,6 +156,17 @@ export default function Dashboard() {
                     </span>
                     <span className="text-xs text-inkfaint">
                       last frame shown · perception engine idle
+                    </span>
+                  </div>
+                )}
+                {reconnecting && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
+                    <span className="lamp h-10 w-10 rounded-full border-4 border-turkey text-turkey" />
+                    <span className="stamp text-sm text-turkey">
+                      reconnecting to camera…
+                    </span>
+                    <span className="text-xs text-inkfaint">
+                      last frame shown · the feed dropped, retrying
                     </span>
                   </div>
                 )}

@@ -42,6 +42,7 @@ CLASS_COLORS = perception.class_colors({0: "chipmunk", 1: "squirrel", 2: "turkey
 
 TARGET_FPS = 15          # cap the loop; the real camera runs ~15fps anyway
 CROWD_COOLDOWN = 10.0    # seconds between crowd-snapshot events, like live.py
+NO_FRAME_RETRY = 0.25    # pause between reads while the source has no frame
 
 
 def mjpeg_frame(jpeg):
@@ -79,6 +80,7 @@ class SharedState:
         self.counts = {}            # live per-class counts
         self.tracks = []            # live tracks: [{track_id, species, conf, box}]
         self.fps = 0.0
+        self.signal = True          # is the source currently delivering frames?
 
 
 class Worker(threading.Thread):
@@ -151,7 +153,15 @@ class Worker(threading.Thread):
 
             frame, dets = self.source.read()
             if frame is None:
-                break
+                # No frame this cycle -- the source is reconnecting (e.g. the
+                # camera restarted after a settings change). Flag "no signal" and
+                # keep the loop ALIVE; a single dropped read must never kill
+                # perception (that used to freeze the feed until a full restart).
+                # The source reconnects itself; we just keep asking.
+                with self.state.lock:
+                    self.state.signal = False
+                time.sleep(NO_FRAME_RETRY)
+                continue
 
             ts = datetime.now().isoformat(timespec="seconds")
             with self.db_lock:
@@ -179,6 +189,7 @@ class Worker(threading.Thread):
                        "conf": round(d.conf, 3), "box": list(d.box),
                        "coasting": d.coasting} for d in dets]
             with self.state.lock:
+                self.state.signal = True
                 if ok:
                     self.state.jpeg = buf.tobytes()
                 self.state.counts = counts
@@ -249,7 +260,8 @@ def create_app(source, conn):
         with state.lock:
             live = {"counts": dict(state.counts),
                     "tracks": list(state.tracks),
-                    "fps": state.fps}
+                    "fps": state.fps,
+                    "signal": state.signal}
         return {
             "session_id": session_id,
             "running": control.running,

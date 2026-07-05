@@ -99,6 +99,43 @@ def test_crowd_event_recorded_when_threshold_low():
         assert "crowd_snapshot" in kinds
 
 
+class _FlakySource:
+    """Camera 'down' for the first few reads (returns None), then recovers --
+    stands in for an RTSP stream that dropped and reconnected."""
+
+    def __init__(self, drop=3):
+        self._syn = SyntheticFrameSource()
+        self._drop = drop
+        self.reads = 0
+
+    def read(self):
+        self.reads += 1
+        if self.reads <= self._drop:
+            return None, []
+        return self._syn.read()
+
+    def close(self):
+        pass
+
+
+def test_worker_survives_dropped_frames():
+    # A dropped read must NOT kill the perception loop (the bug: it used to
+    # `break`, freezing the feed until a full restart). The worker should flag
+    # no-signal, keep polling, and recover once frames return.
+    app = merle_daemon.create_app(_FlakySource(drop=4), storage.connect(":memory:"))
+    with TestClient(app) as c:
+        deadline = time.time() + 4
+        recovered = False
+        while time.time() < deadline:
+            live = c.get("/state").json()["live"]
+            if live["counts"].get("squirrel"):   # frames flowing again
+                assert live["signal"] is True
+                recovered = True
+                break
+            time.sleep(0.05)
+        assert recovered, "worker died on dropped frames instead of recovering"
+
+
 def test_synthetic_source_is_deterministic():
     # Same frame index -> same boxes, so tests over the source are stable.
     a, b = SyntheticFrameSource(), SyntheticFrameSource()

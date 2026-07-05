@@ -21,7 +21,12 @@ export type DaemonState = {
   running: boolean;
   recording: boolean;
   crowd_threshold: number;
-  live: { counts: Record<string, number>; tracks: Track[]; fps: number };
+  live: {
+    counts: Record<string, number>;
+    tracks: Track[];
+    fps: number;
+    signal: boolean;
+  };
   totals: Record<string, number>;
   recent_events: MerleEvent[];
 };
