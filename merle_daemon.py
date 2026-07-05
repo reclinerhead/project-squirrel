@@ -85,12 +85,13 @@ class Worker(threading.Thread):
     """The perception loop, headless. Pulls frames from the source, annotates,
     encodes, publishes to SharedState, and persists sightings/events to SQLite."""
 
-    def __init__(self, source, state, conn, control):
+    def __init__(self, source, state, conn, control, db_lock):
         super().__init__(daemon=True)
         self.source = source
         self.state = state
         self.conn = conn
         self.control = control
+        self.db_lock = db_lock   # serialize DB access with the request threads
         self._stop = threading.Event()
         self._last_crowd = 0.0
         self._loop_times = deque(maxlen=30)   # wall-clock interval between loops
@@ -127,7 +128,8 @@ class Worker(threading.Thread):
 
     def _finish_clip(self, ts):
         self.writer.release()
-        storage.record_event(self.conn, ts, "clip_recorded", {"path": self.clip_path})
+        with self.db_lock:
+            storage.record_event(self.conn, ts, "clip_recorded", {"path": self.clip_path})
         print(f"Clip saved: {self.clip_path}")
         self.writer = None
         self.clip_path = None
@@ -152,18 +154,20 @@ class Worker(threading.Thread):
                 break
 
             ts = datetime.now().isoformat(timespec="seconds")
-            for d in dets:
-                if d.coasting:
-                    continue   # bank only frames the animal was actually matched
-                storage.upsert_sighting(self.conn, self.state.session_id,
-                                        d.track_id, d.species, ts, d.conf)
+            with self.db_lock:
+                for d in dets:
+                    if d.coasting:
+                        continue   # bank only frames the animal was actually matched
+                    storage.upsert_sighting(self.conn, self.state.session_id,
+                                            d.track_id, d.species, ts, d.conf)
 
             # Crowd moment: enough animals at once, and cooled down since the last.
             now = time.time()
             if len(dets) >= self.control.crowd_threshold and now - self._last_crowd >= CROWD_COOLDOWN:
                 counts = dict(Counter(d.species for d in dets))
-                storage.record_event(self.conn, ts, "crowd_snapshot",
-                                     {"total": len(dets), "counts": counts})
+                with self.db_lock:
+                    storage.record_event(self.conn, ts, "crowd_snapshot",
+                                         {"total": len(dets), "counts": counts})
                 self._last_crowd = now
 
             annotated = annotate(frame, dets)
@@ -197,6 +201,15 @@ class ControlCommand(BaseModel):
     value: int | None = None
 
 
+def _read_db_summary(conn, session_id, db_lock):
+    """The DB-backed part of /state, read under the shared lock."""
+    with db_lock:
+        return {
+            "totals": storage.species_totals(conn, session_id),
+            "recent_events": storage.recent_events(conn, 10),
+        }
+
+
 def create_app(source, conn):
     """Build the FastAPI app around a frame source and an open DB connection.
     Factored out so tests can pass a synthetic source + in-memory DB."""
@@ -204,7 +217,14 @@ def create_app(source, conn):
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     state = SharedState(session_id)
     control = Control()
-    worker = Worker(source, state, conn, control)
+    # One SQLite connection is shared between the worker thread (writing every
+    # frame) and the request threadpool (reading /state). A single connection is
+    # NOT safe for concurrent use across threads -- check_same_thread=False only
+    # silences the guard, it doesn't serialize access, and the race surfaces as
+    # "sqlite3.InterfaceError: bad parameter or other API misuse". This lock is
+    # held around every DB access so no two threads touch the connection at once.
+    db_lock = threading.Lock()
+    worker = Worker(source, state, conn, control, db_lock)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -231,8 +251,7 @@ def create_app(source, conn):
             "recording": control.recording,
             "crowd_threshold": control.crowd_threshold,
             "live": live,
-            "totals": storage.species_totals(conn, session_id),
-            "recent_events": storage.recent_events(conn, 10),
+            **_read_db_summary(conn, session_id, db_lock),
         }
 
     @app.get("/snapshot")
