@@ -125,10 +125,14 @@ def template_fields(event, bible):
     """Everything a template may reference, from the event + the bible. One
     function so a new template can't invent a field the tests don't check."""
     details = event.get("details") or {}
+    duration_s = details.get("duration_s")
     return {
         "kind": event.get("kind", "something"),
         "species": details.get("species", "critter"),
-        "duration": human_duration(details.get("duration_s", 0)),
+        # departures only carry a duration when the LAST one leaves; a "one of
+        # them left" event has none, and "a blink" would be a lie.
+        "duration": human_duration(duration_s) if duration_s is not None
+                    else "a good while",
         "total": details.get("total", "several"),
         "station": bible.get("station", "the driveway"),
         "seed_pile": bible.get("seed_pile", "the seed pile"),

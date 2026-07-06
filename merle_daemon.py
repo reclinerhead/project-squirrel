@@ -49,9 +49,16 @@ CLASS_COLORS = perception.class_colors({0: "chipmunk", 1: "squirrel", 2: "turkey
 TARGET_FPS = 15          # cap the loop; the real camera runs ~15fps anyway
 CROWD_COOLDOWN = 10.0    # seconds between crowd-snapshot events, like live.py
 NO_FRAME_RETRY = 0.25    # pause between reads while the source has no frame
-DEPART_AFTER = 3.0       # seconds a track must be gone before we call it a departure
-                         # (longer than the tracker's ~1s coast, so a coasting dip
-                         # that re-matches never reads as leave-and-return)
+
+# Arrival/departure debounce (SPECIES-level, not track-level). ByteTrack mints a
+# new track id when it loses an animal for more than its buffer and re-acquires
+# it -- same squirrel, new identity. Track-level events turned every one of
+# those into a phantom departure+arrival pair. Species counts don't care which
+# id is which; they only dip briefly during churn, and the debounce absorbs it:
+ARRIVE_AFTER = 2.0       # a count INCREASE must hold this long to be an arrival
+DEPART_AFTER = 12.0      # a DECREASE must hold this long -- longer than any
+                         # realistic churn gap, so lost-and-reminted ids never
+                         # read as leave-and-return
 
 
 def mjpeg_frame(jpeg):
@@ -108,7 +115,7 @@ class Worker(threading.Thread):
         self._last_crowd = 0.0
         self._loop_times = deque(maxlen=30)   # wall-clock interval between loops
         self._prev_loop = None
-        self._present = {}   # track_id -> {species, since, last} for arrival/departure
+        self._species = {}   # species -> presence state, see _species_presence
         self.writer = None                    # cv2.VideoWriter while recording
         self.clip_path = None
 
@@ -123,6 +130,44 @@ class Worker(threading.Thread):
             storage.record_event(self.conn, ts, kind, details)
         self.publisher.publish(bus.EVENTS_TOPIC,
                                {"ts": ts, "kind": kind, "details": details})
+
+    def _species_presence(self, counts, ts, now):
+        """Debounced species-level arrival/departure. A species' observed count
+        must hold at a new value for ARRIVE_AFTER (up) or DEPART_AFTER (down)
+        before the change is announced; any wobble back to the announced count
+        resets the timer. Tracker id churn (same animal re-minted under a new
+        id after a detection gap) dips a count for a few seconds at most, so it
+        produces NO events -- which is the whole point. `duration_s` rides on a
+        departure only when the last one leaves (counts above zero can't know
+        which individual left)."""
+        for sp in set(counts) | set(self._species):
+            observed = counts.get(sp, 0)
+            st = self._species.setdefault(
+                sp, {"count": 0, "candidate": 0, "candidate_since": None,
+                     "present_since": None})
+            if observed == st["count"]:
+                st["candidate_since"] = None   # settled back -- forget the wobble
+                continue
+            if st["candidate_since"] is None or observed != st["candidate"]:
+                st["candidate"] = observed     # new challenger -- start the clock
+                st["candidate_since"] = now
+                continue
+            wait = ARRIVE_AFTER if observed > st["count"] else DEPART_AFTER
+            if now - st["candidate_since"] < wait:
+                continue
+            old = st["count"]
+            st["count"] = observed
+            st["candidate_since"] = None
+            if observed > old:
+                if old == 0:
+                    st["present_since"] = now
+                self._event(ts, "arrival", {"species": sp, "count": observed})
+            else:
+                details = {"species": sp, "count": observed}
+                if observed == 0 and st["present_since"] is not None:
+                    details["duration_s"] = round(now - st["present_since"], 1)
+                    st["present_since"] = None
+                self._event(ts, "departure", details)
 
     def _record(self, annotated, ts):
         """Drive the clip recorder off control.recording. Records the ANNOTATED
@@ -190,28 +235,12 @@ class Worker(threading.Thread):
                     storage.upsert_sighting(self.conn, self.state.session_id,
                                             d.track_id, d.species, ts, d.conf)
 
-            # Arrivals and departures -- the narrator's bread and butter. A track
-            # id first MATCHED (never a coasting ghost) is an arrival; an id
-            # absent for DEPART_AFTER seconds is a departure. The grace window
-            # absorbs coasting dips so one animal can't arrive twice in a blink.
+            # Arrivals and departures -- the narrator's bread and butter.
+            # Species-level, from MATCHED tracks only (a coasting ghost is a
+            # briefly-lost track, not a new animal): see _species_presence.
             now = time.time()
-            for d in dets:
-                seen = self._present.get(d.track_id)
-                if seen is None:
-                    if not d.coasting:
-                        self._present[d.track_id] = {"species": d.species,
-                                                     "since": now, "last": now}
-                        self._event(ts, "arrival",
-                                    {"track_id": d.track_id, "species": d.species})
-                else:
-                    seen["last"] = now
-                    seen["species"] = d.species   # species vote can revise mid-track
-            for tid in [t for t, s in self._present.items()
-                        if now - s["last"] > DEPART_AFTER]:
-                s = self._present.pop(tid)
-                self._event(ts, "departure",
-                            {"track_id": tid, "species": s["species"],
-                             "duration_s": round(s["last"] - s["since"], 1)})
+            self._species_presence(
+                Counter(d.species for d in dets if not d.coasting), ts, now)
 
             # Crowd moment: enough animals at once, and cooled down since the last.
             if len(dets) >= self.control.crowd_threshold and now - self._last_crowd >= CROWD_COOLDOWN:

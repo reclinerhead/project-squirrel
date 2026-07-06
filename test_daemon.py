@@ -154,11 +154,11 @@ def test_worker_survives_dropped_frames():
 
 
 class _VisitSource:
-    """A chipmunk that shows up for a few frames and leaves -- the minimal
+    """A chipmunk that shows up for a stretch and leaves -- the minimal
     arrival/departure story, without waiting out the synthetic source's
     90-frame visit cycle in real time."""
 
-    def __init__(self, visit_reads=3):
+    def __init__(self, visit_reads=10):
         self._visit_reads = visit_reads
         self._syn = SyntheticFrameSource()
         self.reads = 0
@@ -176,10 +176,11 @@ class _VisitSource:
 
 
 def test_arrival_and_departure_events(monkeypatch):
-    # New matched track -> arrival, right away. Track gone past the grace
-    # window -> departure with the visit duration. Both must reach SQLite
-    # (recent_events) AND the bus (driveway/events) with the same content.
-    monkeypatch.setattr(merle_daemon, "DEPART_AFTER", 0.1)
+    # A species count that holds -> arrival after the debounce; gone past the
+    # departure window -> departure with the visit duration. Both must reach
+    # SQLite (recent_events) AND the bus (driveway/events) with the same content.
+    monkeypatch.setattr(merle_daemon, "ARRIVE_AFTER", 0.05)
+    monkeypatch.setattr(merle_daemon, "DEPART_AFTER", 0.15)
     fake = _FakePublisher()
     app = _app(_VisitSource(), publisher=fake)
     with TestClient(app) as c:
@@ -194,7 +195,11 @@ def test_arrival_and_departure_events(monkeypatch):
     arrivals = [e for e in events if e["kind"] == "arrival"]
     departures = [e for e in events if e["kind"] == "departure"]
     assert {a["details"]["species"] for a in arrivals} == {"squirrel", "chipmunk"}
+    # Events are species-level: the two ever-present squirrels are ONE arrival.
+    squirrel_arrival = next(a for a in arrivals if a["details"]["species"] == "squirrel")
+    assert squirrel_arrival["details"]["count"] == 2
     assert [d["details"]["species"] for d in departures] == ["chipmunk"]
+    assert departures[0]["details"]["count"] == 0
     assert departures[0]["details"]["duration_s"] >= 0
 
     bus_events = [p for t, p in fake.messages if t == bus.EVENTS_TOPIC]
@@ -202,6 +207,46 @@ def test_arrival_and_departure_events(monkeypatch):
     # The bus payload carries the same shape the archive does.
     bus_departure = next(e for e in bus_events if e["kind"] == "departure")
     assert bus_departure["details"]["species"] == "chipmunk"
+
+
+class _ChurnSource:
+    """One squirrel that never leaves, but whose track id gets re-minted after
+    short detection gaps -- exactly the ByteTrack churn seen on the real
+    driveway (stationary feeder flickers out, comes back as a 'new' animal)."""
+
+    def __init__(self):
+        self.reads = 0
+        self._syn = SyntheticFrameSource()
+
+    def read(self):
+        self.reads += 1
+        frame, _ = self._syn.read()
+        cycle = self.reads % 7
+        if cycle in (5, 6):
+            return frame, []   # detection gap: the tracker loses it here
+        tid = 100 + self.reads // 7   # ...and re-acquires it as a NEW id
+        return frame, [Detection(tid, "squirrel", (100, 100, 190, 164), 0.7)]
+
+    def close(self):
+        pass
+
+
+def test_id_churn_produces_no_phantom_events(monkeypatch):
+    # THE regression test for the event spam: id churn on a squirrel that never
+    # leaves must produce exactly one arrival and zero departures. The count
+    # dips 1 -> 0 for two frames per cycle, far shorter than DEPART_AFTER.
+    monkeypatch.setattr(merle_daemon, "ARRIVE_AFTER", 0.05)
+    monkeypatch.setattr(merle_daemon, "DEPART_AFTER", 1.0)
+    fake = _FakePublisher()
+    app = _app(_ChurnSource(), publisher=fake)
+    with TestClient(app) as c:
+        time.sleep(1.5)   # ~3 churn cycles at the worker's 15fps pace
+        events = c.get("/state").json()["recent_events"]
+
+    arrivals = [e for e in events if e["kind"] == "arrival"]
+    departures = [e for e in events if e["kind"] == "departure"]
+    assert len(arrivals) == 1, f"churn minted extra arrivals: {arrivals}"
+    assert departures == [], f"churn manufactured departures: {departures}"
 
 
 def test_coasting_track_never_arrives():

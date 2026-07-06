@@ -16,9 +16,9 @@ BIBLE = {"station": "the driveway",
          "legends": {"big_chonk": "Big Chonk"}}
 
 ARRIVAL = {"ts": "2026-07-06T10:00:00", "kind": "arrival",
-           "details": {"track_id": 7, "species": "chipmunk"}}
+           "details": {"species": "chipmunk", "count": 1}}
 DEPARTURE = {"ts": "2026-07-06T10:01:00", "kind": "departure",
-             "details": {"track_id": 7, "species": "chipmunk", "duration_s": 62.0}}
+             "details": {"species": "chipmunk", "count": 0, "duration_s": 62.0}}
 CROWD = {"ts": "2026-07-06T10:02:00", "kind": "crowd_snapshot",
          "details": {"total": 6, "counts": {"squirrel": 4, "turkey": 2}}}
 
@@ -75,6 +75,16 @@ def test_departure_lines_carry_the_visit_duration():
     for _ in range(10):
         line = narrator.generate(PERSONA, BIBLE, DEPARTURE, rng)
         assert "about 62 seconds" in line
+
+
+def test_departure_without_duration_never_says_a_blink():
+    # "One of them left" departures (count still > 0) carry no duration; the
+    # line must not claim the visit lasted "a blink".
+    partial = {"kind": "departure", "details": {"species": "squirrel", "count": 1}}
+    rng = random.Random(0)
+    for _ in range(10):
+        line = narrator.generate(PERSONA, BIBLE, partial, rng)
+        assert "a blink" not in line
 
 
 def test_bible_facts_reach_the_lines():

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { eventClock, eventLine, sortedCounts } from "./daemon";
+import { eventClock, eventLine, sortedCounts, visitLength } from "./daemon";
 
 describe("eventClock", () => {
   it("extracts HH:MM:SS from an ISO timestamp", () => {
@@ -32,17 +32,39 @@ describe("eventLine", () => {
   });
   it("announces an arrival by species", () => {
     expect(
-      eventLine({ ts: "t", kind: "arrival", details: { species: "turkey" } }),
+      eventLine({
+        ts: "t",
+        kind: "arrival",
+        details: { species: "turkey", count: 1 },
+      }),
     ).toBe("turkey arrived");
   });
-  it("announces a departure with the visit length", () => {
+  it("notes the head-count when more of a species arrive", () => {
+    expect(
+      eventLine({
+        ts: "t",
+        kind: "arrival",
+        details: { species: "squirrel", count: 3 },
+      }),
+    ).toBe("squirrel arrived (3 now)");
+  });
+  it("announces a full departure with the visit length", () => {
     expect(
       eventLine({
         ts: "t",
         kind: "departure",
-        details: { species: "chipmunk", duration_s: 61.6 },
+        details: { species: "chipmunk", count: 0, duration_s: 61.6 },
       }),
     ).toBe("chipmunk left after 62s");
+  });
+  it("announces a partial departure with who's left", () => {
+    expect(
+      eventLine({
+        ts: "t",
+        kind: "departure",
+        details: { species: "squirrel", count: 1 },
+      }),
+    ).toBe("squirrel left (1 still here)");
   });
   it("handles a departure with no duration", () => {
     expect(eventLine({ ts: "t", kind: "departure", details: null })).toBe(
@@ -53,6 +75,19 @@ describe("eventLine", () => {
     expect(eventLine({ ts: "t", kind: "clip_recorded", details: null })).toBe(
       "clip recorded",
     );
+  });
+});
+
+describe("visitLength", () => {
+  it("stays in seconds under two minutes", () => {
+    expect(visitLength(61.6)).toBe("62s");
+  });
+  it("switches to minutes for longer visits", () => {
+    expect(visitLength(150)).toBe("3m");
+    expect(visitLength(1800)).toBe("30m");
+  });
+  it("switches to hours for marathon visits", () => {
+    expect(visitLength(7200)).toBe("2.0h");
   });
 });
 
