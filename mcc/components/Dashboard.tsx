@@ -1,6 +1,9 @@
 "use client";
 
-import mqtt from "mqtt";
+// The browser build, NOT the default "mqtt" (Node) build: the Node build can't
+// serialize packets in the browser under Turbopack, so its CONNECT never sends
+// and the client dies with "connack timeout". See lib/mqtt.browser.d.ts.
+import mqtt from "mqtt/dist/mqtt.esm";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   DaemonState,
@@ -391,6 +394,7 @@ function FieldJournal() {
   const [entries, setEntries] = useState<JournalEntry[]>([]);
   const [presence, setPresence] = useState<Record<string, string>>({});
   const [busUp, setBusUp] = useState(false);
+  const [busError, setBusError] = useState<string | null>(null);
   // TTS defaults muted: browsers won't allow audio before a user gesture
   // anyway, and a surprise voice at 6am is a bad first impression. The ref
   // mirrors the state so the (stable) mqtt message handler reads it live.
@@ -402,15 +406,31 @@ function FieldJournal() {
     // Straight to the broker over WebSockets -- the /daemon rewrite can't
     // carry them. Same host the page came from, so the phone-on-LAN case
     // works without config; mqtt.js reconnects on its own.
-    const client = mqtt.connect(
-      busUrl(window.location.hostname, process.env.NEXT_PUBLIC_MERLE_MQTT_WS),
-      { reconnectPeriod: 3000 },
+    const url = busUrl(
+      window.location.hostname,
+      process.env.NEXT_PUBLIC_MERLE_MQTT_WS,
     );
+    const client = mqtt.connect(url, { reconnectPeriod: 3000 });
     client.on("connect", () => {
+      console.debug("[bus] connect", url);
       setBusUp(true);
+      setBusError(null);
       client.subscribe([NARRATION_TOPIC, NARRATOR_STATUS_WILDCARD]);
     });
-    client.on("close", () => setBusUp(false));
+    client.on("close", () => {
+      console.debug("[bus] close");
+      setBusUp(false);
+    });
+    client.on("reconnect", () => console.debug("[bus] reconnect ->", url));
+    client.on("offline", () => console.debug("[bus] offline"));
+    // mqtt.js is an EventEmitter: an unhandled "error" throws in the browser and
+    // can wedge the client's own reconnect loop (connection opens but never
+    // completes the MQTT handshake, retrying forever). Handle it so reconnect
+    // stays healthy, and surface the reason instead of failing silently.
+    client.on("error", (err) => {
+      console.debug("[bus] error", err?.message ?? err);
+      setBusError(err?.message ?? String(err));
+    });
     client.on("message", (topic, payload) => {
       const narratorId = statusTopicId(topic);
       if (narratorId) {
@@ -533,6 +553,11 @@ function FieldJournal() {
                 <code className="mt-1 block w-fit rounded-sm bg-panel2 px-2 py-1 text-xs text-inkdim">
                   mosquitto -c mosquitto.conf -v
                 </code>
+                {busError && (
+                  <span className="mt-2 block text-xs text-chipmunk">
+                    last error: {busError}
+                  </span>
+                )}
               </>
             ) : anyoneOn ? (
               "nothing filed yet — the driveway is between stories"
