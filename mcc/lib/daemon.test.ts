@@ -30,6 +30,25 @@ describe("eventLine", () => {
       eventLine({ ts: "t", kind: "hard_frame_saved", details: { boxes: 4 } }),
     ).toBe("hard frame banked (4 boxes pre-labeled)");
   });
+  it("announces an arrival by species", () => {
+    expect(
+      eventLine({ ts: "t", kind: "arrival", details: { species: "turkey" } }),
+    ).toBe("turkey arrived");
+  });
+  it("announces a departure with the visit length", () => {
+    expect(
+      eventLine({
+        ts: "t",
+        kind: "departure",
+        details: { species: "chipmunk", duration_s: 61.6 },
+      }),
+    ).toBe("chipmunk left after 62s");
+  });
+  it("handles a departure with no duration", () => {
+    expect(eventLine({ ts: "t", kind: "departure", details: null })).toBe(
+      "critter left",
+    );
+  });
   it("falls back to a humanized kind for unknown events", () => {
     expect(eventLine({ ts: "t", kind: "clip_recorded", details: null })).toBe(
       "clip recorded",

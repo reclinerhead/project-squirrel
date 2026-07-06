@@ -61,9 +61,20 @@ export function eventClock(ts: string): string {
   return t ? t.slice(0, 8) : ts;
 }
 
-/** One field-journal line per event kind. Unknown kinds fall back to the raw
+/** One event-log line per event kind. Unknown kinds fall back to the raw
  * kind so new daemon event types show up without a frontend change. */
 export function eventLine(e: MerleEvent): string {
+  if (e.kind === "arrival") {
+    const species = (e.details?.species as string) ?? "critter";
+    return `${species} arrived`;
+  }
+  if (e.kind === "departure") {
+    const species = (e.details?.species as string) ?? "critter";
+    const secs = e.details?.duration_s as number | undefined;
+    return secs !== undefined
+      ? `${species} left after ${Math.round(secs)}s`
+      : `${species} left`;
+  }
   if (e.kind === "crowd_snapshot") {
     const total = (e.details?.total as number) ?? "?";
     const counts = (e.details?.counts as Record<string, number>) ?? {};

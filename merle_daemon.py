@@ -11,12 +11,17 @@
 #   GET  /snapshot  the latest annotated frame, one JPEG
 #   POST /control   start/stop the loop, toggle recording, set the crowd threshold
 #
-# Phase 2b-i: this runs against a SYNTHETIC frame source (frames.py) so the whole
-# HTTP surface and DB wiring work with no camera -- testable in CI, and something
-# the MCC frontend can be built against. Phase 2b-ii swaps in the real
-# RTSP + YOLO + ByteTrack source behind the same FrameSource interface.
+# Events also go out live on the MQTT bus (bus.py, topic driveway/events) for
+# decoupled subscribers -- narrators, dashboards, future rover processes. SQLite
+# stays the durable archive; the bus is the live transport, and the daemon runs
+# fine (just unnarrated) when no broker is up.
 #
-# Run it:  uvicorn merle_daemon:app        (MERLE_DB overrides the db path)
+# The frame source is selected by MERLE_SOURCE: 'camera' (default, the real
+# RTSP + YOLO + ByteTrack feed) or 'synthetic' (camera-free, used by tests/CI
+# and frontend work).
+#
+# Run it:  uvicorn merle_daemon:app        (MERLE_DB overrides the db path,
+#                                           MERLE_MQTT the broker host:port)
 # =============================================================================
 
 import asyncio
@@ -32,6 +37,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
+import bus
 import perception
 import storage
 from frames import SyntheticFrameSource
@@ -43,6 +49,9 @@ CLASS_COLORS = perception.class_colors({0: "chipmunk", 1: "squirrel", 2: "turkey
 TARGET_FPS = 15          # cap the loop; the real camera runs ~15fps anyway
 CROWD_COOLDOWN = 10.0    # seconds between crowd-snapshot events, like live.py
 NO_FRAME_RETRY = 0.25    # pause between reads while the source has no frame
+DEPART_AFTER = 3.0       # seconds a track must be gone before we call it a departure
+                         # (longer than the tracker's ~1s coast, so a coasting dip
+                         # that re-matches never reads as leave-and-return)
 
 
 def mjpeg_frame(jpeg):
@@ -87,22 +96,33 @@ class Worker(threading.Thread):
     """The perception loop, headless. Pulls frames from the source, annotates,
     encodes, publishes to SharedState, and persists sightings/events to SQLite."""
 
-    def __init__(self, source, state, conn, control, db_lock):
+    def __init__(self, source, state, conn, control, db_lock, publisher):
         super().__init__(daemon=True)
         self.source = source
         self.state = state
         self.conn = conn
         self.control = control
         self.db_lock = db_lock   # serialize DB access with the request threads
+        self.publisher = publisher   # bus.EventPublisher (or a test fake)
         self._stop = threading.Event()
         self._last_crowd = 0.0
         self._loop_times = deque(maxlen=30)   # wall-clock interval between loops
         self._prev_loop = None
+        self._present = {}   # track_id -> {species, since, last} for arrival/departure
         self.writer = None                    # cv2.VideoWriter while recording
         self.clip_path = None
 
     def stop(self):
         self._stop.set()
+
+    def _event(self, ts, kind, details):
+        """Every notable moment goes two places: SQLite (the durable archive,
+        what /state and history read) and the bus (the live transport narrators
+        and dashboards subscribe to). One helper so the two can't diverge."""
+        with self.db_lock:
+            storage.record_event(self.conn, ts, kind, details)
+        self.publisher.publish(bus.EVENTS_TOPIC,
+                               {"ts": ts, "kind": kind, "details": details})
 
     def _record(self, annotated, ts):
         """Drive the clip recorder off control.recording. Records the ANNOTATED
@@ -130,8 +150,7 @@ class Worker(threading.Thread):
 
     def _finish_clip(self, ts):
         self.writer.release()
-        with self.db_lock:
-            storage.record_event(self.conn, ts, "clip_recorded", {"path": self.clip_path})
+        self._event(ts, "clip_recorded", {"path": self.clip_path})
         print(f"Clip saved: {self.clip_path}")
         self.writer = None
         self.clip_path = None
@@ -171,13 +190,34 @@ class Worker(threading.Thread):
                     storage.upsert_sighting(self.conn, self.state.session_id,
                                             d.track_id, d.species, ts, d.conf)
 
-            # Crowd moment: enough animals at once, and cooled down since the last.
+            # Arrivals and departures -- the narrator's bread and butter. A track
+            # id first MATCHED (never a coasting ghost) is an arrival; an id
+            # absent for DEPART_AFTER seconds is a departure. The grace window
+            # absorbs coasting dips so one animal can't arrive twice in a blink.
             now = time.time()
+            for d in dets:
+                seen = self._present.get(d.track_id)
+                if seen is None:
+                    if not d.coasting:
+                        self._present[d.track_id] = {"species": d.species,
+                                                     "since": now, "last": now}
+                        self._event(ts, "arrival",
+                                    {"track_id": d.track_id, "species": d.species})
+                else:
+                    seen["last"] = now
+                    seen["species"] = d.species   # species vote can revise mid-track
+            for tid in [t for t, s in self._present.items()
+                        if now - s["last"] > DEPART_AFTER]:
+                s = self._present.pop(tid)
+                self._event(ts, "departure",
+                            {"track_id": tid, "species": s["species"],
+                             "duration_s": round(s["last"] - s["since"], 1)})
+
+            # Crowd moment: enough animals at once, and cooled down since the last.
             if len(dets) >= self.control.crowd_threshold and now - self._last_crowd >= CROWD_COOLDOWN:
                 counts = dict(Counter(d.species for d in dets))
-                with self.db_lock:
-                    storage.record_event(self.conn, ts, "crowd_snapshot",
-                                         {"total": len(dets), "counts": counts})
+                self._event(ts, "crowd_snapshot",
+                            {"total": len(dets), "counts": counts})
                 self._last_crowd = now
 
             annotated = annotate(frame, dets)
@@ -221,9 +261,12 @@ def _read_db_summary(conn, session_id, db_lock):
         }
 
 
-def create_app(source, conn):
+def create_app(source, conn, publisher=None):
     """Build the FastAPI app around a frame source and an open DB connection.
-    Factored out so tests can pass a synthetic source + in-memory DB."""
+    Factored out so tests can pass a synthetic source + in-memory DB + a fake
+    publisher (asserting on bus traffic without a broker). The default publisher
+    is resilient to a missing broker, so the daemon runs fine without Mosquitto
+    -- events then live only in SQLite and nobody narrates them."""
     storage.seed_training_runs(conn)
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     state = SharedState(session_id)
@@ -242,13 +285,17 @@ def create_app(source, conn):
         # factory. The runtime app passes a factory so that IMPORTING this module
         # never opens the camera or loads the model -- that only happens here, at
         # server startup, which pytest/CI never trigger for the module-level app.
+        # Same deal for the bus connection: built here, not at import.
+        pub = bus.EventPublisher("merle-daemon").start() if publisher is None else publisher
         src = source() if callable(source) else source
-        worker = Worker(src, state, conn, control, db_lock)
+        worker = Worker(src, state, conn, control, db_lock, pub)
         worker.start()
         yield
         worker.stop()
         worker.join(timeout=2)
         src.close()
+        if publisher is None:
+            pub.close()
 
     app = FastAPI(title="Merle daemon", lifespan=lifespan)
     # Exposed for tests to reach the worker/control directly.

@@ -1,5 +1,6 @@
 "use client";
 
+import mqtt from "mqtt";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   DaemonState,
@@ -11,6 +12,15 @@ import {
   sendControl,
   sortedCounts,
 } from "@/lib/daemon";
+import {
+  NARRATION_TOPIC,
+  NARRATOR_STATUS_WILDCARD,
+  NarrationLine,
+  busUrl,
+  parseLine,
+  pickVoice,
+  statusTopicId,
+} from "@/lib/bus";
 
 // Species chip colors = the actual box colors drawn on the stream, so the
 // panel and the video read as one instrument. Anything unknown gets bone.
@@ -194,9 +204,8 @@ export default function Dashboard() {
             )}
           </section>
 
-          {/* Placeholder row: honest about what's not built yet. */}
           <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <ComingSoon title="Field Journal" note="the narrator files reports here" />
+            <FieldJournal />
             <ComingSoon title="Weather Post" note="conditions at the seed pile" />
           </div>
         </main>
@@ -360,6 +369,214 @@ export default function Dashboard() {
 }
 
 /* --- pieces ---------------------------------------------------------------- */
+
+/** Speak one narration line via the browser's TTS, matching the persona's
+ * voice hint against installed voices (default voice when nothing matches). */
+function speakLine(line: NarrationLine) {
+  const synth = window.speechSynthesis;
+  if (!synth) return;
+  const u = new SpeechSynthesisUtterance(line.text);
+  const voice = pickVoice(synth.getVoices(), line.voice);
+  if (voice) u.voice = voice;
+  synth.speak(u);
+}
+
+// A journal entry with a stable client-side key: narration lines have no id on
+// the bus, and ts alone can collide when two lines land in the same second.
+type JournalEntry = NarrationLine & { key: number };
+
+const JOURNAL_LIMIT = 50;
+
+function FieldJournal() {
+  const [entries, setEntries] = useState<JournalEntry[]>([]);
+  const [presence, setPresence] = useState<Record<string, string>>({});
+  const [busUp, setBusUp] = useState(false);
+  // TTS defaults muted: browsers won't allow audio before a user gesture
+  // anyway, and a surprise voice at 6am is a bad first impression. The ref
+  // mirrors the state so the (stable) mqtt message handler reads it live.
+  const [speaking, setSpeaking] = useState(false);
+  const speakingRef = useRef(false);
+  const nextKey = useRef(0);
+
+  useEffect(() => {
+    // Straight to the broker over WebSockets -- the /daemon rewrite can't
+    // carry them. Same host the page came from, so the phone-on-LAN case
+    // works without config; mqtt.js reconnects on its own.
+    const client = mqtt.connect(
+      busUrl(window.location.hostname, process.env.NEXT_PUBLIC_MERLE_MQTT_WS),
+      { reconnectPeriod: 3000 },
+    );
+    client.on("connect", () => {
+      setBusUp(true);
+      client.subscribe([NARRATION_TOPIC, NARRATOR_STATUS_WILDCARD]);
+    });
+    client.on("close", () => setBusUp(false));
+    client.on("message", (topic, payload) => {
+      const narratorId = statusTopicId(topic);
+      if (narratorId) {
+        // Retained per-narrator status: "online", "offline", or whatever a
+        // future narrator reports ("coffee break") -- shown verbatim.
+        setPresence((p) => ({ ...p, [narratorId]: payload.toString() }));
+        return;
+      }
+      const line = parseLine(payload.toString());
+      if (!line) return;
+      setEntries((prev) =>
+        [{ ...line, key: nextKey.current++ }, ...prev].slice(0, JOURNAL_LIMIT),
+      );
+      if (speakingRef.current) speakLine(line);
+    });
+    return () => {
+      client.end(true);
+      window.speechSynthesis?.cancel();
+    };
+  }, []);
+
+  const toggleSpeaking = useCallback(() => {
+    setSpeaking((on) => {
+      const next = !on;
+      speakingRef.current = next;
+      if (!next) window.speechSynthesis?.cancel(); // muting cuts mid-sentence
+      return next;
+    });
+  }, []);
+
+  const narrators = Object.entries(presence).sort(([a], [b]) =>
+    a.localeCompare(b),
+  );
+  const anyoneOn = narrators.some(([, status]) => status === "online");
+
+  return (
+    <section className="panel flex flex-col rounded-sm border border-line bg-panel">
+      <PanelLabel
+        title="Field Journal"
+        right={
+          <span className="flex items-center gap-3">
+            {!busUp ? (
+              <span className="stamp text-xs text-inkfaint">bus quiet</span>
+            ) : narrators.length === 0 ? (
+              <span className="stamp text-xs text-inkfaint">
+                no narrator hired
+              </span>
+            ) : (
+              narrators.map(([id, status]) => (
+                <span key={id} className="flex items-center gap-1.5 text-xs">
+                  {status === "online" ? (
+                    <>
+                      <span className="lamp inline-block h-2 w-2 rounded-full bg-led text-led" />
+                      <span className="stamp text-led">{id} · on the air</span>
+                    </>
+                  ) : status === "offline" ? (
+                    <>
+                      <span className="inline-block h-2 w-2 rounded-full bg-inkfaint" />
+                      <span className="stamp text-inkfaint">
+                        {id} · off the air
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="breathe inline-block h-2 w-2 rounded-full bg-turkey" />
+                      <span className="stamp text-turkey">
+                        {id} · {status}
+                      </span>
+                    </>
+                  )}
+                </span>
+              ))
+            )}
+            <button
+              type="button"
+              onClick={toggleSpeaking}
+              aria-pressed={speaking}
+              aria-label={speaking ? "Mute narration" : "Speak narration aloud"}
+              title={speaking ? "mute narration" : "speak narration aloud"}
+              className={`rounded-sm border p-1.5 transition-colors ${
+                speaking
+                  ? "border-squirrel text-squirrel"
+                  : "border-linebright text-inkdim hover:border-squirrel hover:text-squirrel"
+              }`}
+            >
+              <SpeakerIcon muted={!speaking} />
+            </button>
+          </span>
+        }
+      />
+      <div className="min-h-[110px] flex-1 px-4 pb-4">
+        {entries.length > 0 ? (
+          <ul className="flex max-h-72 flex-col gap-3 overflow-y-auto pr-1">
+            {entries.map((e, i) => (
+              <li
+                key={e.key}
+                className={`journal-in border-l-2 pl-3 ${
+                  i === 0 ? "border-led" : "border-line"
+                }`}
+              >
+                <div className="flex gap-2 text-[11px]">
+                  <span className="text-inkfaint">{eventClock(e.ts)}</span>
+                  <span className="stamp text-inkdim">{e.narrator}</span>
+                </div>
+                <p
+                  className="mt-0.5 text-[15px] leading-snug text-ink"
+                  style={{ fontFamily: "var(--font-display)" }}
+                >
+                  {e.text}
+                </p>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="py-2 text-sm leading-relaxed text-inkfaint">
+            {!busUp ? (
+              <>
+                the event bus isn&apos;t reachable. light it up from the project
+                root:
+                <code className="mt-1 block w-fit rounded-sm bg-panel2 px-2 py-1 text-xs text-inkdim">
+                  mosquitto -c mosquitto.conf -v
+                </code>
+              </>
+            ) : anyoneOn ? (
+              "nothing filed yet — the driveway is between stories"
+            ) : (
+              <>
+                the bus is up but nobody&apos;s reporting. put Marlin on the
+                air:
+                <code className="mt-1 block w-fit rounded-sm bg-panel2 px-2 py-1 text-xs text-inkdim">
+                  python narrator.py --persona personas/marlin.yaml
+                </code>
+              </>
+            )}
+          </p>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function SpeakerIcon({ muted }: { muted: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="15"
+      height="15"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M11 5 6.5 8.5H3v7h3.5L11 19z" />
+      {muted ? (
+        <path d="m15.5 9.5 5 5m0-5-5 5" />
+      ) : (
+        <>
+          <path d="M14.5 9.5a4 4 0 0 1 0 5" />
+          <path d="M17 7a7.5 7.5 0 0 1 0 10" />
+        </>
+      )}
+    </svg>
+  );
+}
 
 function Header({
   state,
