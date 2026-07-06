@@ -11,12 +11,17 @@
 #   GET  /snapshot  the latest annotated frame, one JPEG
 #   POST /control   start/stop the loop, toggle recording, set the crowd threshold
 #
-# Phase 2b-i: this runs against a SYNTHETIC frame source (frames.py) so the whole
-# HTTP surface and DB wiring work with no camera -- testable in CI, and something
-# the MCC frontend can be built against. Phase 2b-ii swaps in the real
-# RTSP + YOLO + ByteTrack source behind the same FrameSource interface.
+# Events also go out live on the MQTT bus (bus.py, topic driveway/events) for
+# decoupled subscribers -- narrators, dashboards, future rover processes. SQLite
+# stays the durable archive; the bus is the live transport, and the daemon runs
+# fine (just unnarrated) when no broker is up.
 #
-# Run it:  uvicorn merle_daemon:app        (MERLE_DB overrides the db path)
+# The frame source is selected by MERLE_SOURCE: 'camera' (default, the real
+# RTSP + YOLO + ByteTrack feed) or 'synthetic' (camera-free, used by tests/CI
+# and frontend work).
+#
+# Run it:  uvicorn merle_daemon:app        (MERLE_DB overrides the db path,
+#                                           MERLE_MQTT the broker host:port)
 # =============================================================================
 
 import asyncio
@@ -32,6 +37,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
+import bus
 import perception
 import storage
 from frames import SyntheticFrameSource
@@ -43,6 +49,16 @@ CLASS_COLORS = perception.class_colors({0: "chipmunk", 1: "squirrel", 2: "turkey
 TARGET_FPS = 15          # cap the loop; the real camera runs ~15fps anyway
 CROWD_COOLDOWN = 10.0    # seconds between crowd-snapshot events, like live.py
 NO_FRAME_RETRY = 0.25    # pause between reads while the source has no frame
+
+# Arrival/departure debounce (SPECIES-level, not track-level). ByteTrack mints a
+# new track id when it loses an animal for more than its buffer and re-acquires
+# it -- same squirrel, new identity. Track-level events turned every one of
+# those into a phantom departure+arrival pair. Species counts don't care which
+# id is which; they only dip briefly during churn, and the debounce absorbs it:
+ARRIVE_AFTER = 2.0       # a count INCREASE must hold this long to be an arrival
+DEPART_AFTER = 12.0      # a DECREASE must hold this long -- longer than any
+                         # realistic churn gap, so lost-and-reminted ids never
+                         # read as leave-and-return
 
 
 def mjpeg_frame(jpeg):
@@ -87,22 +103,71 @@ class Worker(threading.Thread):
     """The perception loop, headless. Pulls frames from the source, annotates,
     encodes, publishes to SharedState, and persists sightings/events to SQLite."""
 
-    def __init__(self, source, state, conn, control, db_lock):
+    def __init__(self, source, state, conn, control, db_lock, publisher):
         super().__init__(daemon=True)
         self.source = source
         self.state = state
         self.conn = conn
         self.control = control
         self.db_lock = db_lock   # serialize DB access with the request threads
+        self.publisher = publisher   # bus.EventPublisher (or a test fake)
         self._stop = threading.Event()
         self._last_crowd = 0.0
         self._loop_times = deque(maxlen=30)   # wall-clock interval between loops
         self._prev_loop = None
+        self._species = {}   # species -> presence state, see _species_presence
         self.writer = None                    # cv2.VideoWriter while recording
         self.clip_path = None
 
     def stop(self):
         self._stop.set()
+
+    def _event(self, ts, kind, details):
+        """Every notable moment goes two places: SQLite (the durable archive,
+        what /state and history read) and the bus (the live transport narrators
+        and dashboards subscribe to). One helper so the two can't diverge."""
+        with self.db_lock:
+            storage.record_event(self.conn, ts, kind, details)
+        self.publisher.publish(bus.EVENTS_TOPIC,
+                               {"ts": ts, "kind": kind, "details": details})
+
+    def _species_presence(self, counts, ts, now):
+        """Debounced species-level arrival/departure. A species' observed count
+        must hold at a new value for ARRIVE_AFTER (up) or DEPART_AFTER (down)
+        before the change is announced; any wobble back to the announced count
+        resets the timer. Tracker id churn (same animal re-minted under a new
+        id after a detection gap) dips a count for a few seconds at most, so it
+        produces NO events -- which is the whole point. `duration_s` rides on a
+        departure only when the last one leaves (counts above zero can't know
+        which individual left)."""
+        for sp in set(counts) | set(self._species):
+            observed = counts.get(sp, 0)
+            st = self._species.setdefault(
+                sp, {"count": 0, "candidate": 0, "candidate_since": None,
+                     "present_since": None})
+            if observed == st["count"]:
+                st["candidate_since"] = None   # settled back -- forget the wobble
+                continue
+            if st["candidate_since"] is None or observed != st["candidate"]:
+                st["candidate"] = observed     # new challenger -- start the clock
+                st["candidate_since"] = now
+                continue
+            wait = ARRIVE_AFTER if observed > st["count"] else DEPART_AFTER
+            if now - st["candidate_since"] < wait:
+                continue
+            old = st["count"]
+            st["count"] = observed
+            st["candidate_since"] = None
+            if observed > old:
+                if old == 0:
+                    st["present_since"] = now
+                self._event(ts, "arrival", {"species": sp, "count": observed})
+            else:
+                details = {"species": sp, "count": observed}
+                if observed == 0 and st["present_since"] is not None:
+                    details["duration_s"] = round(now - st["present_since"], 1)
+                    st["present_since"] = None
+                self._event(ts, "departure", details)
 
     def _record(self, annotated, ts):
         """Drive the clip recorder off control.recording. Records the ANNOTATED
@@ -130,8 +195,7 @@ class Worker(threading.Thread):
 
     def _finish_clip(self, ts):
         self.writer.release()
-        with self.db_lock:
-            storage.record_event(self.conn, ts, "clip_recorded", {"path": self.clip_path})
+        self._event(ts, "clip_recorded", {"path": self.clip_path})
         print(f"Clip saved: {self.clip_path}")
         self.writer = None
         self.clip_path = None
@@ -171,13 +235,18 @@ class Worker(threading.Thread):
                     storage.upsert_sighting(self.conn, self.state.session_id,
                                             d.track_id, d.species, ts, d.conf)
 
-            # Crowd moment: enough animals at once, and cooled down since the last.
+            # Arrivals and departures -- the narrator's bread and butter.
+            # Species-level, from MATCHED tracks only (a coasting ghost is a
+            # briefly-lost track, not a new animal): see _species_presence.
             now = time.time()
+            self._species_presence(
+                Counter(d.species for d in dets if not d.coasting), ts, now)
+
+            # Crowd moment: enough animals at once, and cooled down since the last.
             if len(dets) >= self.control.crowd_threshold and now - self._last_crowd >= CROWD_COOLDOWN:
                 counts = dict(Counter(d.species for d in dets))
-                with self.db_lock:
-                    storage.record_event(self.conn, ts, "crowd_snapshot",
-                                         {"total": len(dets), "counts": counts})
+                self._event(ts, "crowd_snapshot",
+                            {"total": len(dets), "counts": counts})
                 self._last_crowd = now
 
             annotated = annotate(frame, dets)
@@ -221,9 +290,12 @@ def _read_db_summary(conn, session_id, db_lock):
         }
 
 
-def create_app(source, conn):
+def create_app(source, conn, publisher=None):
     """Build the FastAPI app around a frame source and an open DB connection.
-    Factored out so tests can pass a synthetic source + in-memory DB."""
+    Factored out so tests can pass a synthetic source + in-memory DB + a fake
+    publisher (asserting on bus traffic without a broker). The default publisher
+    is resilient to a missing broker, so the daemon runs fine without Mosquitto
+    -- events then live only in SQLite and nobody narrates them."""
     storage.seed_training_runs(conn)
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     state = SharedState(session_id)
@@ -242,13 +314,17 @@ def create_app(source, conn):
         # factory. The runtime app passes a factory so that IMPORTING this module
         # never opens the camera or loads the model -- that only happens here, at
         # server startup, which pytest/CI never trigger for the module-level app.
+        # Same deal for the bus connection: built here, not at import.
+        pub = bus.EventPublisher("merle-daemon").start() if publisher is None else publisher
         src = source() if callable(source) else source
-        worker = Worker(src, state, conn, control, db_lock)
+        worker = Worker(src, state, conn, control, db_lock, pub)
         worker.start()
         yield
         worker.stop()
         worker.join(timeout=2)
         src.close()
+        if publisher is None:
+            pub.close()
 
     app = FastAPI(title="Merle daemon", lifespan=lifespan)
     # Exposed for tests to reach the worker/control directly.

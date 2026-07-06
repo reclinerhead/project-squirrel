@@ -8,14 +8,31 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
+import bus
 import merle_daemon
 import storage
 from frames import SyntheticFrameSource, Detection
 
 
+class _FakePublisher:
+    """Stands in for bus.EventPublisher: records every publish so tests can
+    assert on bus traffic without a broker (and CI never opens a socket)."""
+
+    def __init__(self):
+        self.messages = []   # [(topic, payload_dict), ...]
+
+    def publish(self, topic, payload):
+        self.messages.append((topic, payload))
+
+
+def _app(source, publisher=None):
+    return merle_daemon.create_app(source, storage.connect(":memory:"),
+                                   publisher=publisher or _FakePublisher())
+
+
 @pytest.fixture
 def client():
-    app = merle_daemon.create_app(SyntheticFrameSource(), storage.connect(":memory:"))
+    app = _app(SyntheticFrameSource())
     with TestClient(app) as c:
         _wait_for_first_frame(c)
         yield c
@@ -86,7 +103,7 @@ def test_sightings_persist_to_db(client):
 
 def test_crowd_event_recorded_when_threshold_low():
     # Threshold below the synthetic animal count -> a crowd_snapshot event fires.
-    app = merle_daemon.create_app(SyntheticFrameSource(), storage.connect(":memory:"))
+    app = _app(SyntheticFrameSource())
     with TestClient(app) as c:
         c.post("/control", json={"action": "set_crowd_threshold", "value": 2})
         deadline = time.time() + 2.0
@@ -122,7 +139,7 @@ def test_worker_survives_dropped_frames():
     # A dropped read must NOT kill the perception loop (the bug: it used to
     # `break`, freezing the feed until a full restart). The worker should flag
     # no-signal, keep polling, and recover once frames return.
-    app = merle_daemon.create_app(_FlakySource(drop=4), storage.connect(":memory:"))
+    app = _app(_FlakySource(drop=4))
     with TestClient(app) as c:
         deadline = time.time() + 4
         recovered = False
@@ -134,6 +151,121 @@ def test_worker_survives_dropped_frames():
                 break
             time.sleep(0.05)
         assert recovered, "worker died on dropped frames instead of recovering"
+
+
+class _VisitSource:
+    """A chipmunk that shows up for a stretch and leaves -- the minimal
+    arrival/departure story, without waiting out the synthetic source's
+    90-frame visit cycle in real time."""
+
+    def __init__(self, visit_reads=10):
+        self._visit_reads = visit_reads
+        self._syn = SyntheticFrameSource()
+        self.reads = 0
+
+    def read(self):
+        self.reads += 1
+        frame, dets = self._syn.read()
+        dets = [d for d in dets if d.species != "chipmunk"]
+        if self.reads <= self._visit_reads:
+            dets.append(Detection(99, "chipmunk", (100, 100, 150, 140), 0.6))
+        return frame, dets
+
+    def close(self):
+        pass
+
+
+def test_arrival_and_departure_events(monkeypatch):
+    # A species count that holds -> arrival after the debounce; gone past the
+    # departure window -> departure with the visit duration. Both must reach
+    # SQLite (recent_events) AND the bus (driveway/events) with the same content.
+    monkeypatch.setattr(merle_daemon, "ARRIVE_AFTER", 0.05)
+    monkeypatch.setattr(merle_daemon, "DEPART_AFTER", 0.15)
+    fake = _FakePublisher()
+    app = _app(_VisitSource(), publisher=fake)
+    with TestClient(app) as c:
+        deadline = time.time() + 3.0
+        events = []
+        while time.time() < deadline:
+            events = c.get("/state").json()["recent_events"]
+            if any(e["kind"] == "departure" for e in events):
+                break
+            time.sleep(0.05)
+
+    arrivals = [e for e in events if e["kind"] == "arrival"]
+    departures = [e for e in events if e["kind"] == "departure"]
+    assert {a["details"]["species"] for a in arrivals} == {"squirrel", "chipmunk"}
+    # Events are species-level: the two ever-present squirrels are ONE arrival.
+    squirrel_arrival = next(a for a in arrivals if a["details"]["species"] == "squirrel")
+    assert squirrel_arrival["details"]["count"] == 2
+    assert [d["details"]["species"] for d in departures] == ["chipmunk"]
+    assert departures[0]["details"]["count"] == 0
+    assert departures[0]["details"]["duration_s"] >= 0
+
+    bus_events = [p for t, p in fake.messages if t == bus.EVENTS_TOPIC]
+    assert {e["kind"] for e in bus_events} >= {"arrival", "departure"}
+    # The bus payload carries the same shape the archive does.
+    bus_departure = next(e for e in bus_events if e["kind"] == "departure")
+    assert bus_departure["details"]["species"] == "chipmunk"
+
+
+class _ChurnSource:
+    """One squirrel that never leaves, but whose track id gets re-minted after
+    short detection gaps -- exactly the ByteTrack churn seen on the real
+    driveway (stationary feeder flickers out, comes back as a 'new' animal)."""
+
+    def __init__(self):
+        self.reads = 0
+        self._syn = SyntheticFrameSource()
+
+    def read(self):
+        self.reads += 1
+        frame, _ = self._syn.read()
+        cycle = self.reads % 7
+        if cycle in (5, 6):
+            return frame, []   # detection gap: the tracker loses it here
+        tid = 100 + self.reads // 7   # ...and re-acquires it as a NEW id
+        return frame, [Detection(tid, "squirrel", (100, 100, 190, 164), 0.7)]
+
+    def close(self):
+        pass
+
+
+def test_id_churn_produces_no_phantom_events(monkeypatch):
+    # THE regression test for the event spam: id churn on a squirrel that never
+    # leaves must produce exactly one arrival and zero departures. The count
+    # dips 1 -> 0 for two frames per cycle, far shorter than DEPART_AFTER.
+    monkeypatch.setattr(merle_daemon, "ARRIVE_AFTER", 0.05)
+    monkeypatch.setattr(merle_daemon, "DEPART_AFTER", 1.0)
+    fake = _FakePublisher()
+    app = _app(_ChurnSource(), publisher=fake)
+    with TestClient(app) as c:
+        time.sleep(1.5)   # ~3 churn cycles at the worker's 15fps pace
+        events = c.get("/state").json()["recent_events"]
+
+    arrivals = [e for e in events if e["kind"] == "arrival"]
+    departures = [e for e in events if e["kind"] == "departure"]
+    assert len(arrivals) == 1, f"churn minted extra arrivals: {arrivals}"
+    assert departures == [], f"churn manufactured departures: {departures}"
+
+
+def test_coasting_track_never_arrives():
+    # A coasting ghost is a briefly-lost track, not a new animal: it must not
+    # fire an arrival until it actually re-matches.
+    class _CoastingSource(SyntheticFrameSource):
+        def read(self):
+            frame, dets = super().read()
+            dets.append(Detection(50, "turkey", (10, 10, 60, 60), 0.3, coasting=True))
+            return frame, dets
+
+    fake = _FakePublisher()
+    app = _app(_CoastingSource(), publisher=fake)
+    with TestClient(app) as c:
+        _wait_for_first_frame(c)
+        time.sleep(0.3)
+        events = c.get("/state").json()["recent_events"]
+    assert not any(e["kind"] == "arrival" and e["details"]["species"] == "turkey"
+                   for e in events)
 
 
 def test_synthetic_source_is_deterministic():

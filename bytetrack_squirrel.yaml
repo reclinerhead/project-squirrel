@@ -7,8 +7,12 @@ track_low_thresh: 0.1 # second-stage recovery band; DETECT_FLOOR in live.py is
                       # set to match, so this whole band actually reaches the tracker
 new_track_thresh: 0.5 # birth needs real confidence -- stock 0.25 let a single
                       # junk detection mint a brand-new track ID
-track_buffer: 60 # keep lost tracks ~4s at 15fps (stock 30 = ~2s), so a feeding
-                 # squirrel that dips out briefly keeps its ID instead of minting
-                 # a new one (which also inflated the run-total census)
+track_buffer: 180 # keep lost tracks ~12s at 15fps (stock 30 = ~2s; was 60 = ~4s).
+                  # A stationary feeding squirrel can flicker out of detection for
+                  # many seconds; 4s wasn't enough and the re-minted IDs inflated
+                  # the census and manufactured phantom arrive/depart events. A
+                  # moved animal can still fail the IoU re-match, so the daemon's
+                  # species-level event debounce is the real spam guard -- this
+                  # just reduces churn at the source.
 match_thresh: 0.8 # association IoU (stock value)
 fuse_score: True # weigh detection score into matching (stock value)

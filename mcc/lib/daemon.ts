@@ -61,9 +61,33 @@ export function eventClock(ts: string): string {
   return t ? t.slice(0, 8) : ts;
 }
 
-/** One field-journal line per event kind. Unknown kinds fall back to the raw
- * kind so new daemon event types show up without a frontend change. */
+/** Visit lengths for the event log: seconds under 2 minutes, then minutes,
+ * then hours -- species-level visits can run long. */
+export function visitLength(secs: number): string {
+  if (secs < 120) return `${Math.round(secs)}s`;
+  if (secs < 5400) return `${Math.round(secs / 60)}m`;
+  return `${(secs / 3600).toFixed(1)}h`;
+}
+
+/** One event-log line per event kind. Unknown kinds fall back to the raw
+ * kind so new daemon event types show up without a frontend change.
+ * arrival/departure are SPECIES-level (count rides in details); duration only
+ * exists when the last one left. */
 export function eventLine(e: MerleEvent): string {
+  if (e.kind === "arrival") {
+    const species = (e.details?.species as string) ?? "critter";
+    const count = (e.details?.count as number) ?? 1;
+    return count > 1 ? `${species} arrived (${count} now)` : `${species} arrived`;
+  }
+  if (e.kind === "departure") {
+    const species = (e.details?.species as string) ?? "critter";
+    const count = (e.details?.count as number) ?? 0;
+    if (count > 0) return `${species} left (${count} still here)`;
+    const secs = e.details?.duration_s as number | undefined;
+    return secs !== undefined
+      ? `${species} left after ${visitLength(secs)}`
+      : `${species} left`;
+  }
   if (e.kind === "crowd_snapshot") {
     const total = (e.details?.total as number) ?? "?";
     const counts = (e.details?.counts as Record<string, number>) ?? {};
