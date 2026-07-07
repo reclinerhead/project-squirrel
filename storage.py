@@ -74,11 +74,22 @@ BASELINE_RUNS = [
     },
     {
         "run_name": "train-16", "map50": 0.936, "recall": 0.887, "map50_95": 0.667,
-        "val_split": "0705", "notes": "Added ~55 reviewed hard frames (100% to train). Deployed as models/current.pt.",
+        "val_split": "0705", "notes": "Added ~55 reviewed hard frames (100% to train). Last 3-class model.",
         "metrics": {
             "chipmunk": {"p": 0.921, "r": 0.837, "map50": 0.929, "map50_95": 0.540},
             "squirrel": {"p": 0.944, "r": 0.924, "map50": 0.949, "map50_95": 0.734},
             "turkey": {"p": 0.923, "r": 0.929, "map50": 0.929, "map50_95": 0.726},
+        },
+    },
+    {
+        # First 2-class model (chipmunk retired to the rover era). NOT same-ruler
+        # vs train-16: different valid split (0707) AND class set, so this starts
+        # a fresh baseline rather than continuing train-16's numbers.
+        "run_name": "train-18", "map50": 0.864, "recall": 0.838, "map50_95": 0.673,
+        "val_split": "0707", "notes": "First 2-class (squirrel/turkey). Deployed as models/current.pt. Turkey read is thin (30 instances) -- next data pivot.",
+        "metrics": {
+            "squirrel": {"p": 0.889, "r": 0.876, "map50": 0.908, "map50_95": 0.691},
+            "turkey": {"p": 0.865, "r": 0.800, "map50": 0.820, "map50_95": 0.655},
         },
     },
 ]

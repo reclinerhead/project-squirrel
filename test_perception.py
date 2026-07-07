@@ -77,6 +77,21 @@ def test_class_colors_are_stable_and_cover_names():
     assert colors == perception.class_colors({0: "chipmunk", 1: "squirrel", 2: "turkey"})
 
 
+def test_class_colors_pin_to_name_not_position():
+    # The regression that dropping chipmunk (index 0) would have caused: a
+    # species must keep its color no matter its index or how many classes there
+    # are, or the stream and the frontend accents drift apart.
+    three = perception.class_colors({0: "chipmunk", 1: "squirrel", 2: "turkey"})
+    two = perception.class_colors({0: "squirrel", 1: "turkey"})
+    assert two["squirrel"] == three["squirrel"]   # squirrel stays orange, not red
+    assert two["turkey"] == three["turkey"]
+
+
+def test_class_colors_falls_back_for_unknown_species():
+    colors = perception.class_colors({0: "raccoon"})
+    assert colors["raccoon"] in perception.PALETTE
+
+
 def test_draw_tracks_runs_without_error():
     # Not asserting pixels -- just that the drawing path is valid for both a live
     # (colored) and a coasting (grey) item on a real frame buffer.
