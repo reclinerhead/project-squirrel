@@ -6,10 +6,12 @@
 # HTTP API. The MCC (Next.js dashboard) is just a client of this -- it never
 # touches the DB or filesystem directly.
 #
-#   GET  /state     live counts + tracks + fps, run totals, recent events (JSON)
-#   GET  /stream    the annotated video as MJPEG (an <img src> in the browser)
-#   GET  /snapshot  the latest annotated frame, one JPEG
-#   POST /control   start/stop the loop, toggle recording, set the crowd threshold
+#   GET  /state        live counts + tracks + fps, run totals, recent events (JSON)
+#   GET  /stream       the annotated video as MJPEG (an <img src> in the browser)
+#   GET  /snapshot     the latest annotated frame, one JPEG
+#   GET  /history      N-day census + hard-frame trend + training runs (JSON)
+#   GET  /history/day  hourly arrivals for one date (JSON)
+#   POST /control      start/stop the loop, toggle recording, set the crowd threshold
 #
 # Events also go out live on the MQTT bus (bus.py, topic driveway/events) for
 # decoupled subscribers -- narrators, dashboards, future rover processes. SQLite
@@ -30,7 +32,7 @@ import threading
 import time
 from collections import Counter, deque
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 import cv2
 from fastapi import FastAPI, Request
@@ -62,6 +64,27 @@ ARRIVE_AFTER = 2.0       # a count INCREASE must hold this long to be an arrival
 DEPART_AFTER = 12.0      # a DECREASE must hold this long -- longer than any
                          # realistic churn gap, so lost-and-reminted ids never
                          # read as leave-and-return
+
+
+HARD_FRAMES_DIR = "hard_frames"   # live.py's training harvest; the daemon only counts it
+
+
+def hard_frames_by_day(days, today, folder=None):
+    """Hard-frame harvest counts per day -- [{"date", "n"}], oldest first,
+    padded like the census so the two charts line up. Counted from file mtimes
+    in hard_frames/ (live.py banks them there; there's no DB record), so this
+    works no matter which process did the banking. Missing folder = zeros."""
+    end = date.fromisoformat(today)
+    window = [(end - timedelta(days=d)).isoformat() for d in range(days - 1, -1, -1)]
+    counts = dict.fromkeys(window, 0)
+    root = folder if folder is not None else HARD_FRAMES_DIR
+    if os.path.isdir(root):
+        for entry in os.scandir(root):
+            if entry.is_file() and entry.name.lower().endswith(".jpg"):
+                day = date.fromtimestamp(entry.stat().st_mtime).isoformat()
+                if day in counts:
+                    counts[day] += 1
+    return [{"date": d, "n": counts[d]} for d in window]
 
 
 def mjpeg_frame(jpeg):
@@ -374,6 +397,30 @@ def create_app(source, conn, publisher=None):
                 await asyncio.sleep(1.0 / TARGET_FPS)
         return StreamingResponse(
             gen(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+    @app.get("/history")
+    def history(days: int = 14):
+        # The Station Records feed: everything the history panels need in one
+        # fetch (it's on-demand + slow-poll, not the 1s /state loop). Clamped so
+        # a typo'd query can't ask SQLite to bucket ten years.
+        days = max(1, min(days, 90))
+        today = date.today().isoformat()
+        with db_lock:
+            census = storage.census_by_day(conn, days=days, today=today)
+            runs = storage.training_runs(conn)
+        return {"census": census,
+                "hard_frames": hard_frames_by_day(days, today),
+                "training_runs": runs}
+
+    @app.get("/history/day")
+    def history_day(day: str):
+        try:
+            date.fromisoformat(day)
+        except ValueError:
+            return Response(status_code=422, content=f"not an ISO date: {day}")
+        with db_lock:
+            hours = storage.day_hours(conn, day)
+        return {"date": day, "hours": hours}
 
     @app.post("/control")
     def post_control(cmd: ControlCommand):

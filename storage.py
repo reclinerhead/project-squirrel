@@ -175,6 +175,55 @@ def species_totals(conn, session_id=None):
     return {row["species"]: row["n"] for row in rows}
 
 
+def census_by_day(conn, days=14, today=None):
+    """Distinct-animal counts per species per DAY, for the history panel --
+    [{"date": "2026-07-06", "counts": {"squirrel": 9, "turkey": 2}}, ...],
+    oldest first, one entry per day in the window even when nothing visited
+    (an empty day is real data: nobody came). `today` is an ISO date string
+    supplied by the caller (never generated here -- storage stays clock-free
+    for tests); the window is the `days` days ending on it. A sighting counts
+    on the day its track FIRST appeared, tallied per (session_id, track_id)
+    row -- same fragment-counting honesty as species_totals."""
+    from datetime import date, timedelta   # stdlib, deterministic
+
+    end = date.fromisoformat(today)
+    window = [(end - timedelta(days=d)).isoformat() for d in range(days - 1, -1, -1)]
+    rows = conn.execute(
+        """
+        SELECT substr(first_seen, 1, 10) AS day, species, COUNT(*) AS n
+        FROM sightings
+        WHERE day >= ?
+        GROUP BY day, species
+        """,
+        (window[0],),
+    ).fetchall()
+    by_day = {d: {} for d in window}
+    for r in rows:
+        if r["day"] in by_day:
+            by_day[r["day"]][r["species"]] = r["n"]
+    return [{"date": d, "counts": by_day[d]} for d in window]
+
+
+def day_hours(conn, day):
+    """Hourly activity for one day -- {hour: {species: n}} with only the hours
+    that saw arrivals (0-23 keys as ints). Same distinct-track counting as
+    census_by_day, bucketed by the hour the track first appeared."""
+    rows = conn.execute(
+        """
+        SELECT CAST(substr(first_seen, 12, 2) AS INTEGER) AS hour,
+               species, COUNT(*) AS n
+        FROM sightings
+        WHERE substr(first_seen, 1, 10) = ?
+        GROUP BY hour, species
+        """,
+        (day,),
+    ).fetchall()
+    hours = {}
+    for r in rows:
+        hours.setdefault(r["hour"], {})[r["species"]] = r["n"]
+    return hours
+
+
 def recent_events(conn, limit=50):
     """Most recent events, newest first, with `details` parsed back to a dict."""
     rows = conn.execute(
