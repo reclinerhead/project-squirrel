@@ -73,16 +73,18 @@ def test_species_totals_scoped_by_session():
 
 def test_seed_training_runs_is_idempotent():
     conn = fresh()
+    n_baselines = len(storage.BASELINE_RUNS)
     first = storage.seed_training_runs(conn)
     second = storage.seed_training_runs(conn)
-    assert first == 2          # train-15 + train-16
-    assert second == 0         # already present, nothing re-inserted
-    assert conn.execute("SELECT COUNT(*) FROM training_runs").fetchone()[0] == 2
+    assert first == n_baselines    # every baseline inserted on the first pass
+    assert second == 0             # already present, nothing re-inserted
+    assert conn.execute("SELECT COUNT(*) FROM training_runs").fetchone()[0] == n_baselines
 
 
 def test_training_runs_ordered_and_parsed():
     conn = fresh()
     storage.seed_training_runs(conn)
     runs = storage.training_runs(conn)
-    assert [r["run_name"] for r in runs] == ["train-16", "train-15"]   # best mAP50 first
+    # Ordered best mAP50 first; train-16 (0.936) still tops the seeded set.
+    assert [r["run_name"] for r in runs][:3] == ["train-16", "train-15", "train-18"]
     assert runs[0]["metrics"]["chipmunk"]["r"] == 0.837                # JSON parsed back

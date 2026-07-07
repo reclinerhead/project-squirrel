@@ -43,5 +43,8 @@ a GitHub release asset rather than committing it here.
 
 ## Current deployment
 
-`current.pt` = `merle-train16.pt` (YOLO26s). Baseline: ~0.936 mAP50 / 0.887
-recall (all classes) on the 0705 valid split.
+`current.pt` = `merle-train18.pt` (YOLO26s, **2-class** squirrel/turkey).
+Baseline: 0.864 mAP50 / 0.838 recall on the 0707 2-class valid split (squirrel
+0.908, turkey 0.820). Rollback: `merle-train16.pt` (the last 3-class model,
+0.936 mAP50 all-classes on 0705 — not same-ruler comparable across the class
+change).

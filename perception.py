@@ -45,10 +45,26 @@ PALETTE = [(56, 56, 255), (31, 112, 255), (49, 210, 207), (10, 249, 72),
            (255, 149, 0), (255, 0, 170), (29, 178, 255)]
 GREY = (128, 128, 128)
 
+# Colors keyed by NAME, not palette position -- these mirror the frontend accent
+# tokens in mcc/app/globals.css so the stream and the UI read as one instrument.
+# Keying by name is load-bearing: the palette is positional, so when chipmunk
+# (index 0) left the class list, a position-based map would have slid squirrel
+# from orange to chipmunk's red. Names pin each species to its color regardless
+# of how many classes exist or their order. chipmunk stays defined -- dormant
+# now, back when the rover gets a close-up camera.
+SPECIES_COLORS = {
+    "squirrel": (31, 112, 255),   # #FF7031
+    "turkey":   (49, 210, 207),   # #CFD231
+    "chipmunk": (56, 56, 255),    # #FF3838
+}
+
 
 def class_colors(names):
-    """Map each class name to a stable color, from the model's own class list."""
-    return {name: PALETTE[i % len(PALETTE)] for i, name in names.items()}
+    """Map each class name to its stable color. Known species get their fixed
+    color (see SPECIES_COLORS); anything unexpected falls back to the positional
+    palette so a brand-new class still draws *something* distinct."""
+    return {name: SPECIES_COLORS.get(name, PALETTE[i % len(PALETTE)])
+            for i, name in names.items()}
 
 
 def voted(track):

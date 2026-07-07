@@ -42,9 +42,12 @@ import perception
 import storage
 from frames import SyntheticFrameSource
 
-# Per-class colors from the shared palette (same ordering as live.py) so the
-# daemon stream reads the same as the desktop window.
-CLASS_COLORS = perception.class_colors({0: "chipmunk", 1: "squirrel", 2: "turkey"})
+# Per-class colors from the shared palette so the daemon stream reads the same
+# as the desktop window. Colors are keyed by name in perception.SPECIES_COLORS,
+# so this list only has to name the species the model emits (2-class:
+# squirrel/turkey) -- the indices are immaterial. live.py derives the same map
+# straight from model.names.
+CLASS_COLORS = perception.class_colors({0: "squirrel", 1: "turkey"})
 
 TARGET_FPS = 15          # cap the loop; the real camera runs ~15fps anyway
 CROWD_COOLDOWN = 10.0    # seconds between crowd-snapshot events, like live.py
