@@ -275,3 +275,70 @@ def test_synthetic_source_is_deterministic():
         fa, da = a.read()
         fb, db = b.read()
         assert [d.box for d in da] == [d.box for d in db]
+
+
+def test_history_endpoint_shape_and_seeded_runs():
+    conn = storage.connect(":memory:")
+    # Arrivals on two known days (yesterday + today), plus one out-of-window.
+    from datetime import date, timedelta
+    today = date.today().isoformat()
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    long_ago = (date.today() - timedelta(days=40)).isoformat()
+    storage.upsert_sighting(conn, "s1", 1, "squirrel", f"{yesterday}T09:00:00", 0.8)
+    storage.upsert_sighting(conn, "s1", 2, "turkey", f"{yesterday}T10:00:00", 0.9)
+    storage.upsert_sighting(conn, "s2", 1, "squirrel", f"{today}T08:00:00", 0.7)
+    storage.upsert_sighting(conn, "s0", 1, "squirrel", f"{long_ago}T08:00:00", 0.7)
+    app = merle_daemon.create_app(SyntheticFrameSource(), conn,
+                                  publisher=_FakePublisher())
+    with TestClient(app) as c:
+        body = c.get("/history?days=7").json()
+
+    census = body["census"]
+    assert len(census) == 7
+    assert census[-1]["date"] == today                 # window ends today
+    assert census[-2]["counts"] == {"squirrel": 1, "turkey": 1}
+    assert census[-1]["counts"] == {"squirrel": 1}
+    assert all(d["counts"] == {} for d in census[:-2])  # long_ago outside window
+    assert len(body["hard_frames"]) == 7               # padded to match
+    runs = {r["run_name"] for r in body["training_runs"]}
+    assert {"train-15", "train-16", "train-18"} <= runs
+
+
+def test_history_days_is_clamped():
+    app = _app(SyntheticFrameSource())
+    with TestClient(app) as c:
+        assert len(c.get("/history?days=5000").json()["census"]) == 90
+        assert len(c.get("/history?days=-3").json()["census"]) == 1
+
+
+def test_history_day_hourly_buckets():
+    conn = storage.connect(":memory:")
+    storage.upsert_sighting(conn, "s1", 1, "squirrel", "2026-07-05T09:05:00", 0.8)
+    storage.upsert_sighting(conn, "s1", 2, "turkey", "2026-07-05T17:20:00", 0.9)
+    app = merle_daemon.create_app(SyntheticFrameSource(), conn,
+                                  publisher=_FakePublisher())
+    with TestClient(app) as c:
+        body = c.get("/history/day?day=2026-07-05").json()
+        assert body["hours"] == {"9": {"squirrel": 1}, "17": {"turkey": 1}}
+        assert c.get("/history/day?day=not-a-date").status_code == 422
+
+
+def test_hard_frames_by_day_counts_mtimes(tmp_path):
+    import os
+    from datetime import date, timedelta
+    today = date.today()
+    # Two banked frames yesterday, one today, plus a sidecar .txt (not counted).
+    for name, days_ago in [("a.jpg", 1), ("b.jpg", 1), ("c.jpg", 0)]:
+        f = tmp_path / name
+        f.write_bytes(b"jpeg")
+        mtime = time.mktime((today - timedelta(days=days_ago)).timetuple())
+        os.utime(f, (mtime, mtime))
+    (tmp_path / "a.txt").write_text("0 0.5 0.5 0.1 0.1")
+
+    trend = merle_daemon.hard_frames_by_day(3, today.isoformat(), folder=str(tmp_path))
+    assert [d["n"] for d in trend] == [0, 2, 1]
+
+
+def test_hard_frames_by_day_survives_missing_folder():
+    trend = merle_daemon.hard_frames_by_day(2, "2026-07-07", folder="does/not/exist")
+    assert trend == [{"date": "2026-07-06", "n": 0}, {"date": "2026-07-07", "n": 0}]

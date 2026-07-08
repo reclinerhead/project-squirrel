@@ -24,6 +24,20 @@ import {
   pickVoice,
   statusTopicId,
 } from "@/lib/bus";
+import {
+  DayCensus,
+  DayHours,
+  History,
+  censusPeak,
+  dayLabel,
+  dayTotal,
+  fetchDayHours,
+  fetchHistory,
+  hoursPeak,
+  runsNewestFirst,
+  speciesInWindow,
+  stackDay,
+} from "@/lib/history";
 
 // Species chip colors = the actual box colors drawn on the stream, so the
 // panel and the video read as one instrument. Anything unknown gets bone.
@@ -359,6 +373,9 @@ export default function Dashboard() {
           </section>
         </aside>
       </div>
+
+      {/* --- Station Records: the history shelf (epic #1, Phase 4) ---------- */}
+      <StationRecords />
 
       <footer className="mt-8 flex items-baseline justify-between gap-4 border-t border-line pt-3 text-[11px] text-inkfaint">
         <span>
@@ -948,6 +965,407 @@ function Asleep() {
         </code>
       </p>
     </div>
+  );
+}
+
+/* --- Station Records (Phase 4): census chart, harvest trend, run lineage --- */
+
+const HISTORY_DAYS = 14;
+const HISTORY_REFRESH_MS = 60_000; // history moves by the day, not the second
+
+function StationRecords() {
+  const [hist, setHist] = useState<History | null>(null);
+  const [unavailable, setUnavailable] = useState(false);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [dayHours, setDayHours] = useState<DayHours | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const h = await fetchHistory(HISTORY_DAYS);
+      setHist(h);
+      setUnavailable(false);
+      // First load lands on the newest day, i.e. "what visited today/yesterday".
+      setSelected((cur) => cur ?? h.census[h.census.length - 1]?.date ?? null);
+    } catch {
+      setUnavailable(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    // First fetch deferred a microtask: satisfies set-state-in-effect (no
+    // synchronous setState path from the effect body) at zero visible cost.
+    queueMicrotask(load);
+    const id = setInterval(load, HISTORY_REFRESH_MS);
+    return () => clearInterval(id);
+  }, [load]);
+
+  useEffect(() => {
+    if (!selected) return;
+    let stale = false;
+    fetchDayHours(selected)
+      .then((d) => {
+        if (!stale) setDayHours(d);
+      })
+      .catch(() => setDayHours(null));
+    return () => {
+      stale = true;
+    };
+  }, [selected]);
+
+  return (
+    <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
+      <FieldCensus
+        census={hist?.census ?? null}
+        unavailable={unavailable}
+        selected={selected}
+        onSelect={setSelected}
+        dayHours={dayHours}
+      />
+      <div className="flex min-w-0 flex-col gap-4">
+        <HardFrameHarvest days={hist?.hard_frames ?? null} unavailable={unavailable} />
+        <TrainingRounds runs={hist?.training_runs ?? null} unavailable={unavailable} />
+      </div>
+    </div>
+  );
+}
+
+function FieldCensus({
+  census,
+  unavailable,
+  selected,
+  onSelect,
+  dayHours,
+}: {
+  census: DayCensus[] | null;
+  unavailable: boolean;
+  selected: string | null;
+  onSelect: (d: string) => void;
+  dayHours: DayHours | null;
+}) {
+  const [hover, setHover] = useState<number | null>(null);
+  const species = census ? speciesInWindow(census) : [];
+  const peak = census ? censusPeak(census) : 1;
+  const selectedIdx = census?.findIndex((d) => d.date === selected) ?? -1;
+  const peakIdx =
+    census && census.length
+      ? census.reduce(
+          (best, d, i) => (dayTotal(d.counts) > dayTotal(census[best].counts) ? i : best),
+          0,
+        )
+      : -1;
+
+  return (
+    <section className="panel rounded-sm border border-line bg-panel">
+      <PanelLabel
+        title="Field Census"
+        right={<Sub>distinct visitors / day · last {HISTORY_DAYS} days</Sub>}
+      />
+      <div className="px-4 pb-4">
+        {census && census.length > 0 ? (
+          <>
+            {/* Legend: identity is never color-alone -- named chips, and the
+                selected-day breakdown below doubles as the table view. */}
+            <div className="mb-3 flex flex-wrap gap-x-4 gap-y-1">
+              {species.map((s) => (
+                <span key={s} className="flex items-center gap-1.5 text-[11px] text-inkdim">
+                  <span
+                    className="inline-block h-2.5 w-2.5 border-2"
+                    style={{ borderColor: speciesColor(s) }}
+                  />
+                  {s}
+                </span>
+              ))}
+              {species.length === 0 && (
+                <span className="text-[11px] text-inkfaint">
+                  nothing on record in this window
+                </span>
+              )}
+            </div>
+
+            <div className="flex items-end gap-1.5">
+              {census.map((d, i) => {
+                const segs = stackDay(d.counts);
+                const total = dayTotal(d.counts);
+                const isSel = i === selectedIdx;
+                return (
+                  <div key={d.date} className="relative min-w-0 flex-1">
+                    {hover === i && (
+                      <div className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-1 -translate-x-1/2 whitespace-nowrap rounded-sm border border-linebright bg-panel2 px-2 py-1 text-[11px]">
+                        <span className="stamp text-inkfaint">{dayLabel(d.date)}</span>
+                        {segs.length ? (
+                          segs.map((s) => (
+                            <span key={s.species} className="ml-2 text-ink">
+                              {s.n} {s.species}
+                            </span>
+                          ))
+                        ) : (
+                          <span className="ml-2 text-inkfaint">all quiet</span>
+                        )}
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => onSelect(d.date)}
+                      onMouseEnter={() => setHover(i)}
+                      onMouseLeave={() => setHover(null)}
+                      aria-label={`${dayLabel(d.date)}: ${total} visitors`}
+                      className={`flex h-36 w-full flex-col justify-end rounded-sm px-[2px] pt-1 transition-colors ${
+                        isSel ? "bg-panel2" : "hover:bg-panel2/60"
+                      }`}
+                    >
+                      {/* Selective direct labels: only the peak + selected day. */}
+                      {(i === peakIdx || isSel) && total > 0 && (
+                        <span className="mb-0.5 text-center text-[10px] tabular-nums text-inkdim">
+                          {total}
+                        </span>
+                      )}
+                      {/* Top-to-bottom render = reverse stack order, so the
+                          baseline species sits on the baseline. 2px gaps keep
+                          segments CVD-separable. Rounded cap on the data end. */}
+                      {[...segs].reverse().map((s, j) => (
+                        <span
+                          key={s.species}
+                          className={j === 0 ? "rounded-t-sm" : ""}
+                          style={{
+                            height: `${(s.n / peak) * 100}%`,
+                            minHeight: 3,
+                            backgroundColor: speciesColor(s.species),
+                            marginTop: j > 0 ? 2 : 0,
+                          }}
+                        />
+                      ))}
+                    </button>
+                    <div
+                      className={`mt-1 truncate text-center text-[10px] ${
+                        isSel ? "stamp text-ink" : "text-inkfaint"
+                      }`}
+                    >
+                      {dayLabel(d.date)}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="border-t border-line" />
+
+            {selected && (
+              <DayDetail
+                census={census}
+                selectedIdx={selectedIdx}
+                onSelect={onSelect}
+                dayHours={dayHours}
+              />
+            )}
+          </>
+        ) : (
+          <p className="py-2 text-sm text-inkfaint">
+            {unavailable
+              ? "records unavailable — the daemon is asleep"
+              : "reading the ledger…"}
+          </p>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function DayDetail({
+  census,
+  selectedIdx,
+  onSelect,
+  dayHours,
+}: {
+  census: DayCensus[];
+  selectedIdx: number;
+  onSelect: (d: string) => void;
+  dayHours: DayHours | null;
+}) {
+  if (selectedIdx < 0) return null;
+  const day = census[selectedIdx];
+  const segs = stackDay(day.counts);
+  const hours = dayHours?.date === day.date ? dayHours.hours : null;
+  const hPeak = hours ? hoursPeak(hours) : 1;
+
+  return (
+    <div className="mt-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Button small disabled={selectedIdx <= 0} onClick={() => onSelect(census[selectedIdx - 1].date)}>
+            ‹
+          </Button>
+          <span className="stamp w-16 text-center text-xs text-ink">
+            {dayLabel(day.date)}
+          </span>
+          <Button
+            small
+            disabled={selectedIdx >= census.length - 1}
+            onClick={() => onSelect(census[selectedIdx + 1].date)}
+          >
+            ›
+          </Button>
+        </div>
+        {/* The readable record -- also the no-color path to the same facts. */}
+        <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-[13px]">
+          {segs.length ? (
+            segs.map((s) => (
+              <span key={s.species} className="flex items-center gap-1.5">
+                <span
+                  className="inline-block h-2.5 w-2.5 border-2"
+                  style={{ borderColor: speciesColor(s.species) }}
+                />
+                <span className="tabular-nums text-ink">
+                  {s.n} {s.species}
+                </span>
+              </span>
+            ))
+          ) : (
+            <span className="text-inkfaint">no visitors logged</span>
+          )}
+        </div>
+      </div>
+
+      {/* Hourly strip: when the day's traffic happened. */}
+      <div className="mt-2 flex items-end gap-px" aria-label="arrivals by hour">
+        {Array.from({ length: 24 }, (_, h) => {
+          const counts = hours?.[String(h)] ?? {};
+          const hSegs = stackDay(counts);
+          const total = dayTotal(counts);
+          return (
+            <div
+              key={h}
+              title={
+                total
+                  ? `${h}:00 — ${hSegs.map((s) => `${s.n} ${s.species}`).join(", ")}`
+                  : `${h}:00 — quiet`
+              }
+              className="flex h-9 flex-1 flex-col justify-end rounded-[1px] bg-panel2/60"
+            >
+              {[...hSegs].reverse().map((s) => (
+                <span
+                  key={s.species}
+                  style={{
+                    height: `${(s.n / hPeak) * 100}%`,
+                    minHeight: total ? 2 : 0,
+                    backgroundColor: speciesColor(s.species),
+                  }}
+                />
+              ))}
+            </div>
+          );
+        })}
+      </div>
+      <div className="mt-0.5 flex justify-between text-[9px] text-inkfaint">
+        <span>0h</span>
+        <span>6h</span>
+        <span>12h</span>
+        <span>18h</span>
+        <span>23h</span>
+      </div>
+    </div>
+  );
+}
+
+function HardFrameHarvest({
+  days,
+  unavailable,
+}: {
+  days: { date: string; n: number }[] | null;
+  unavailable: boolean;
+}) {
+  const total = days?.reduce((a, d) => a + d.n, 0) ?? 0;
+  const peak = Math.max(1, ...(days ?? []).map((d) => d.n));
+  return (
+    <section className="panel rounded-sm border border-line bg-panel">
+      <PanelLabel title="Hard-Frame Harvest" right={<Sub>training fuel</Sub>} />
+      <div className="px-4 pb-4">
+        {days ? (
+          <>
+            <div className="flex items-baseline gap-2">
+              <span className="text-3xl font-bold tabular-nums text-led">{total}</span>
+              <span className="text-xs text-inkfaint">
+                flicker-band frames banked · {HISTORY_DAYS} days
+              </span>
+            </div>
+            <div className="mt-2 flex items-end gap-1">
+              {days.map((d) => (
+                <div
+                  key={d.date}
+                  title={`${dayLabel(d.date)} — ${d.n} frame${d.n === 1 ? "" : "s"}`}
+                  className="flex h-10 flex-1 flex-col justify-end"
+                >
+                  <span
+                    className="rounded-t-sm bg-led/80"
+                    style={{ height: `${(d.n / peak) * 100}%`, minHeight: d.n ? 3 : 1 }}
+                  />
+                </div>
+              ))}
+            </div>
+            <p className="mt-2 border-t border-line pt-2 text-[11px] text-inkfaint">
+              frames the model found hard — review-and-nudge fodder for the next round
+            </p>
+          </>
+        ) : (
+          <p className="py-2 text-sm text-inkfaint">
+            {unavailable ? "—" : "counting the harvest…"}
+          </p>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function TrainingRounds({
+  runs,
+  unavailable,
+}: {
+  runs: History["training_runs"] | null;
+  unavailable: boolean;
+}) {
+  return (
+    <section className="panel rounded-sm border border-line bg-panel">
+      <PanelLabel title="Training Rounds" right={<Sub>model lineage</Sub>} />
+      <div className="px-4 pb-4">
+        {runs && runs.length > 0 ? (
+          <table className="w-full text-[12px]">
+            <thead>
+              <tr className="stamp text-left text-[10px] text-inkfaint">
+                <th className="pb-1 font-normal">round</th>
+                <th className="pb-1 text-right font-normal">mAP50</th>
+                <th className="pb-1 text-right font-normal">recall</th>
+                <th className="pb-1 text-right font-normal">split</th>
+              </tr>
+            </thead>
+            <tbody>
+              {runsNewestFirst(runs).map((r) => (
+                <tr
+                  key={r.run_name}
+                  title={r.notes ?? undefined}
+                  className="border-t border-line text-ink"
+                >
+                  <td className="py-1.5">{r.run_name}</td>
+                  <td className="py-1.5 text-right tabular-nums">
+                    {r.map50?.toFixed(3) ?? "—"}
+                  </td>
+                  <td className="py-1.5 text-right tabular-nums">
+                    {r.recall?.toFixed(3) ?? "—"}
+                  </td>
+                  <td className="py-1.5 text-right text-inkdim">{r.val_split ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p className="py-2 text-sm text-inkfaint">
+            {unavailable ? "—" : "no rounds on file"}
+          </p>
+        )}
+        {runs && runs.length > 0 && (
+          <p className="mt-1 border-t border-line pt-2 text-[11px] text-inkfaint">
+            splits differ across the 2-class move — compare within a split, not across
+          </p>
+        )}
+      </div>
+    </section>
   );
 }
 

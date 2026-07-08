@@ -88,3 +88,46 @@ def test_training_runs_ordered_and_parsed():
     # Ordered best mAP50 first; train-16 (0.936) still tops the seeded set.
     assert [r["run_name"] for r in runs][:3] == ["train-16", "train-15", "train-18"]
     assert runs[0]["metrics"]["chipmunk"]["r"] == 0.837                # JSON parsed back
+
+
+def test_census_by_day_buckets_and_pads():
+    conn = fresh()
+    # Two squirrels + a turkey on the 5th (separate tracks), one squirrel
+    # fragment re-seen on the 6th under a new session, silence on the 7th.
+    storage.upsert_sighting(conn, "s1", 1, "squirrel", "2026-07-05T09:00:00", 0.8)
+    storage.upsert_sighting(conn, "s1", 2, "squirrel", "2026-07-05T10:30:00", 0.7)
+    storage.upsert_sighting(conn, "s1", 3, "turkey", "2026-07-05T11:00:00", 0.9)
+    storage.upsert_sighting(conn, "s2", 1, "squirrel", "2026-07-06T08:00:00", 0.6)
+    days = storage.census_by_day(conn, days=3, today="2026-07-07")
+    assert [d["date"] for d in days] == ["2026-07-05", "2026-07-06", "2026-07-07"]
+    assert days[0]["counts"] == {"squirrel": 2, "turkey": 1}
+    assert days[1]["counts"] == {"squirrel": 1}
+    assert days[2]["counts"] == {}                    # a quiet day is still a day
+
+
+def test_census_by_day_counts_first_seen_day_only():
+    conn = fresh()
+    # A track that arrived on the 5th and lingered into the 6th counts once,
+    # on its arrival day -- last_seen advancing must not double-count it.
+    storage.upsert_sighting(conn, "s1", 9, "squirrel", "2026-07-05T23:50:00", 0.8)
+    storage.upsert_sighting(conn, "s1", 9, "squirrel", "2026-07-06T00:10:00", 0.8)
+    days = storage.census_by_day(conn, days=2, today="2026-07-06")
+    assert days[0]["counts"] == {"squirrel": 1}
+    assert days[1]["counts"] == {}
+
+
+def test_census_by_day_ignores_out_of_window():
+    conn = fresh()
+    storage.upsert_sighting(conn, "s1", 1, "squirrel", "2026-06-01T09:00:00", 0.8)
+    days = storage.census_by_day(conn, days=7, today="2026-07-07")
+    assert all(d["counts"] == {} for d in days)
+
+
+def test_day_hours_buckets_by_arrival_hour():
+    conn = fresh()
+    storage.upsert_sighting(conn, "s1", 1, "squirrel", "2026-07-05T09:05:00", 0.8)
+    storage.upsert_sighting(conn, "s1", 2, "squirrel", "2026-07-05T09:40:00", 0.7)
+    storage.upsert_sighting(conn, "s1", 3, "turkey", "2026-07-05T17:20:00", 0.9)
+    storage.upsert_sighting(conn, "s1", 4, "squirrel", "2026-07-06T09:00:00", 0.8)  # other day
+    hours = storage.day_hours(conn, "2026-07-05")
+    assert hours == {9: {"squirrel": 2}, 17: {"turkey": 1}}
