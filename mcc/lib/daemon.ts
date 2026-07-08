@@ -21,6 +21,9 @@ export type DaemonState = {
   running: boolean;
   recording: boolean;
   crowd_threshold: number;
+  /** The model's class roster, in class-id order. Optional so a dashboard
+   * newer than its daemon degrades to present-species-only rows. */
+  species?: string[];
   live: {
     counts: Record<string, number>;
     tracks: Track[];
@@ -113,4 +116,19 @@ export function sortedCounts(
   return Object.entries(counts).sort(
     ([an, ac], [bn, bc]) => bc - ac || an.localeCompare(bn),
   );
+}
+
+/** Fixed display slots for the rail panels: one entry per roster species in
+ * roster order, zero-filled, so rows never appear/disappear/reorder and the
+ * panels keep a stable height (issue #16). Species counted but missing from
+ * the roster (older daemon, future classes) are appended alphabetically --
+ * nothing is ever hidden. */
+export function rosterCounts(
+  roster: string[],
+  counts: Record<string, number>,
+): [string, number][] {
+  const extras = Object.keys(counts)
+    .filter((name) => !roster.includes(name))
+    .sort();
+  return [...roster, ...extras].map((name) => [name, counts[name] ?? 0]);
 }

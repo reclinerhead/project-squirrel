@@ -12,8 +12,8 @@ import {
   eventClock,
   eventLine,
   fetchState,
+  rosterCounts,
   sendControl,
-  sortedCounts,
 } from "@/lib/daemon";
 import {
   NARRATION_TOPIC,
@@ -232,11 +232,16 @@ export default function Dashboard() {
           <section className="panel rounded-sm border border-line bg-panel">
             <PanelLabel title="On the Pavement" right={<Sub>right now</Sub>} />
             <div className="px-4 pb-4">
-              {state && sortedCounts(state.live.counts).length > 0 ? (
+              {/* Fixed slots (issue #16): every roster species gets a row, zero
+                  or not, so a species blinking in/out lights its gauge instead
+                  of inserting a row and shoving the rail around. */}
+              {state && rosterCounts(state.species ?? [], state.live.counts).length > 0 ? (
                 <ul className="flex flex-col gap-2">
-                  {sortedCounts(state.live.counts).map(([name, n]) => (
-                    <SpeciesRow key={name} name={name} n={n} />
-                  ))}
+                  {rosterCounts(state.species ?? [], state.live.counts).map(
+                    ([name, n]) => (
+                      <SpeciesRow key={name} name={name} n={n} />
+                    ),
+                  )}
                 </ul>
               ) : (
                 <p className="py-2 text-sm text-inkfaint">
@@ -249,11 +254,15 @@ export default function Dashboard() {
           <section className="panel rounded-sm border border-line bg-panel">
             <PanelLabel title="Run Census" right={<Sub>distinct visitors</Sub>} />
             <div className="px-4 pb-4">
-              {state && sortedCounts(state.totals).length > 0 ? (
+              {/* Same fixed slots as On the Pavement, in the same order, so the
+                  two panels read as one instrument stack. */}
+              {state && rosterCounts(state.species ?? [], state.totals).length > 0 ? (
                 <ul className="flex flex-col gap-2">
-                  {sortedCounts(state.totals).map(([name, n]) => (
-                    <SpeciesRow key={name} name={name} n={n} />
-                  ))}
+                  {rosterCounts(state.species ?? [], state.totals).map(
+                    ([name, n]) => (
+                      <SpeciesRow key={name} name={name} n={n} />
+                    ),
+                  )}
                 </ul>
               ) : (
                 <p className="py-2 text-sm text-inkfaint">no visitors yet</p>
@@ -680,9 +689,15 @@ function Sub({ children }: { children: React.ReactNode }) {
 
 function SpeciesRow({ name, n }: { name: string; n: number }) {
   const color = speciesColor(name);
+  // Zero is a real reading, not an error: the row keeps its slot (fixed panel
+  // geometry, issue #16) and goes quiet -- dim chip, faint count -- then
+  // lights back up when the species returns.
+  const quiet = n === 0;
   return (
     <li className="flex items-center justify-between gap-3 rounded-sm bg-panel2 px-3 py-2">
-      <span className="flex min-w-0 items-center gap-2.5">
+      <span
+        className={`flex min-w-0 items-center gap-2.5 transition-opacity duration-500 ${quiet ? "opacity-40" : ""}`}
+      >
         <span
           className="inline-block h-3 w-3 shrink-0 border-2"
           style={{ borderColor: color }}
@@ -690,7 +705,10 @@ function SpeciesRow({ name, n }: { name: string; n: number }) {
         />
         <span className="truncate text-sm">{name}</span>
       </span>
-      <span className="text-xl font-bold tabular-nums" style={{ color }}>
+      <span
+        className={`text-xl font-bold tabular-nums transition-colors duration-500 ${quiet ? "text-inkfaint" : ""}`}
+        style={quiet ? undefined : { color }}
+      >
         {n}
       </span>
     </li>

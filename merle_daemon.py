@@ -49,7 +49,11 @@ from frames import SyntheticFrameSource
 # so this list only has to name the species the model emits (2-class:
 # squirrel/turkey) -- the indices are immaterial. live.py derives the same map
 # straight from model.names.
-CLASS_COLORS = perception.class_colors({0: "squirrel", 1: "turkey"})
+CLASS_NAMES = {0: "squirrel", 1: "turkey"}
+CLASS_COLORS = perception.class_colors(CLASS_NAMES)
+# The roster /state advertises so the dashboard can render a fixed row per
+# class (stable panel geometry) instead of only the species currently counted.
+SPECIES = [CLASS_NAMES[i] for i in sorted(CLASS_NAMES)]
 
 TARGET_FPS = 15          # cap the loop; the real camera runs ~15fps anyway
 CROWD_COOLDOWN = 10.0    # seconds between crowd-snapshot events, like live.py
@@ -369,6 +373,7 @@ def create_app(source, conn, publisher=None):
             "running": control.running,
             "recording": control.recording,
             "crowd_threshold": control.crowd_threshold,
+            "species": SPECIES,
             "live": live,
             **_read_db_summary(conn, session_id, db_lock),
         }

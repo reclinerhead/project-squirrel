@@ -49,8 +49,11 @@ def _wait_for_first_frame(c, tries=100):
 
 def test_state_shape_and_live_counts(client):
     body = client.get("/state").json()
-    for key in ("session_id", "running", "crowd_threshold", "live", "totals", "recent_events"):
+    for key in ("session_id", "running", "crowd_threshold", "species", "live", "totals", "recent_events"):
         assert key in body
+    # The class roster rides along so the dashboard can render a fixed row per
+    # class (stable panel geometry) even for species not currently counted.
+    assert body["species"] == ["squirrel", "turkey"]
     # The synthetic source always has two squirrels on screen.
     assert body["live"]["counts"].get("squirrel") == 2
     assert body["running"] is True
