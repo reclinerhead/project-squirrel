@@ -1,11 +1,13 @@
 # =============================================================================
 # project-squirrel -- narrator.py
 #
-# v1 of the scene narrator (issue #9): ONE voice, subscribed to the live event
-# bus, publishing spoken-style observations. The point of v1 is PACING, not
-# prose -- silence is most of the show, so the pacing gate matters more than
-# the words, and the words are Tier-1 templates (Mad-Libs fill-ins). A future
-# issue swaps an LLM into generate() and nothing else changes.
+# The scene narrator: ONE voice, subscribed to the live event bus, publishing
+# spoken-style observations. v1 (issue #9) built the PACING -- silence is most
+# of the show -- with Tier-1 template prose. Issue #20 added Tier 2: when
+# MERLE_OLLAMA is set, generate() synthesizes each line with a local LLM
+# (Ollama) in the persona's voice, falling back to the templates whenever the
+# LLM is absent, slow, or unwell. The pacing gate and bus contract are
+# identical across tiers.
 #
 #   python narrator.py --persona personas/marlin.yaml
 #
@@ -16,6 +18,11 @@
 #                                         is the MQTT Last Will, so a crash flips
 #                                         the dashboard lamp without any cleanup
 #
+# LLM tier config (env, following the MERLE_MQTT convention):
+#   MERLE_OLLAMA        Ollama "host" or "host:port" (port defaults to 11434).
+#                       UNSET = LLM tier off; templates carry the show.
+#   MERLE_OLLAMA_MODEL  model name (default: qwen2.5:14b)
+#
 # The narrator never plays audio itself -- it publishes; a consumer (the MCC
 # dashboard's TTS, someday a speaker on the porch) does the speaking.
 #
@@ -25,8 +32,10 @@
 
 import argparse
 import json
+import os
 import random
 import time
+import urllib.request
 from datetime import datetime
 
 import paho.mqtt.client as mqtt
@@ -140,9 +149,126 @@ def template_fields(event, bible):
     }
 
 
-def generate(persona, bible, event, rng):
-    """Tier 1: template narration. This is the single swap point for the future
-    LLM tier (persona["personality_prompt"] is already waiting for it)."""
+# --- Tier 2: LLM narration via Ollama ----------------------------------------
+
+OLLAMA_DEFAULT_PORT = 11434
+OLLAMA_DEFAULT_MODEL = "qwen2.5:14b"
+# Generation blocks the paho network loop (on_message), so the timeout must
+# stay under the MQTT keepalive (60s). Events arriving mid-generation queue up
+# and mostly fall to the cooldown gate afterwards -- which is the pacing we
+# wanted anyway. Desk-tested: ~8s warm, ~15s with a cold model load, so 30s
+# gives cold starts headroom without risking the bus connection.
+OLLAMA_TIMEOUT_S = 30
+
+# Output rules live in code, not the persona file, so every persona gets them
+# and persona files stay pure character.
+LINE_RULES = (
+    "Deliver exactly ONE on-air line of one to three sentences. Spoken words "
+    "only: no stage directions, no quotation marks, no emoji, no preamble. "
+    "Never break character."
+)
+
+
+def ollama_address():
+    """Ollama endpoint from MERLE_OLLAMA ("host" or "host:port"). OPTIONAL,
+    unlike MERLE_MQTT -- unset simply means the LLM tier is off, which is both
+    the kill switch and what keeps a bare dev checkout working."""
+    raw = os.environ.get("MERLE_OLLAMA", "").strip()
+    if not raw:
+        return None
+    host, _, port = raw.partition(":")
+    return host, int(port) if port else OLLAMA_DEFAULT_PORT
+
+
+def event_summary(event, bible):
+    """A factual one-line account of what just happened -- the LLM's raw
+    material, deliberately dry so all the flavor comes from the persona.
+    This is the future hook for extra bus context (weather, etc.): more facts
+    get appended here and the prompt shape doesn't change."""
+    f = template_fields(event, bible)
+    kind = event.get("kind")
+    if kind == "arrival":
+        summary = f"A {f['species']} has just arrived at {f['station']}."
+    elif kind == "departure":
+        summary = f"The {f['species']} has just left after a visit of {f['duration']}."
+    elif kind == "crowd_snapshot":
+        summary = f"There are now {f['total']} animals out on the pavement at once."
+    elif kind == "clip_recorded":
+        summary = "A video clip of the recent activity was just saved to the archive."
+    else:
+        summary = f"Something just happened out there (event: {f['kind']})."
+    species = (event.get("details") or {}).get("species")
+    lore = (bible.get("species_lore") or {}).get(species)
+    if lore:
+        summary += f" Local lore about this species: {lore}."
+    return summary
+
+
+def build_system_prompt(persona, bible):
+    """Persona voice + shared world canon + the output rules."""
+    facts = [f"The show is set at {bible.get('station', 'the driveway')}.",
+             f"The main attraction is {bible.get('seed_pile', 'the seed pile')}."]
+    facts += [f"Legend: {legend}." for legend in (bible.get("legends") or {}).values()]
+    personality = (persona.get("personality_prompt") or "").strip() \
+        or f"You are {persona['name']}, a wildlife narrator."
+    return (f"{personality}\n\n"
+            "World facts you may draw on:\n"
+            + "\n".join(f"- {fact}" for fact in facts)
+            + f"\n\n{LINE_RULES}")
+
+
+def sanitize_line(text):
+    """LLM output -> one speakable line, or None if unusable. Collapses
+    whitespace/newlines and strips the wrapping quotes and markdown bold the
+    model sometimes adds despite the rules."""
+    line = " ".join((text or "").replace("**", "").split())
+    line = line.strip('"“” ')
+    return line or None
+
+
+class Ollama:
+    """Tier-2 narration: one blocking, non-streaming completion per line
+    (the bus contract is one JSON object per spoken line, and the dashboard
+    TTS speaks whole lines -- nothing downstream could use a token stream).
+    narrate() returns a clean line or None; it never raises, because a dead
+    LLM must degrade to templates, not kill the narrator."""
+
+    def __init__(self, host, port, model):
+        self.url = f"http://{host}:{port}/api/generate"
+        self.model = model
+
+    def narrate(self, persona, bible, event):
+        payload = {
+            "model": self.model,
+            "system": build_system_prompt(persona, bible),
+            "prompt": f"{event_summary(event, bible)}\n\nYour on-air line:",
+            "stream": False,
+            # Driveway events can be an hour apart; without keep_alive every
+            # line would pay the cold model load (~2x latency, desk-tested).
+            "keep_alive": "30m",
+            # num_predict caps a model that ignores the length rule; the
+            # temperature keeps repeat events from producing repeat lines.
+            "options": {"num_predict": 120, "temperature": 0.9},
+        }
+        req = urllib.request.Request(
+            self.url, data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT_S) as resp:
+                reply = json.load(resp)
+        except Exception as e:   # any failure at all -> the template tier
+            print(f"[ollama] {type(e).__name__}: {e} -- falling back to template")
+            return None
+        return sanitize_line(reply.get("response"))
+
+
+def generate(persona, bible, event, rng, ollama=None):
+    """Tier 2 (LLM) when an Ollama client is provided and healthy; Tier-1
+    templates otherwise. The one place that decides which prose tier speaks."""
+    if ollama is not None:
+        line = ollama.narrate(persona, bible, event)
+        if line:
+            return line
     templates = TEMPLATES.get(event.get("kind"), FALLBACK_TEMPLATES)
     return rng.choice(templates).format(**template_fields(event, bible))
 
@@ -150,10 +276,11 @@ def generate(persona, bible, event, rng):
 class Narrator:
     """One voice: a persona, the shared bible, and its own pacing state."""
 
-    def __init__(self, persona, bible, rng=None):
+    def __init__(self, persona, bible, rng=None, ollama=None):
         self.persona = persona
         self.bible = bible
         self.rng = rng or random.Random()
+        self.ollama = ollama
         self.last_spoke_at = float("-inf")   # never spoken -> first event is fair game
 
     def wants(self, event, now):
@@ -167,7 +294,7 @@ class Narrator:
             "mqtt_id": self.persona["mqtt_id"],
             "voice": self.persona["tts_voice"],
             "event_kind": event.get("kind"),
-            "text": generate(self.persona, self.bible, event, self.rng),
+            "text": generate(self.persona, self.bible, event, self.rng, self.ollama),
         }
 
 
@@ -195,7 +322,18 @@ def main():
 
     persona = load_persona(args.persona)
     bible = load_yaml(args.bible)
-    producer = Producer([Narrator(persona, bible)])
+
+    ollama = None
+    addr = ollama_address()
+    if addr:
+        model = os.environ.get("MERLE_OLLAMA_MODEL", "").strip() or OLLAMA_DEFAULT_MODEL
+        ollama = Ollama(*addr, model)
+        print(f"[{persona['name']}] narration tier: LLM "
+              f"({model} via {addr[0]}:{addr[1]}, templates on failure)")
+    else:
+        print(f"[{persona['name']}] narration tier: templates (MERLE_OLLAMA not set)")
+
+    producer = Producer([Narrator(persona, bible, ollama=ollama)])
 
     status_topic = bus.narrator_status_topic(persona["mqtt_id"])
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=persona["mqtt_id"])

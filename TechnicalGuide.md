@@ -4,7 +4,7 @@ The living documentation of how project-squirrel (Merle) is built and why. This 
 
 ## Quick start — running the station
 
-The station spans two machines. **pearl** (`192.168.1.64`, always-on Ubuntu) hosts the broker (Mosquitto) and the narrator (Marlin) — always up, nothing to start. **bluejay** (the Windows desktop) runs the two processes that need its GPU and camera; each gets its own terminal from the repo root (PowerShell). Everything meets on the bus and tolerates the others being absent:
+The station spans two machines. **pearl** (`192.168.1.64`, always-on Ubuntu) hosts the broker (Mosquitto) and the narrator (Marlin) — always up, nothing to start. **bluejay** (the Windows desktop) runs the two processes that need its GPU and camera; each gets its own terminal from the repo root (PowerShell). Bluejay's standing Ollama install also serves the narrator's LLM calls (port 11434) — not a Merle process, nothing to start. Everything meets on the bus and tolerates the others being absent:
 
 ```powershell
 # 1. Perception daemon (needs MERLE_RTSP_PASS for the camera and MERLE_MQTT
@@ -28,12 +28,14 @@ Rehearsal without live animals — republish archived events onto the bus with o
  bluejay (Windows desktop: GPU + camera)      │  pearl (192.168.1.64, always-on Ubuntu)
                                               │
 Amcrest PoE cam ──RTSP/TCP──▶ Merle daemon ───┼─MQTT driveway/events─▶ Mosquitto ◀──▶ narrator.py
-              (YOLO26s + ByteTrack            │      (MERLE_MQTT)   (the event bus)   (Marlin, v1)
-               + FastAPI + SQLite)            │                          │
-                    │ localhost HTTP          │                          │
-                    ▼ (state/stream)          │                          │
-              MCC dashboard ◀─────────────────┼────────ws:9001───────────┘
-         (Next.js + TS + Tailwind)            │
+              (YOLO26s + ByteTrack            │      (MERLE_MQTT)   (the event bus)     (Marlin)
+               + FastAPI + SQLite)            │                          │                 │
+                    │ localhost HTTP          │                          │                 │
+                    ▼ (state/stream)          │                          │                 │
+              MCC dashboard ◀─────────────────┼────────ws:9001───────────┘                 │
+         (Next.js + TS + Tailwind)            │                                            │
+                                              │                                            │
+              Ollama (qwen2.5:14b) ◀──────────┼───────HTTP :11434 (MERLE_OLLAMA)───────────┘
 
 live.py remains the standalone desktop vision stack (hard_frames/ harvest,
 snapshots/, debug_frames/); it shares perception.py with the daemon.
@@ -112,13 +114,15 @@ Live event distribution rides an MQTT broker (Mosquitto), decoupling producers f
 
 ### The narrator (`narrator.py`)
 
-v1 of the scene narrator: **one voice, template prose, real pacing**. A single process subscribes to `driveway/events` and publishes spoken-style lines to `narration/lines` — it never plays audio itself; a consumer (the dashboard's TTS) speaks. It runs on **pearl**, next to the broker — it needs neither the GPU nor the camera, just the bus. Design decisions that outlive v1:
+The scene narrator: **one voice, LLM prose with template fallback, real pacing**. A single process subscribes to `driveway/events` and publishes spoken-style lines to `narration/lines` — it never plays audio itself; a consumer (the dashboard's TTS) speaks. It runs on **pearl**, next to the broker — it needs neither the GPU nor the camera, just the bus (the LLM runs remotely on bluejay's GPU). Design decisions:
 
 - **Persona vs bible**: a persona YAML (`personas/marlin.yaml` — name, `mqtt_id`, `tts_voice` hint, `personality_prompt`, pacing knobs) is one voice; `character_bible.yaml` is shared world canon (seed-pile location, Big Chonk lore). Kept separate from day one so multiple narrators never need untangling.
-- **One pacing gate** (`worth_speaking()`): cooldown first, then per-kind interest scaled by the persona's `chattiness` against its `interest_threshold`. Silence is most of the show — with the default knobs, most events pass unremarked.
-- **Tier-1 narration**: `generate()` fills Mad-Libs templates from the event + bible. It's the single swap point for the future LLM tier (`personality_prompt` is already in the persona waiting for it). Pacing mattered more than prose in v1.
+- **One pacing gate** (`worth_speaking()`): cooldown first, then per-kind interest scaled by the persona's `chattiness` against its `interest_threshold`. Silence is most of the show — with the default knobs, most events pass unremarked. The gate is identical across prose tiers.
+- **Two prose tiers, one swap point** (`generate()`, issues #9/#20). **Tier 2 (LLM)**: when `MERLE_OLLAMA` (`host` or `host:port`, port defaults to 11434) is set, each line is synthesized by an Ollama server — `MERLE_OLLAMA_MODEL` picks the model (default `qwen2.5:14b`); model choice is deployment config, not persona, because it tracks what's pulled on the Ollama host. The system prompt is the persona's `personality_prompt` (Marlin's is an exaggerated Marlin Perkins / Wild Kingdom homage) + bible canon + output rules that live in code (`LINE_RULES`) so persona files stay pure character; the user prompt is a dry factual `event_summary()` — the future hook for extra bus context like weather. **Tier 1 (templates)**: Mad-Libs fill-ins from the event + bible, and the fallback whenever the LLM is unset, unreachable, times out, or returns nothing — the show never goes silent. `MERLE_OLLAMA` unset is the kill switch and keeps a bare checkout working.
+- **The Ollama call is blocking and non-streaming** (`stream: false`, one `POST /api/generate`): the bus contract is one JSON object per spoken line and the dashboard TTS speaks whole lines, so nothing downstream could use a token stream. It blocks paho's network loop, so `OLLAMA_TIMEOUT_S` (30s; desk-tested ~8s warm, ~15s cold-load) stays under the MQTT keepalive (60s); events queued behind a generation mostly fall to the cooldown gate afterwards, which is the desired pacing anyway. `keep_alive: 30m` keeps the model resident between sparse events. Rejected alternative: streaming over MQTT would have needed a new topic contract plus reassembly in the dashboard for no audible benefit.
 - **Embedded producer**: the producer/orchestrator lives inside `narrator.py` as `Producer`, deliberately shaped around a *roster* (a set of voices) even though the roster is one — `cast(event)` picks who speaks, so solo-beat/banter-beat casting slots in later without a rewrite. What narrators do when a standalone producer is absent is a known future question, deferred to the promotion issue.
-- Pure logic (gate, scoring, templates, persona loading) is covered by `test_narrator.py`; the MQTT plumbing is desk-tested against the real broker.
+- Pure logic (gate, scoring, templates, persona loading, LLM config/prompt-building/sanitation/fallback) is covered by `test_narrator.py`; the MQTT plumbing and the live Ollama call are desk-tested against the real services.
+- **Deployment**: on pearl the narrator service sets `MERLE_OLLAMA=192.168.1.79:11434` (bluejay). Ollama on bluejay binds the LAN address; if Windows Firewall blocks inbound 11434, the narrator silently degrades to templates — check the narrator log's startup "narration tier" line and per-call `[ollama]` fallback messages when lines sound suspiciously Mad-Libs.
 - **Rehearsal**: `replay_events.py` republishes archived SQLite events onto the bus with original relative timing (`--speed`, `--kinds`, long silences clamped by `--max-gap`) — the narrator can't tell the difference, which is the point of the bus.
 
 ### The MCC dashboard (`mcc/`)
@@ -144,4 +148,4 @@ The daemon's face: a Next.js App Router app, one page, one client component (`co
 
 ## Project context
 
-Personal learning project — wildlife observation in the author's own driveway, for fun and skill-building. Not a surveillance product. The scene narrator's foundation (bus + one templated voice) shipped with issue #9; still ahead (future epics): more narrators + banter, LLM narration, shared narrator memory, push notifications, unknown-species discovery loop, and a rover.
+Personal learning project — wildlife observation in the author's own driveway, for fun and skill-building. Not a surveillance product. The scene narrator's foundation (bus + one templated voice) shipped with issue #9; LLM narration via Ollama with issue #20. Still ahead (future epics): more narrators + banter, weather and other context feeding the prompt, shared narrator memory, push notifications, unknown-species discovery loop, and a rover.
