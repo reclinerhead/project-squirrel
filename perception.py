@@ -31,10 +31,24 @@ TRACKER_YAML = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 # Coasting: ByteTrack keeps a lost track alive internally but only OUTPUTS tracks
 # matched THIS frame, so a single missed frame used to blink the box off. Keep
-# drawing a lost track (greyed) for COAST_FRAMES (~1s at 15fps), forget it after
-# PRUNE_FRAMES (~6s).
+# drawing a lost track (greyed) for COAST_FRAMES (~1s at 15fps); it stays in
+# memory as a stitch target until PRUNE_FRAMES (~30s -- longer than ByteTrack's
+# 12s track_buffer, because re-minted IDs by definition appear after it).
 COAST_FRAMES = 15
-PRUNE_FRAMES = 90
+PRUNE_FRAMES = 450
+
+# Identity stitching (issue #22): a stationary feeding squirrel flickers out of
+# detection long enough for ByteTrack to mint it a NEW id on re-acquisition --
+# same animal, extra "visitor" in the census, and its still-coasting ghost
+# double-counts against the crowd threshold. The camera is fixed and the whole
+# failure mode is an animal that ISN'T moving, so a brand-new id whose box sits
+# on a recently-lost track of the same species is that track come back: adopt
+# the old identity. Trade-off, accepted: a different animal taking the exact
+# same spot within the prune window merges with its predecessor -- rare at
+# ~30s, and the census error it replaces ran 5x the other way. NOTE all these
+# frame-denominated windows assume the fixed 15fps camera; the rover era
+# (moving camera, ~60fps) is a different tuning regime.
+STITCH_IOU = 0.4
 
 # Hard-example "flicker band": a live track scoring in here is one the model
 # finds genuinely hard -- exactly the frame worth banking for the next round.
@@ -72,6 +86,18 @@ def voted(track):
     return track["votes"].most_common(1)[0][0]
 
 
+def iou(a, b):
+    """Intersection-over-union of two xyxy boxes."""
+    ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
+    ix2, iy2 = min(a[2], b[2]), min(a[3], b[3])
+    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    if inter == 0:
+        return 0.0
+    area_a = (a[2] - a[0]) * (a[3] - a[1])
+    area_b = (b[2] - b[0]) * (b[3] - b[1])
+    return inter / (area_a + area_b - inter)
+
+
 def extract_detections(result, names):
     """Pull (track_id, class_name, conf, xyxy) tuples out of a model.track()
     result. Returns [] when nothing carried a track ID -- ultralytics leaks
@@ -90,29 +116,63 @@ def extract_detections(result, names):
 
 class TrackMemory:
     """Remembers tracks across frames so a briefly-lost one keeps its box (and
-    class vote) instead of blinking off. `ingest` advances one frame and returns
-    the (live, coasting) split; `seen` accumulates every track ID ever seen with
+    class vote) instead of blinking off, and STITCHES a re-minted ByteTrack id
+    back onto the lost track it replaced (see STITCH_IOU above) so one animal
+    stays one identity. `ingest` advances one frame and returns the
+    (live, coasting) split; `seen` accumulates every canonical track ID with
     its voted class, for the run-total census."""
 
     def __init__(self, coast_frames=COAST_FRAMES, prune_frames=PRUNE_FRAMES):
         self.coast_frames = coast_frames
         self.prune_frames = prune_frames
-        self.tracks = {}       # tid -> {"xyxy", "conf", "last_frame", "votes"}
-        self.seen = {}         # tid -> voted class name (survives pruning)
+        self.tracks = {}       # canonical tid -> {"xyxy", "conf", "last_frame", "votes"}
+        self.aliases = {}      # re-minted ByteTrack tid -> canonical tid, forever
+        self.seen = {}         # canonical tid -> voted class name (survives pruning)
         self.frame_idx = 0
+
+    def _absorb(self, tid, name, conf, xyxy):
+        t = self.tracks.setdefault(tid, {"votes": Counter()})
+        t["xyxy"] = [int(v) for v in xyxy]
+        t["conf"] = float(conf)
+        t["last_frame"] = self.frame_idx
+        t["votes"][name] += 1
+        self.seen[tid] = voted(t)
+
+    def _stitch_target(self, name, xyxy):
+        """The lost track a brand-new id should adopt, if any: the best-
+        overlapping track of the same voted species NOT matched this frame.
+        Matched tracks are excluded so a real second animal standing next to a
+        live one can never merge into it."""
+        best, best_iou = None, STITCH_IOU
+        for tid, t in self.tracks.items():
+            if t["last_frame"] == self.frame_idx or voted(t) != name:
+                continue
+            overlap = iou(t["xyxy"], xyxy)
+            if overlap >= best_iou:
+                best, best_iou = tid, overlap
+        return best
 
     def ingest(self, detections):
         """detections: list of (tid, name, conf, xyxy) from extract_detections.
-        Returns (live, coasting), each a list of (tid, track_dict). live = matched
-        this frame; coasting = missed recently but within COAST_FRAMES."""
+        Returns (live, coasting), each a list of (canonical_tid, track_dict).
+        live = matched this frame; coasting = missed recently but within
+        COAST_FRAMES. Two passes -- known ids first -- so every track matched
+        this frame is on the books before any stitch decision is made."""
         self.frame_idx += 1
-        for tid, name, conf, xyxy in detections:
-            t = self.tracks.setdefault(tid, {"votes": Counter()})
-            t["xyxy"] = [int(v) for v in xyxy]
-            t["conf"] = float(conf)
-            t["last_frame"] = self.frame_idx
-            t["votes"][name] += 1
-            self.seen[tid] = voted(t)
+        fresh = []
+        for raw_tid, name, conf, xyxy in detections:
+            tid = self.aliases.get(raw_tid, raw_tid)
+            if tid in self.tracks:
+                self._absorb(tid, name, conf, xyxy)
+            else:
+                fresh.append((raw_tid, name, conf, xyxy))
+        for raw_tid, name, conf, xyxy in fresh:
+            canon = self._stitch_target(name, xyxy)
+            if canon is not None:
+                # aliases map to CANONICAL ids, so chains flatten (B->A then
+                # C->A, never C->B->A) and one lookup always lands.
+                self.aliases[raw_tid] = canon
+            self._absorb(canon if canon is not None else raw_tid, name, conf, xyxy)
 
         live, coasting = [], []
         for tid, t in list(self.tracks.items()):

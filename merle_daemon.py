@@ -262,25 +262,30 @@ class Worker(threading.Thread):
                     storage.upsert_sighting(self.conn, self.state.session_id,
                                             d.track_id, d.species, ts, d.conf)
 
+            # Everything COUNTED counts matched tracks only -- a coasting ghost
+            # is a briefly-lost track (often the just-re-minted twin of a live
+            # one), not another animal. Coasting boxes still draw and still ride
+            # /state's `tracks` list; they just don't tally.
+            present = [d for d in dets if not d.coasting]
+
             # Arrivals and departures -- the narrator's bread and butter.
-            # Species-level, from MATCHED tracks only (a coasting ghost is a
-            # briefly-lost track, not a new animal): see _species_presence.
+            # Species-level and debounced: see _species_presence.
             now = time.time()
             self._species_presence(
-                Counter(d.species for d in dets if not d.coasting), ts, now)
+                Counter(d.species for d in present), ts, now)
 
             # Crowd moment: enough animals at once, and cooled down since the last.
-            if len(dets) >= self.control.crowd_threshold and now - self._last_crowd >= CROWD_COOLDOWN:
-                counts = dict(Counter(d.species for d in dets))
+            if len(present) >= self.control.crowd_threshold and now - self._last_crowd >= CROWD_COOLDOWN:
                 self._event(ts, "crowd_snapshot",
-                            {"total": len(dets), "counts": counts})
+                            {"total": len(present),
+                             "counts": dict(Counter(d.species for d in present))})
                 self._last_crowd = now
 
             annotated = annotate(frame, dets)
             self._record(annotated, ts)
             ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
 
-            counts = dict(Counter(d.species for d in dets))
+            counts = dict(Counter(d.species for d in present))
             tracks = [{"track_id": d.track_id, "species": d.species,
                        "conf": round(d.conf, 3), "box": list(d.box),
                        "coasting": d.coasting} for d in dets]

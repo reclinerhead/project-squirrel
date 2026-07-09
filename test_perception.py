@@ -71,6 +71,106 @@ def test_xyxy_and_conf_updated_each_frame():
     assert t["conf"] == 0.8
 
 
+# --- identity stitching (issue #22) -------------------------------------------
+# The failure being fixed: a stationary feeding squirrel flickers out of
+# detection past ByteTrack's buffer, gets a NEW id on re-acquisition, and one
+# animal becomes several "visitors" (and its coasting ghost pads the crowd).
+
+def test_iou():
+    assert perception.iou((0, 0, 10, 10), (0, 0, 10, 10)) == 1.0
+    assert perception.iou((0, 0, 10, 10), (20, 20, 30, 30)) == 0.0
+    assert abs(perception.iou((0, 0, 10, 10), (5, 0, 15, 10)) - 1 / 3) < 1e-9
+
+
+def test_reminted_id_adopts_the_lost_identity():
+    tm = TrackMemory()
+    tm.ingest([det(1, box=(10, 10, 50, 50))])
+    for _ in range(20):                            # lost past coast, within prune
+        tm.ingest([])
+    live, coasting = tm.ingest([det(7, box=(12, 10, 52, 50))])   # re-mint, barely moved
+    assert [tid for tid, _ in live] == [1]         # same squirrel, same identity
+    assert coasting == []                          # no ghost twin left behind
+    assert tm.seen == {1: "squirrel"}              # census: ONE visitor
+
+
+def test_stitch_folds_votes_and_freshens_the_box():
+    tm = TrackMemory()
+    tm.ingest([det(1, box=(10, 10, 50, 50))])
+    tm.ingest([])
+    live, _ = tm.ingest([det(7, box=(14, 10, 54, 50), conf=0.9)])
+    t = live[0][1]
+    assert t["votes"]["squirrel"] == 2             # both detections on one record
+    assert t["xyxy"] == [14, 10, 54, 50]           # tracking the animal, not the past
+    assert t["conf"] == 0.9
+
+
+def test_stitch_never_crosses_species():
+    tm = TrackMemory()
+    tm.ingest([det(1, "squirrel", box=(10, 10, 50, 50))])
+    tm.ingest([])
+    live, _ = tm.ingest([det(2, "turkey", box=(10, 10, 50, 50))])
+    assert [tid for tid, _ in live] == [2]         # perfect overlap, wrong animal
+
+
+def test_stitch_requires_solid_overlap():
+    tm = TrackMemory()
+    tm.ingest([det(1, box=(10, 10, 50, 50))])
+    tm.ingest([])
+    live, _ = tm.ingest([det(2, box=(200, 200, 240, 240))])
+    assert [tid for tid, _ in live] == [2]         # elsewhere = genuinely new
+
+
+def test_live_neighbor_is_never_a_stitch_target():
+    # Two real squirrels shoulder to shoulder: the one matched THIS frame must
+    # not absorb the newcomer, no matter how much their boxes overlap.
+    tm = TrackMemory()
+    tm.ingest([det(1, box=(10, 10, 50, 50))])
+    live, _ = tm.ingest([det(1, box=(10, 10, 50, 50)),
+                         det(2, box=(12, 10, 52, 50))])
+    assert sorted(tid for tid, _ in live) == [1, 2]
+    assert tm.seen == {1: "squirrel", 2: "squirrel"}
+
+
+def test_one_lost_track_stitches_at_most_one_newcomer():
+    tm = TrackMemory()
+    tm.ingest([det(1, box=(10, 10, 50, 50))])
+    tm.ingest([])
+    live, _ = tm.ingest([det(7, box=(11, 10, 51, 50)),
+                         det(8, box=(12, 10, 52, 50))])
+    assert sorted(tid for tid, _ in live) == [1, 8]   # 7 adopted; 8 is its own animal
+
+
+def test_stitch_window_closes_when_the_track_prunes():
+    tm = TrackMemory(coast_frames=1, prune_frames=3)
+    tm.ingest([det(1, box=(10, 10, 50, 50))])
+    for _ in range(5):                             # pruned away entirely
+        tm.ingest([])
+    live, _ = tm.ingest([det(2, box=(10, 10, 50, 50))])
+    assert [tid for tid, _ in live] == [2]
+
+
+def test_alias_persists_for_the_reminted_ids_lifetime():
+    tm = TrackMemory()
+    tm.ingest([det(1, box=(10, 10, 50, 50))])
+    tm.ingest([])
+    tm.ingest([det(7, box=(10, 10, 50, 50))])      # stitch happens here
+    live, _ = tm.ingest([det(7, box=(11, 10, 51, 50))])   # ByteTrack keeps saying 7
+    assert [tid for tid, _ in live] == [1]
+    assert tm.seen == {1: "squirrel"}
+
+
+def test_aliases_chain_flatten_to_the_original_identity():
+    tm = TrackMemory()
+    tm.ingest([det(1, box=(10, 10, 50, 50))])
+    tm.ingest([])
+    tm.ingest([det(7, box=(10, 10, 50, 50))])      # 7 -> 1
+    for _ in range(5):
+        tm.ingest([])
+    live, _ = tm.ingest([det(9, box=(10, 10, 50, 50))])   # re-mint again
+    assert [tid for tid, _ in live] == [1]
+    assert tm.aliases[9] == 1                      # maps to the CANONICAL id, not 7
+
+
 def test_class_colors_are_stable_and_cover_names():
     colors = perception.class_colors({0: "chipmunk", 1: "squirrel", 2: "turkey"})
     assert set(colors) == {"chipmunk", "squirrel", "turkey"}
