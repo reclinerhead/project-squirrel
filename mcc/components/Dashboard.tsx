@@ -565,10 +565,10 @@ function FieldJournal() {
           <p className="py-2 text-sm leading-relaxed text-inkfaint">
             {!busUp ? (
               <>
-                the event bus isn&apos;t reachable. light it up from the project
-                root:
+                the event bus isn&apos;t reachable. the broker lives on pearl —
+                check it there:
                 <code className="mt-1 block w-fit rounded-sm bg-panel2 px-2 py-1 text-xs text-inkdim">
-                  mosquitto -c mosquitto.conf -v
+                  ssh pearl systemctl status mosquitto
                 </code>
                 {busError && (
                   <span className="mt-2 block text-xs text-chipmunk">
@@ -581,7 +581,7 @@ function FieldJournal() {
             ) : (
               <>
                 the bus is up but nobody&apos;s reporting. put Marlin on the
-                air:
+                air (he lives on pearl):
                 <code className="mt-1 block w-fit rounded-sm bg-panel2 px-2 py-1 text-xs text-inkdim">
                   python narrator.py --persona personas/marlin.yaml
                 </code>
