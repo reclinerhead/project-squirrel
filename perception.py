@@ -50,6 +50,19 @@ PRUNE_FRAMES = 450
 # (moving camera, ~60fps) is a different tuning regime.
 STITCH_IOU = 0.4
 
+# The model is NMS-free (end-to-end head), so it can emit TWO boxes on one
+# animal. The labeling path dedupes these (label_utils.dedupe_boxes); the live
+# path must too, BEFORE any track bookkeeping -- each duplicate that reaches
+# ByteTrack is confident enough to mint a parallel track riding the same
+# squirrel (issue #24). Same threshold and greedy keep-highest-conf approach
+# as the labeling dedupe.
+DEDUPE_IOU = 0.7
+
+# A track becomes a census "visitor" only after this many matched frames
+# (~2s at 15fps). One-blink junk tracks are still tracked and drawn -- they
+# just never count as an animal that visited.
+CENSUS_AFTER_FRAMES = 30
+
 # Hard-example "flicker band": a live track scoring in here is one the model
 # finds genuinely hard -- exactly the frame worth banking for the next round.
 HARD_LO, HARD_HI = 0.15, 0.50
@@ -98,6 +111,17 @@ def iou(a, b):
     return inter / (area_a + area_b - inter)
 
 
+def dedupe_detections(detections):
+    """Collapse same-frame duplicate boxes (IoU >= DEDUPE_IOU) to the highest-
+    confidence one, class-agnostic -- see DEDUPE_IOU above. Greedy over
+    detections sorted by confidence, mirroring label_utils.dedupe_boxes."""
+    kept = []
+    for d in sorted(detections, key=lambda d: -d[2]):
+        if all(iou(d[3], k[3]) < DEDUPE_IOU for k in kept):
+            kept.append(d)
+    return kept
+
+
 def extract_detections(result, names):
     """Pull (track_id, class_name, conf, xyxy) tuples out of a model.track()
     result. Returns [] when nothing carried a track ID -- ultralytics leaks
@@ -122,21 +146,27 @@ class TrackMemory:
     (live, coasting) split; `seen` accumulates every canonical track ID with
     its voted class, for the run-total census."""
 
-    def __init__(self, coast_frames=COAST_FRAMES, prune_frames=PRUNE_FRAMES):
+    def __init__(self, coast_frames=COAST_FRAMES, prune_frames=PRUNE_FRAMES,
+                 census_after=CENSUS_AFTER_FRAMES):
         self.coast_frames = coast_frames
         self.prune_frames = prune_frames
-        self.tracks = {}       # canonical tid -> {"xyxy", "conf", "last_frame", "votes"}
+        self.census_after = census_after
+        self.tracks = {}       # canonical tid -> {"xyxy", "conf", "last_frame", "frames", "votes"}
         self.aliases = {}      # re-minted ByteTrack tid -> canonical tid, forever
         self.seen = {}         # canonical tid -> voted class name (survives pruning)
         self.frame_idx = 0
 
     def _absorb(self, tid, name, conf, xyxy):
-        t = self.tracks.setdefault(tid, {"votes": Counter()})
+        t = self.tracks.setdefault(tid, {"votes": Counter(), "frames": 0})
         t["xyxy"] = [int(v) for v in xyxy]
         t["conf"] = float(conf)
         t["last_frame"] = self.frame_idx
+        t["frames"] += 1
         t["votes"][name] += 1
-        self.seen[tid] = voted(t)
+        # Census tenure: a one-blink track is tracked and drawn but never
+        # counted as a visitor. Once tenured, keep adopting the latest vote.
+        if t["frames"] >= self.census_after:
+            self.seen[tid] = voted(t)
 
     def _stitch_target(self, name, xyxy):
         """The lost track a brand-new id should adopt, if any: the best-
@@ -156,9 +186,12 @@ class TrackMemory:
         """detections: list of (tid, name, conf, xyxy) from extract_detections.
         Returns (live, coasting), each a list of (canonical_tid, track_dict).
         live = matched this frame; coasting = missed recently but within
-        COAST_FRAMES. Two passes -- known ids first -- so every track matched
-        this frame is on the books before any stitch decision is made."""
+        COAST_FRAMES. Duplicates collapse first (an NMS-free model can put two
+        boxes on one animal); then two passes -- known ids first -- so every
+        track matched this frame is on the books before any stitch decision
+        is made."""
         self.frame_idx += 1
+        detections = dedupe_detections(detections)
         fresh = []
         for raw_tid, name, conf, xyxy in detections:
             tid = self.aliases.get(raw_tid, raw_tid)

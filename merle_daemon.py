@@ -317,7 +317,8 @@ def _read_db_summary(conn, session_id, db_lock):
     """The DB-backed part of /state, read under the shared lock."""
     with db_lock:
         return {
-            "totals": storage.species_totals(conn, session_id),
+            "totals": storage.species_totals(
+                conn, session_id, min_frames=perception.CENSUS_AFTER_FRAMES),
             "recent_events": storage.recent_events(conn, 10),
         }
 
@@ -412,7 +413,9 @@ def create_app(source, conn, publisher=None):
         days = max(1, min(days, 90))
         today = date.today().isoformat()
         with db_lock:
-            census = storage.census_by_day(conn, days=days, today=today)
+            census = storage.census_by_day(
+                conn, days=days, today=today,
+                min_frames=perception.CENSUS_AFTER_FRAMES)
             runs = storage.training_runs(conn)
         return {"census": census,
                 "hard_frames": hard_frames_by_day(days, today),
@@ -425,7 +428,8 @@ def create_app(source, conn, publisher=None):
         except ValueError:
             return Response(status_code=422, content=f"not an ISO date: {day}")
         with db_lock:
-            hours = storage.day_hours(conn, day)
+            hours = storage.day_hours(
+                conn, day, min_frames=perception.CENSUS_AFTER_FRAMES)
         return {"date": day, "hours": hours}
 
     @app.post("/control")

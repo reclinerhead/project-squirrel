@@ -131,3 +131,37 @@ def test_day_hours_buckets_by_arrival_hour():
     storage.upsert_sighting(conn, "s1", 4, "squirrel", "2026-07-06T09:00:00", 0.8)  # other day
     hours = storage.day_hours(conn, "2026-07-05")
     assert hours == {9: {"squirrel": 2}, 17: {"turkey": 1}}
+
+
+# --- census tenure (issue #24) -------------------------------------------------
+# One-blink junk tracks and NMS-free duplicate fragments live in `sightings`
+# as honest raw rows, but min_frames keeps them out of every visitor count --
+# including retroactively, since filtering happens at query time.
+
+def seen_for(conn, tid, n, species="squirrel", ts="2026-07-05T10:00:00"):
+    for _ in range(n):
+        storage.upsert_sighting(conn, "s1", tid, species, ts, 0.8)
+
+
+def test_species_totals_min_frames_drops_one_blink_tracks():
+    conn = fresh()
+    seen_for(conn, 1, n=30)                   # a real visit
+    seen_for(conn, 2, n=3)                    # junk fragment
+    seen_for(conn, 3, n=1, species="turkey")  # one-frame blink
+    assert storage.species_totals(conn, min_frames=30) == {"squirrel": 1}
+    assert storage.species_totals(conn) == {"squirrel": 2, "turkey": 1}  # raw default
+
+
+def test_census_by_day_min_frames_cleans_history():
+    conn = fresh()
+    seen_for(conn, 1, n=30, ts="2026-07-05T09:00:00")
+    seen_for(conn, 2, n=2, ts="2026-07-05T09:00:05")
+    days = storage.census_by_day(conn, days=1, today="2026-07-05", min_frames=30)
+    assert days[0]["counts"] == {"squirrel": 1}
+
+
+def test_day_hours_min_frames_matches_the_census():
+    conn = fresh()
+    seen_for(conn, 1, n=30, ts="2026-07-05T09:05:00")
+    seen_for(conn, 2, n=4, ts="2026-07-05T09:06:00")
+    assert storage.day_hours(conn, "2026-07-05", min_frames=30) == {9: {"squirrel": 1}}
