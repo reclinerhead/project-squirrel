@@ -22,8 +22,9 @@
 # RTSP + YOLO + ByteTrack feed) or 'synthetic' (camera-free, used by tests/CI
 # and frontend work).
 #
-# Run it:  uvicorn merle_daemon:app        (MERLE_DB overrides the db path,
-#                                           MERLE_MQTT the broker host:port)
+# Run it:  uvicorn merle_daemon:app        (MERLE_DB overrides the db path;
+#                                           MERLE_MQTT -- required -- points at
+#                                           the broker on pearl, see bus.py)
 # =============================================================================
 
 import asyncio
