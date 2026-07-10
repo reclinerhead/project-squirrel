@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { eventClock, eventLine, sortedCounts, visitLength } from "./daemon";
+import {
+  eventClock,
+  eventLine,
+  rosterCounts,
+  sortedCounts,
+  visitLength,
+} from "./daemon";
 
 describe("eventClock", () => {
   it("extracts HH:MM:SS from an ISO timestamp", () => {
@@ -101,5 +107,38 @@ describe("sortedCounts", () => {
   });
   it("returns [] for no counts", () => {
     expect(sortedCounts({})).toEqual([]);
+  });
+});
+
+describe("rosterCounts", () => {
+  it("keeps roster order and zero-fills absent species", () => {
+    expect(rosterCounts(["squirrel", "turkey"], { turkey: 1 })).toEqual([
+      ["squirrel", 0],
+      ["turkey", 1],
+    ]);
+  });
+  it("never reorders when counts change", () => {
+    expect(rosterCounts(["squirrel", "turkey"], { turkey: 9, squirrel: 1 })).toEqual([
+      ["squirrel", 1],
+      ["turkey", 9],
+    ]);
+  });
+  it("appends counted species missing from the roster, alphabetically", () => {
+    expect(
+      rosterCounts(["squirrel"], { raccoon: 1, chipmunk: 2, squirrel: 3 }),
+    ).toEqual([
+      ["squirrel", 3],
+      ["chipmunk", 2],
+      ["raccoon", 1],
+    ]);
+  });
+  it("degrades to counts-only with an empty roster (older daemon)", () => {
+    expect(rosterCounts([], { squirrel: 2 })).toEqual([["squirrel", 2]]);
+  });
+  it("renders all-zero rows for an all-quiet moment", () => {
+    expect(rosterCounts(["squirrel", "turkey"], {})).toEqual([
+      ["squirrel", 0],
+      ["turkey", 0],
+    ]);
   });
 });
