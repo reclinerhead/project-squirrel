@@ -196,10 +196,11 @@ RECORD_FPS = 15   # the camera runs ~15fps; playback speed is therefore approxim
 
 # The tracker's coasting + class-voting bookkeeping lives in
 # perception.TrackMemory (shared with the daemon). Inside it, tm.seen is the
-# run-total census: every distinct ByteTrack ID this run mapped to its voted
-# class. Caveat: it counts track IDs, so it OVER-counts when the tracker
-# fragments one animal into a new ID (after a long occlusion, or when two
-# look-alikes cross and swap) -- a lively upper estimate, not an exact census.
+# run-total census: every distinct CANONICAL track this run mapped to its
+# voted class -- duplicate boxes collapse before tracking, re-minted ids
+# stitch back onto the track they replaced, and a track must survive
+# CENSUS_AFTER_FRAMES (~2s) to count at all. Residual caveat: an animal that
+# re-appears elsewhere after the stitch window (~30s) is a new visitor.
 tm = perception.TrackMemory()
 
 CLASS_COLORS = perception.class_colors(model.names)
