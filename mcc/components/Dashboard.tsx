@@ -46,11 +46,15 @@ import {
   WEATHER_CURRENT_TOPIC,
   WEATHER_FORECAST_TOPIC,
   WEATHER_HISTORY_TOPIC,
+  WEATHER_STATUS_TOPIC,
   WeatherPoint,
+  WeatherStatus,
+  ageText,
   compass,
   linePath,
   parseCurrent,
   parsePoints,
+  parseStatus,
   tempRange,
   trendSeries,
   windCeil,
@@ -1439,6 +1443,10 @@ function WeatherPost() {
   const [current, setCurrent] = useState<CurrentWeather | null>(null);
   const [history, setHistory] = useState<WeatherPoint[]>([]);
   const [forecast, setForecast] = useState<WeatherPoint[]>([]);
+  // Presence (issue #31): retained "online"/"offline" from weather/status.
+  // null = no retained status on the broker (pre-#31 service), which falls
+  // back to judging Willard purely by report freshness.
+  const [status, setStatus] = useState<WeatherStatus | null>(null);
   const [busUp, setBusUp] = useState(false);
   // "now" lives in state, never Date.now() in render (the house hydration
   // rule) -- a slow tick marches the chart window and staleness check forward
@@ -1457,9 +1465,10 @@ function WeatherPost() {
   useEffect(() => {
     // Its own bus client, same shape as FieldJournal's: each panel stays
     // self-contained (Mosquitto shrugs at a second WebSocket) rather than
-    // threading a shared client through two unrelated components. All three
+    // threading a shared client through two unrelated components. All four
     // weather topics are RETAINED, so the broker replays the latest report,
-    // forecast, and 48h window the moment we subscribe -- weather has no HTTP.
+    // forecast, 48h window, and presence the moment we subscribe -- weather
+    // has no HTTP.
     const url = busUrl(
       window.location.hostname,
       process.env.NEXT_PUBLIC_MERLE_MQTT_WS,
@@ -1471,6 +1480,7 @@ function WeatherPost() {
         WEATHER_CURRENT_TOPIC,
         WEATHER_FORECAST_TOPIC,
         WEATHER_HISTORY_TOPIC,
+        WEATHER_STATUS_TOPIC,
       ]);
     });
     client.on("close", () => setBusUp(false));
@@ -1489,6 +1499,8 @@ function WeatherPost() {
         setForecast(parsePoints(text) ?? []);
       } else if (topic === WEATHER_HISTORY_TOPIC) {
         setHistory(parsePoints(text) ?? []);
+      } else if (topic === WEATHER_STATUS_TOPIC) {
+        setStatus(parseStatus(text));
       }
     });
     return () => {
@@ -1496,10 +1508,15 @@ function WeatherPost() {
     };
   }, []);
 
+  // Presence beats freshness: a retained "offline" (graceful stop or the
+  // Last Will after a crash) is announced the moment it happens, while
+  // staleness needs 3 missed polls to accrue. No retained status at all
+  // (pre-#31 service) leaves the freshness judgement in charge.
+  const offline = status === "offline";
   // A report older than 3 missed polls is presented as stale, never as now.
   const stale =
     current !== null && now !== null && current.ts < now - STALE_AFTER_S;
-  const reporting = current !== null && !stale;
+  const reporting = current !== null && !stale && !offline;
 
   const trend =
     now !== null
@@ -1523,6 +1540,13 @@ function WeatherPost() {
         right={
           !busUp ? (
             <span className="stamp text-xs text-inkfaint">bus quiet</span>
+          ) : offline ? (
+            <span className="flex items-center gap-1.5 text-xs">
+              <span className="inline-block h-2 w-2 rounded-full bg-inkfaint" />
+              <span className="stamp text-inkfaint">
+                willard · on coffee break
+              </span>
+            </span>
           ) : current === null ? (
             <span className="flex items-center gap-1.5 text-xs">
               <span className="inline-block h-2 w-2 rounded-full bg-inkfaint" />
@@ -1549,7 +1573,9 @@ function WeatherPost() {
       <div className="relative flex-1 px-4 pb-4">
         <div
           className={
-            current === null ? "opacity-30 transition-opacity" : "transition-opacity"
+            current === null || offline
+              ? "opacity-30 transition-opacity"
+              : "transition-opacity"
           }
         >
         {/* Current conditions -- a fixed-height block whether or not a report
@@ -1668,18 +1694,35 @@ function WeatherPost() {
         </div>
 
         {/* Off-air: the message floats over the dimmed skeleton instead of
-            wedging into the chart slot next to live-looking numerals. */}
-        {current === null && (
+            wedging into the chart slot next to live-looking numerals. Three
+            distinct states, like the Live Watch veils: bus unreachable, the
+            service announced offline (with when he last checked in -- the
+            chart's "now" line stops meaning anything once he's off duty),
+            and no retained report at all. */}
+        {(current === null || offline) && (
           <div className="absolute inset-0 flex items-center justify-center px-6">
             <p className="text-center text-sm leading-relaxed text-inkfaint">
               {!busUp ? (
                 "waiting on the bus — the weather rides it"
+              ) : offline ? (
+                <>
+                  willard is on coffee break — the weather post is stopped.
+                  {current !== null && now !== null && (
+                    <span className="stamp mt-1 block text-xs text-inkdim">
+                      last checked in {clock(current.ts)} ·{" "}
+                      {ageText(current.ts, now)}
+                    </span>
+                  )}
+                  <code className="mx-auto mt-1 block w-fit rounded-sm bg-panel2 px-2 py-1 text-xs text-inkdim">
+                    sudo systemctl start willard-weather
+                  </code>
+                </>
               ) : (
                 <>
                   no weather report yet. put Willard on duty (he lives on
                   pearl):
                   <code className="mx-auto mt-1 block w-fit rounded-sm bg-panel2 px-2 py-1 text-xs text-inkdim">
-                    python weather.py
+                    sudo systemctl start willard-weather
                   </code>
                 </>
               )}
