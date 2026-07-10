@@ -239,9 +239,7 @@ export default function Dashboard() {
                   ))}
                 </ul>
               ) : (
-                <p className="py-2 text-sm text-inkfaint">
-                  {asleep ? "—" : "all quiet out there…"}
-                </p>
+                <QuietRow label={asleep ? "—" : "all quiet out there…"} />
               )}
             </div>
           </section>
@@ -256,7 +254,7 @@ export default function Dashboard() {
                   ))}
                 </ul>
               ) : (
-                <p className="py-2 text-sm text-inkfaint">no visitors yet</p>
+                <QuietRow label="no visitors yet" />
               )}
               {state && (
                 <p className="mt-3 border-t border-line pt-2 text-[11px] text-inkfaint">
@@ -676,6 +674,20 @@ function PanelLabel({
 
 function Sub({ children }: { children: React.ReactNode }) {
   return <span className="stamp text-[10px] text-inkfaint">{children}</span>;
+}
+
+// Empty-state row with the same box metrics as SpeciesRow (the invisible
+// text-xl spacer locks the line height), so a panel flipping between
+// "quiet" and one species never changes height and shifts the layout.
+function QuietRow({ label }: { label: string }) {
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-sm px-3 py-2">
+      <span className="text-sm text-inkfaint">{label}</span>
+      <span aria-hidden className="invisible text-xl font-bold tabular-nums">
+        0
+      </span>
+    </div>
+  );
 }
 
 function SpeciesRow({ name, n }: { name: string; n: number }) {
