@@ -81,10 +81,13 @@ if not RTSP_PASS:
 RTSP_URL = (f"rtsp://{RTSP_USER}:{RTSP_PASS}@192.168.1.102:554"
             "/cam/realmonitor?channel=1&subtype=0")
 
-# Force RTSP over TCP. FFmpeg's default (UDP) silently drops packets under
-# network load, which shows up as grey smears and corrupted frames. This env
-# var must be set BEFORE the capture opens -- FFmpeg reads it once at open time.
-os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
+# Force RTSP over TCP (FFmpeg's UDP default silently drops packets under
+# network load -- grey smears and corrupted frames), and trim FFmpeg's own
+# buffering: nobuffer skips the demuxer's startup buffering, low_delay tells
+# the decoder not to hold frames. Must be set BEFORE the capture opens --
+# FFmpeg reads it once at open time.
+os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS",
+                      "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay")
 
 print("Connecting to the camera over RTSP...")
 cap = cv2.VideoCapture(RTSP_URL, cv2.CAP_FFMPEG)
@@ -105,9 +108,11 @@ atexit.register(cap.release)
 # Resolution, frame rate, and codec are NOT set here anymore: an RTSP stream
 # arrives however the camera encodes it, and cap.set() requests are ignored.
 # To change them, use the camera's web UI (Setup > Camera > Video).
-# Buffer only the newest frame so we always process live reality, not a backlog.
-# This -- not the raw frame rate -- is what actually keeps end-to-end latency low.
-cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+# (We used to set CAP_PROP_BUFFERSIZE=1 here "for low latency" -- that's a
+# silent no-op on the FFmpeg backend; cap.set returns False. What actually
+# keeps this window near-live is the free-running loop below: it can run
+# faster than the camera's 15fps, so any backlog FFmpeg queues -- e.g. during
+# the first inference's CUDA warmup -- drains on its own within seconds.)
 
 # isOpened() can succeed with bad credentials on some firmware -- the failure
 # only surfaces on the first read -- so pull a frame to confirm auth worked.
