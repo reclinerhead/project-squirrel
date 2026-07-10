@@ -1498,41 +1498,61 @@ function WeatherPost() {
 
   return (
     <section className="panel flex flex-col rounded-sm border border-line bg-panel">
+      {/* The masthead bills the reporter, Field Journal style -- conditions
+          themselves live down in the data block with the temperature. */}
       <PanelLabel
         title="Weather Post"
         right={
           !busUp ? (
             <span className="stamp text-xs text-inkfaint">bus quiet</span>
           ) : current === null ? (
-            <span className="stamp text-xs text-inkfaint">no report</span>
+            <span className="flex items-center gap-1.5 text-xs">
+              <span className="inline-block h-2 w-2 rounded-full bg-inkfaint" />
+              <span className="stamp text-inkfaint">willard · off the air</span>
+            </span>
           ) : stale ? (
             <span className="flex items-center gap-1.5 text-xs">
               <span className="breathe inline-block h-2 w-2 rounded-full bg-turkey" />
               <span className="stamp text-turkey">
-                stale · last report {clock(current.ts)}
+                willard · stale report {clock(current.ts)}
               </span>
             </span>
           ) : (
             <span className="flex items-center gap-1.5 text-xs">
               <span className="lamp inline-block h-2 w-2 rounded-full bg-led text-led" />
-              <span className="stamp text-led">{current.description}</span>
+              <span className="stamp text-led">willard with the weather</span>
             </span>
           )
         }
       />
-      <div className="flex-1 px-4 pb-4">
+      {/* `relative` so the off-air message can overlay the (dimmed) data
+          skeleton instead of sharing its space -- same veil idea as the
+          Live Watch feed. */}
+      <div className="relative flex-1 px-4 pb-4">
+        <div
+          className={
+            current === null ? "opacity-30 transition-opacity" : "transition-opacity"
+          }
+        >
         {/* Current conditions -- a fixed-height block whether or not a report
             is in, so the panel never shifts as data arrives (house rule #1). */}
         <div className="flex min-h-[58px] items-end justify-between gap-3">
-          <div className="flex items-baseline gap-2">
-            <span
-              className={`text-4xl font-bold tabular-nums ${reporting ? "text-ink" : "text-inkfaint"}`}
-            >
-              {round(current?.temp_f ?? null)}°
-            </span>
-            <span className="text-xs text-inkfaint">
-              feels {round(current?.feels_like_f ?? null)}°
-            </span>
+          <div>
+            <div className="flex items-baseline gap-2">
+              <span
+                className={`text-4xl font-bold tabular-nums ${reporting ? "text-ink" : "text-inkfaint"}`}
+              >
+                {round(current?.temp_f ?? null)}°
+              </span>
+              <span className="text-xs text-inkfaint">
+                feels {round(current?.feels_like_f ?? null)}°
+              </span>
+            </div>
+            {/* Conditions ride with the temperature. min-h reserves the line
+                before the first report, so nothing shifts when it lands. */}
+            <div className="min-h-[18px] text-xs text-inkdim">
+              {current?.description ?? ""}
+            </div>
           </div>
           <div className="flex flex-col items-end gap-0.5 text-[11px] text-inkdim">
             <span>
@@ -1562,8 +1582,8 @@ function WeatherPost() {
             </span>
           )}
         </div>
-        <div className="relative mt-1 h-28 w-full">
-          {hasChart ? (
+        <div className="mt-1 h-28 w-full">
+          {hasChart && (
             <svg
               viewBox={`0 0 ${WX_W} ${WX_H}`}
               preserveAspectRatio="none"
@@ -1615,22 +1635,6 @@ function WeatherPost() {
                 vectorEffect="non-scaling-stroke"
               />
             </svg>
-          ) : (
-            <div className="flex h-full items-center justify-center px-4">
-              <p className="text-center text-sm leading-relaxed text-inkfaint">
-                {!busUp ? (
-                  "waiting on the bus — the weather rides it"
-                ) : (
-                  <>
-                    no weather report yet. put the weather post on duty (it
-                    lives on pearl):
-                    <code className="mx-auto mt-1 block w-fit rounded-sm bg-panel2 px-2 py-1 text-xs text-inkdim">
-                      python weather.py
-                    </code>
-                  </>
-                )}
-              </p>
-            </div>
           )}
         </div>
         <div className="relative mt-0.5 h-4 text-[9px] text-inkfaint">
@@ -1643,6 +1647,27 @@ function WeatherPost() {
           </span>
           <span className="absolute right-0">+48h</span>
         </div>
+        </div>
+
+        {/* Off-air: the message floats over the dimmed skeleton instead of
+            wedging into the chart slot next to live-looking numerals. */}
+        {current === null && (
+          <div className="absolute inset-0 flex items-center justify-center px-6">
+            <p className="text-center text-sm leading-relaxed text-inkfaint">
+              {!busUp ? (
+                "waiting on the bus — the weather rides it"
+              ) : (
+                <>
+                  no weather report yet. put Willard on duty (he lives on
+                  pearl):
+                  <code className="mx-auto mt-1 block w-fit rounded-sm bg-panel2 px-2 py-1 text-xs text-inkdim">
+                    python weather.py
+                  </code>
+                </>
+              )}
+            </p>
+          </div>
+        )}
       </div>
     </section>
   );
