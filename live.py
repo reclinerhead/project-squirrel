@@ -248,7 +248,8 @@ while True:
     # weak detection (down to DETECT_FLOOR) is re-used to keep its existing track
     # alive -- so the box stays put through the dip instead of blinking off.
     results = model.track(frame, conf=perception.DETECT_FLOOR, imgsz=perception.IMGSZ,
-                          persist=True, tracker=perception.TRACKER_YAML, verbose=False)
+                          quantize=perception.QUANTIZE, persist=True,
+                          tracker=perception.TRACKER_YAML, verbose=False)
     raw = results[0].boxes
     names = results[0].names
 

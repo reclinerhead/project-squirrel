@@ -26,6 +26,19 @@ import cv2
 # starts from a confident detection (new_track_thresh: 0.5 in the yaml).
 DETECT_FLOOR = 0.10
 IMGSZ = 1920                 # infer at 3x the trained 640 so distant animals survive downscale
+# QUANTIZE: run the detector in FP16 (issue #33). Ollama serves the narrator's
+# LLM from this same GPU, and token generation saturates MEMORY BANDWIDTH (each
+# token streams the full weight set from VRAM) while barely using compute --
+# that contention, not a utilization cap, is what dropped the loop from 15fps
+# to ~7 during narration. FP16 halves the detector's memory traffic per frame
+# so inference rides out the squeeze better (solo it's a modest win: 19.7 ->
+# 17.4 ms/frame at imgsz=1920, desk-tested). Accuracy impact is nil in practice
+# (FP16 is the deployment norm); ultralytics keeps FP32 on CPU regardless.
+# `quantize=16` is the current spelling -- `half=True` still works but is
+# deprecated and would warn on EVERY call. GOTCHA: precision locks in when the
+# first inference call builds the predictor; later calls can't change it, so
+# every first-touch call site (warmup included) must pass this.
+QUANTIZE = 16
 TRACKER_YAML = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "bytetrack_squirrel.yaml")
 
