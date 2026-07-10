@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 import bus
 import merle_daemon
+import perception
 import storage
 from frames import SyntheticFrameSource, Detection
 
@@ -97,11 +98,29 @@ def test_control_rejects_unknown_action(client):
     assert client.post("/control", json={"action": "explode"}).status_code == 422
 
 
-def test_sightings_persist_to_db(client):
-    # Let the worker run enough frames to bank the squirrels as sightings.
-    time.sleep(0.4)
-    totals = client.get("/state").json()["totals"]
-    assert totals.get("squirrel") == 2         # two distinct tracks recorded
+def _tenured_sighting(conn, session_id, tid, species, ts):
+    """A sighting with enough matched frames to count as a census visitor
+    (the /state and /history endpoints apply the tenure filter, issue #24)."""
+    for _ in range(perception.CENSUS_AFTER_FRAMES):
+        storage.upsert_sighting(conn, session_id, tid, species, ts, 0.8)
+
+
+def test_sightings_persist_to_db():
+    conn = storage.connect(":memory:")
+    app = merle_daemon.create_app(SyntheticFrameSource(), conn,
+                                  publisher=_FakePublisher())
+    with TestClient(app) as c:
+        _wait_for_first_frame(c)
+        # Let the worker bank a few frames of the synthetic squirrels.
+        time.sleep(0.4)
+        totals = c.get("/state").json()["totals"]
+    rows = conn.execute(
+        "SELECT DISTINCT track_id FROM sightings WHERE species = 'squirrel'"
+    ).fetchall()
+    assert len(rows) == 2                      # two distinct tracks recorded raw
+    # ...but a few frames is below the census tenure, so they aren't
+    # /state visitors yet -- brand-new tracks must earn their count.
+    assert totals == {}
 
 
 def test_crowd_event_recorded_when_threshold_low():
@@ -287,10 +306,10 @@ def test_history_endpoint_shape_and_seeded_runs():
     today = date.today().isoformat()
     yesterday = (date.today() - timedelta(days=1)).isoformat()
     long_ago = (date.today() - timedelta(days=40)).isoformat()
-    storage.upsert_sighting(conn, "s1", 1, "squirrel", f"{yesterday}T09:00:00", 0.8)
-    storage.upsert_sighting(conn, "s1", 2, "turkey", f"{yesterday}T10:00:00", 0.9)
-    storage.upsert_sighting(conn, "s2", 1, "squirrel", f"{today}T08:00:00", 0.7)
-    storage.upsert_sighting(conn, "s0", 1, "squirrel", f"{long_ago}T08:00:00", 0.7)
+    _tenured_sighting(conn, "s1", 1, "squirrel", f"{yesterday}T09:00:00")
+    _tenured_sighting(conn, "s1", 2, "turkey", f"{yesterday}T10:00:00")
+    _tenured_sighting(conn, "s2", 1, "squirrel", f"{today}T08:00:00")
+    _tenured_sighting(conn, "s0", 1, "squirrel", f"{long_ago}T08:00:00")
     app = merle_daemon.create_app(SyntheticFrameSource(), conn,
                                   publisher=_FakePublisher())
     with TestClient(app) as c:
@@ -316,8 +335,8 @@ def test_history_days_is_clamped():
 
 def test_history_day_hourly_buckets():
     conn = storage.connect(":memory:")
-    storage.upsert_sighting(conn, "s1", 1, "squirrel", "2026-07-05T09:05:00", 0.8)
-    storage.upsert_sighting(conn, "s1", 2, "turkey", "2026-07-05T17:20:00", 0.9)
+    _tenured_sighting(conn, "s1", 1, "squirrel", "2026-07-05T09:05:00")
+    _tenured_sighting(conn, "s1", 2, "turkey", "2026-07-05T17:20:00")
     app = merle_daemon.create_app(SyntheticFrameSource(), conn,
                                   publisher=_FakePublisher())
     with TestClient(app) as c:

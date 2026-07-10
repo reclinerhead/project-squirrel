@@ -160,22 +160,28 @@ def seed_training_runs(conn, runs=BASELINE_RUNS):
     return inserted
 
 
-def species_totals(conn, session_id=None):
+def species_totals(conn, session_id=None, min_frames=1):
     """Distinct-animal counts per species -- {"squirrel": 12, "chipmunk": 3}.
-    Scoped to one run when session_id is given, else across all history."""
+    Scoped to one run when session_id is given, else across all history.
+    `min_frames` is the census tenure (issue #24): rows below it -- one-blink
+    junk tracks, NMS-free duplicate fragments -- stay recorded in `sightings`
+    but don't count as visitors. Filtered at query time so history cleans up
+    retroactively and the raw record stays raw."""
     if session_id is None:
         rows = conn.execute(
-            "SELECT species, COUNT(*) AS n FROM sightings GROUP BY species"
+            "SELECT species, COUNT(*) AS n FROM sightings WHERE frames >= ? GROUP BY species",
+            (min_frames,),
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT species, COUNT(*) AS n FROM sightings WHERE session_id = ? GROUP BY species",
-            (session_id,),
+            "SELECT species, COUNT(*) AS n FROM sightings"
+            " WHERE session_id = ? AND frames >= ? GROUP BY species",
+            (session_id, min_frames),
         ).fetchall()
     return {row["species"]: row["n"] for row in rows}
 
 
-def census_by_day(conn, days=14, today=None):
+def census_by_day(conn, days=14, today=None, min_frames=1):
     """Distinct-animal counts per species per DAY, for the history panel --
     [{"date": "2026-07-06", "counts": {"squirrel": 9, "turkey": 2}}, ...],
     oldest first, one entry per day in the window even when nothing visited
@@ -183,7 +189,7 @@ def census_by_day(conn, days=14, today=None):
     supplied by the caller (never generated here -- storage stays clock-free
     for tests); the window is the `days` days ending on it. A sighting counts
     on the day its track FIRST appeared, tallied per (session_id, track_id)
-    row -- same fragment-counting honesty as species_totals."""
+    row -- with the same `min_frames` census tenure as species_totals."""
     from datetime import date, timedelta   # stdlib, deterministic
 
     end = date.fromisoformat(today)
@@ -192,10 +198,10 @@ def census_by_day(conn, days=14, today=None):
         """
         SELECT substr(first_seen, 1, 10) AS day, species, COUNT(*) AS n
         FROM sightings
-        WHERE day >= ?
+        WHERE day >= ? AND frames >= ?
         GROUP BY day, species
         """,
-        (window[0],),
+        (window[0], min_frames),
     ).fetchall()
     by_day = {d: {} for d in window}
     for r in rows:
@@ -204,19 +210,20 @@ def census_by_day(conn, days=14, today=None):
     return [{"date": d, "counts": by_day[d]} for d in window]
 
 
-def day_hours(conn, day):
+def day_hours(conn, day, min_frames=1):
     """Hourly activity for one day -- {hour: {species: n}} with only the hours
-    that saw arrivals (0-23 keys as ints). Same distinct-track counting as
-    census_by_day, bucketed by the hour the track first appeared."""
+    that saw arrivals (0-23 keys as ints). Same distinct-track counting and
+    `min_frames` tenure as census_by_day, bucketed by the hour the track
+    first appeared."""
     rows = conn.execute(
         """
         SELECT CAST(substr(first_seen, 12, 2) AS INTEGER) AS hour,
                species, COUNT(*) AS n
         FROM sightings
-        WHERE substr(first_seen, 1, 10) = ?
+        WHERE substr(first_seen, 1, 10) = ? AND frames >= ?
         GROUP BY hour, species
         """,
-        (day,),
+        (day, min_frames),
     ).fetchall()
     hours = {}
     for r in rows:

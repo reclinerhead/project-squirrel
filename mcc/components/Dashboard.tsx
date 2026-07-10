@@ -38,6 +38,23 @@ import {
   speciesInWindow,
   stackDay,
 } from "@/lib/history";
+import {
+  CurrentWeather,
+  FUTURE_S,
+  PAST_S,
+  STALE_AFTER_S,
+  WEATHER_CURRENT_TOPIC,
+  WEATHER_FORECAST_TOPIC,
+  WEATHER_HISTORY_TOPIC,
+  WeatherPoint,
+  compass,
+  linePath,
+  parseCurrent,
+  parsePoints,
+  tempRange,
+  trendSeries,
+  windCeil,
+} from "@/lib/weather";
 
 // Species chip colors = the actual box colors drawn on the stream, so the
 // panel and the video read as one instrument. Anything unknown gets bone.
@@ -223,7 +240,7 @@ export default function Dashboard() {
 
           <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
             <FieldJournal />
-            <ComingSoon title="Weather Post" note="conditions at the seed pile" />
+            <WeatherPost />
           </div>
         </main>
 
@@ -244,9 +261,7 @@ export default function Dashboard() {
                   )}
                 </ul>
               ) : (
-                <p className="py-2 text-sm text-inkfaint">
-                  {asleep ? "—" : "all quiet out there…"}
-                </p>
+                <QuietRow label={asleep ? "—" : "all quiet out there…"} />
               )}
             </div>
           </section>
@@ -265,7 +280,7 @@ export default function Dashboard() {
                   )}
                 </ul>
               ) : (
-                <p className="py-2 text-sm text-inkfaint">no visitors yet</p>
+                <QuietRow label="no visitors yet" />
               )}
               {state && (
                 <p className="mt-3 border-t border-line pt-2 text-[11px] text-inkfaint">
@@ -574,10 +589,10 @@ function FieldJournal() {
           <p className="py-2 text-sm leading-relaxed text-inkfaint">
             {!busUp ? (
               <>
-                the event bus isn&apos;t reachable. light it up from the project
-                root:
+                the event bus isn&apos;t reachable. the broker lives on pearl —
+                check it there:
                 <code className="mt-1 block w-fit rounded-sm bg-panel2 px-2 py-1 text-xs text-inkdim">
-                  mosquitto -c mosquitto.conf -v
+                  ssh pearl systemctl status mosquitto
                 </code>
                 {busError && (
                   <span className="mt-2 block text-xs text-chipmunk">
@@ -590,7 +605,7 @@ function FieldJournal() {
             ) : (
               <>
                 the bus is up but nobody&apos;s reporting. put Marlin on the
-                air:
+                air (he lives on pearl):
                 <code className="mt-1 block w-fit rounded-sm bg-panel2 px-2 py-1 text-xs text-inkdim">
                   python narrator.py --persona personas/marlin.yaml
                 </code>
@@ -685,6 +700,20 @@ function PanelLabel({
 
 function Sub({ children }: { children: React.ReactNode }) {
   return <span className="stamp text-[10px] text-inkfaint">{children}</span>;
+}
+
+// Empty-state row with the same box metrics as SpeciesRow (the invisible
+// text-xl spacer locks the line height), so a panel flipping between
+// "quiet" and one species never changes height and shifts the layout.
+function QuietRow({ label }: { label: string }) {
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-sm px-3 py-2">
+      <span className="text-sm text-inkfaint">{label}</span>
+      <span aria-hidden className="invisible text-xl font-bold tabular-nums">
+        0
+      </span>
+    </div>
+  );
 }
 
 function SpeciesRow({ name, n }: { name: string; n: number }) {
@@ -1387,19 +1416,277 @@ function TrainingRounds({
   );
 }
 
-function ComingSoon({ title, note }: { title: string; note: string }) {
+/* --- Weather Post (issue #25): conditions at the seed pile ------------------ */
+
+// Chart geometry. The viewBox is stretched to the panel width
+// (preserveAspectRatio="none"), so strokes carry vector-effect to stay crisp.
+const WX_W = 320;
+const WX_H = 112;
+// "now" sits where the trailing 24h meets the leading 48h: 1/3 across.
+const WX_NOW_X = (PAST_S / (PAST_S + FUTURE_S)) * WX_W;
+const WEATHER_TICK_MS = 60_000;
+
+/** hh:mm from epoch seconds, viewer-local. Only ever rendered after bus data
+ * arrives (client-side), so it can't cause a hydration mismatch. */
+function clock(ts: number | null): string {
+  if (ts === null) return "—";
+  const d = new Date(ts * 1000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function WeatherPost() {
+  const [current, setCurrent] = useState<CurrentWeather | null>(null);
+  const [history, setHistory] = useState<WeatherPoint[]>([]);
+  const [forecast, setForecast] = useState<WeatherPoint[]>([]);
+  const [busUp, setBusUp] = useState(false);
+  // "now" lives in state, never Date.now() in render (the house hydration
+  // rule) -- a slow tick marches the chart window and staleness check forward
+  // between reports.
+  const [now, setNow] = useState<number | null>(null);
+
+  useEffect(() => {
+    const tick = () => setNow(Math.floor(Date.now() / 1000));
+    // Deferred a microtask, the StationRecords trick: no synchronous setState
+    // path from the effect body, zero visible cost.
+    queueMicrotask(tick);
+    const id = setInterval(tick, WEATHER_TICK_MS);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    // Its own bus client, same shape as FieldJournal's: each panel stays
+    // self-contained (Mosquitto shrugs at a second WebSocket) rather than
+    // threading a shared client through two unrelated components. All three
+    // weather topics are RETAINED, so the broker replays the latest report,
+    // forecast, and 48h window the moment we subscribe -- weather has no HTTP.
+    const url = busUrl(
+      window.location.hostname,
+      process.env.NEXT_PUBLIC_MERLE_MQTT_WS,
+    );
+    const client = mqtt.connect(url, { reconnectPeriod: 3000 });
+    client.on("connect", () => {
+      setBusUp(true);
+      client.subscribe([
+        WEATHER_CURRENT_TOPIC,
+        WEATHER_FORECAST_TOPIC,
+        WEATHER_HISTORY_TOPIC,
+      ]);
+    });
+    client.on("close", () => setBusUp(false));
+    // Mandatory: an unhandled mqtt.js "error" throws and wedges its reconnect
+    // loop (see FieldJournal, which also surfaces the reason for both panels).
+    client.on("error", () => {});
+    client.on("message", (topic, payload) => {
+      const text = payload.toString();
+      if (topic === WEATHER_CURRENT_TOPIC) {
+        const report = parseCurrent(text);
+        if (report) {
+          setCurrent(report);
+          setNow(Math.floor(Date.now() / 1000));
+        }
+      } else if (topic === WEATHER_FORECAST_TOPIC) {
+        setForecast(parsePoints(text) ?? []);
+      } else if (topic === WEATHER_HISTORY_TOPIC) {
+        setHistory(parsePoints(text) ?? []);
+      }
+    });
+    return () => {
+      client.end(true);
+    };
+  }, []);
+
+  // A report older than 3 missed polls is presented as stale, never as now.
+  const stale =
+    current !== null && now !== null && current.ts < now - STALE_AFTER_S;
+  const reporting = current !== null && !stale;
+
+  const trend =
+    now !== null
+      ? trendSeries(history, forecast, now)
+      : { observed: [], coming: [] };
+  const allPts = [...trend.observed, ...trend.coming];
+  const range = tempRange(allPts);
+  const windMax = windCeil(allPts);
+  const hasChart = now !== null && range !== null && allPts.length > 1;
+  const ts0 = (now ?? 0) - PAST_S;
+  const ts1 = (now ?? 0) + FUTURE_S;
+
+  const round = (v: number | null) => (v === null ? "—" : Math.round(v));
+
   return (
-    <section className="panel relative flex min-h-[110px] flex-col justify-between overflow-hidden rounded-sm border border-dashed border-line bg-transparent px-4 py-3">
-      <h2
-        className="text-lg text-inkdim"
-        style={{ fontFamily: "var(--font-display)" }}
-      >
-        {title}
-      </h2>
-      <p className="text-xs text-inkfaint">{note}</p>
-      <span className="stamp absolute right-3 top-3 rotate-6 rounded-sm border border-inkfaint px-1.5 py-0.5 text-[10px] text-inkfaint">
-        coming soon
-      </span>
+    <section className="panel flex flex-col rounded-sm border border-line bg-panel">
+      {/* The masthead bills the reporter, Field Journal style -- conditions
+          themselves live down in the data block with the temperature. */}
+      <PanelLabel
+        title="Weather Post"
+        right={
+          !busUp ? (
+            <span className="stamp text-xs text-inkfaint">bus quiet</span>
+          ) : current === null ? (
+            <span className="flex items-center gap-1.5 text-xs">
+              <span className="inline-block h-2 w-2 rounded-full bg-inkfaint" />
+              <span className="stamp text-inkfaint">willard · off the air</span>
+            </span>
+          ) : stale ? (
+            <span className="flex items-center gap-1.5 text-xs">
+              <span className="breathe inline-block h-2 w-2 rounded-full bg-turkey" />
+              <span className="stamp text-turkey">
+                willard · stale report {clock(current.ts)}
+              </span>
+            </span>
+          ) : (
+            <span className="flex items-center gap-1.5 text-xs">
+              <span className="lamp inline-block h-2 w-2 rounded-full bg-led text-led" />
+              <span className="stamp text-led">willard with the weather</span>
+            </span>
+          )
+        }
+      />
+      {/* `relative` so the off-air message can overlay the (dimmed) data
+          skeleton instead of sharing its space -- same veil idea as the
+          Live Watch feed. */}
+      <div className="relative flex-1 px-4 pb-4">
+        <div
+          className={
+            current === null ? "opacity-30 transition-opacity" : "transition-opacity"
+          }
+        >
+        {/* Current conditions -- a fixed-height block whether or not a report
+            is in, so the panel never shifts as data arrives (house rule #1). */}
+        <div className="flex min-h-[58px] items-end justify-between gap-3">
+          <div>
+            <div className="flex items-baseline gap-2">
+              <span
+                className={`text-4xl font-bold tabular-nums ${reporting ? "text-ink" : "text-inkfaint"}`}
+              >
+                {round(current?.temp_f ?? null)}°
+              </span>
+              <span className="text-xs text-inkfaint">
+                feels {round(current?.feels_like_f ?? null)}°
+              </span>
+            </div>
+            {/* Conditions ride with the temperature. min-h reserves the line
+                before the first report, so nothing shifts when it lands. */}
+            <div className="min-h-[18px] text-xs text-inkdim">
+              {current?.description ?? ""}
+            </div>
+          </div>
+          <div className="flex flex-col items-end gap-0.5 text-[11px] text-inkdim">
+            <span>
+              wind {round(current?.wind_mph ?? null)} mph{" "}
+              {compass(current?.wind_deg ?? null)}
+              {current?.wind_gust_mph != null &&
+                ` · gusts ${Math.round(current.wind_gust_mph)}`}
+            </span>
+            <span>humidity {round(current?.humidity_pct ?? null)}%</span>
+            <span className="stamp text-[10px] text-inkfaint">
+              sun {clock(current?.sunrise ?? null)} –{" "}
+              {clock(current?.sunset ?? null)}
+            </span>
+          </div>
+        </div>
+
+        {/* The trend: observed temps trail left of "now" (solid), the forecast
+            extends right (dashed). Wind rides its own scale underneath. */}
+        <div className="mt-2 flex items-baseline justify-between text-[10px] text-inkfaint">
+          <span>
+            <span className="text-squirrel">—</span> temp °F ·{" "}
+            <span className="text-inkdim">—</span> wind mph
+          </span>
+          {hasChart && (
+            <span className="tabular-nums">
+              {range.min}–{range.max}°F · wind to {windMax}
+            </span>
+          )}
+        </div>
+        <div className="mt-1 h-28 w-full">
+          {hasChart && (
+            <svg
+              viewBox={`0 0 ${WX_W} ${WX_H}`}
+              preserveAspectRatio="none"
+              className="h-full w-full"
+              role="img"
+              aria-label="Observed and forecast temperature and wind"
+            >
+              <line
+                x1={WX_NOW_X}
+                y1={0}
+                x2={WX_NOW_X}
+                y2={WX_H}
+                stroke="var(--line-bright)"
+                strokeDasharray="2 4"
+                vectorEffect="non-scaling-stroke"
+              />
+              {/* wind first so temperature reads on top */}
+              <path
+                d={linePath(trend.observed, (p) => p.wind_mph, ts0, ts1, 0, windMax, WX_W, WX_H)}
+                fill="none"
+                stroke="var(--ink-dim)"
+                strokeWidth="1"
+                opacity="0.8"
+                vectorEffect="non-scaling-stroke"
+              />
+              <path
+                d={linePath(trend.coming, (p) => p.wind_mph, ts0, ts1, 0, windMax, WX_W, WX_H)}
+                fill="none"
+                stroke="var(--ink-dim)"
+                strokeWidth="1"
+                strokeDasharray="3 3"
+                opacity="0.5"
+                vectorEffect="non-scaling-stroke"
+              />
+              <path
+                d={linePath(trend.observed, (p) => p.temp_f, ts0, ts1, range.min, range.max, WX_W, WX_H)}
+                fill="none"
+                stroke="var(--squirrel)"
+                strokeWidth="1.8"
+                vectorEffect="non-scaling-stroke"
+              />
+              <path
+                d={linePath(trend.coming, (p) => p.temp_f, ts0, ts1, range.min, range.max, WX_W, WX_H)}
+                fill="none"
+                stroke="var(--squirrel)"
+                strokeWidth="1.4"
+                strokeDasharray="4 3"
+                opacity="0.65"
+                vectorEffect="non-scaling-stroke"
+              />
+            </svg>
+          )}
+        </div>
+        <div className="relative mt-0.5 h-4 text-[9px] text-inkfaint">
+          <span className="absolute left-0">−24h</span>
+          <span
+            className="stamp absolute -translate-x-1/2 text-inkdim"
+            style={{ left: `${(WX_NOW_X / WX_W) * 100}%` }}
+          >
+            now
+          </span>
+          <span className="absolute right-0">+48h</span>
+        </div>
+        </div>
+
+        {/* Off-air: the message floats over the dimmed skeleton instead of
+            wedging into the chart slot next to live-looking numerals. */}
+        {current === null && (
+          <div className="absolute inset-0 flex items-center justify-center px-6">
+            <p className="text-center text-sm leading-relaxed text-inkfaint">
+              {!busUp ? (
+                "waiting on the bus — the weather rides it"
+              ) : (
+                <>
+                  no weather report yet. put Willard on duty (he lives on
+                  pearl):
+                  <code className="mx-auto mt-1 block w-fit rounded-sm bg-panel2 px-2 py-1 text-xs text-inkdim">
+                    python weather.py
+                  </code>
+                </>
+              )}
+            </p>
+          </div>
+        )}
+      </div>
     </section>
   );
 }

@@ -106,6 +106,92 @@ def test_missing_details_never_crash_generation():
         assert narrator.generate(PERSONA, {}, {"kind": kind}, rng)
 
 
+# --- the LLM tier (pure logic only; the HTTP call is desk-tested live) --------
+
+def test_ollama_address_unset_means_tier_off(monkeypatch):
+    monkeypatch.delenv("MERLE_OLLAMA", raising=False)
+    assert narrator.ollama_address() is None
+
+
+def test_ollama_address_default_port(monkeypatch):
+    monkeypatch.setenv("MERLE_OLLAMA", "192.168.1.79")
+    assert narrator.ollama_address() == ("192.168.1.79", 11434)
+
+
+def test_ollama_address_explicit_port(monkeypatch):
+    monkeypatch.setenv("MERLE_OLLAMA", "192.168.1.79:8080")
+    assert narrator.ollama_address() == ("192.168.1.79", 8080)
+
+
+def test_event_summary_states_the_facts():
+    assert "chipmunk" in narrator.event_summary(ARRIVAL, BIBLE)
+    assert "about 62 seconds" in narrator.event_summary(DEPARTURE, BIBLE)
+    assert "6" in narrator.event_summary(CROWD, BIBLE)
+    assert "meteor_strike" in narrator.event_summary({"kind": "meteor_strike"}, BIBLE)
+
+
+def test_event_summary_carries_species_lore():
+    bible = {**BIBLE, "species_lore": {"chipmunk": "always up to something"}}
+    assert "always up to something" in narrator.event_summary(ARRIVAL, bible)
+    # ...but only for the species that actually showed up.
+    assert "always up to something" not in narrator.event_summary(CROWD, bible)
+
+
+def test_system_prompt_has_persona_canon_and_rules():
+    persona = {**PERSONA, "personality_prompt": "You are the TEST VOICE."}
+    prompt = narrator.build_system_prompt(persona, BIBLE)
+    assert "TEST VOICE" in prompt                # persona
+    assert "maple stump" in prompt               # bible canon
+    assert "Big Chonk" in prompt                 # legends
+    assert narrator.LINE_RULES in prompt         # output rules
+
+
+def test_system_prompt_survives_a_promptless_persona():
+    assert "Test" in narrator.build_system_prompt(PERSONA, {})
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ('"And there he goes!"', "And there he goes!"),
+    ("A line\nwith   newlines\nand runs of spaces", "A line with newlines and runs of spaces"),
+    ("**Majestic.** Truly.", "Majestic. Truly."),
+    ("", None),
+    (None, None),
+    ('"  "', None),
+])
+def test_sanitize_line(raw, expected):
+    assert narrator.sanitize_line(raw) == expected
+
+
+class StubOllama:
+    def __init__(self, line):
+        self.line = line
+
+    def narrate(self, persona, bible, event):
+        return self.line
+
+
+def test_generate_prefers_the_llm_line():
+    rng = random.Random(0)
+    line = narrator.generate(PERSONA, BIBLE, ARRIVAL, rng, ollama=StubOllama("Astounding!"))
+    assert line == "Astounding!"
+
+
+def test_generate_falls_back_when_the_llm_fails():
+    # A narrate() returning None (unreachable, timeout, garbage) must yield a
+    # normal template line -- the show never goes silent.
+    rng = random.Random(0)
+    line = narrator.generate(PERSONA, BIBLE, ARRIVAL, rng, ollama=StubOllama(None))
+    assert "chipmunk" in line
+
+
+def test_narrator_speaks_the_llm_line_on_the_bus_shape():
+    n = narrator.Narrator(PERSONA, BIBLE, rng=random.Random(0),
+                          ollama=StubOllama("Magnificent beast."))
+    line = n.speak(ARRIVAL, now=100.0)
+    assert line["text"] == "Magnificent beast."
+    assert line["event_kind"] == "arrival"       # bus contract unchanged
+
+
 # --- human_duration ----------------------------------------------------------
 
 @pytest.mark.parametrize("seconds,expected", [

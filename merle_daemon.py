@@ -22,8 +22,9 @@
 # RTSP + YOLO + ByteTrack feed) or 'synthetic' (camera-free, used by tests/CI
 # and frontend work).
 #
-# Run it:  uvicorn merle_daemon:app        (MERLE_DB overrides the db path,
-#                                           MERLE_MQTT the broker host:port)
+# Run it:  uvicorn merle_daemon:app        (MERLE_DB overrides the db path;
+#                                           MERLE_MQTT -- required -- points at
+#                                           the broker on pearl, see bus.py)
 # =============================================================================
 
 import asyncio
@@ -265,25 +266,30 @@ class Worker(threading.Thread):
                     storage.upsert_sighting(self.conn, self.state.session_id,
                                             d.track_id, d.species, ts, d.conf)
 
+            # Everything COUNTED counts matched tracks only -- a coasting ghost
+            # is a briefly-lost track (often the just-re-minted twin of a live
+            # one), not another animal. Coasting boxes still draw and still ride
+            # /state's `tracks` list; they just don't tally.
+            present = [d for d in dets if not d.coasting]
+
             # Arrivals and departures -- the narrator's bread and butter.
-            # Species-level, from MATCHED tracks only (a coasting ghost is a
-            # briefly-lost track, not a new animal): see _species_presence.
+            # Species-level and debounced: see _species_presence.
             now = time.time()
             self._species_presence(
-                Counter(d.species for d in dets if not d.coasting), ts, now)
+                Counter(d.species for d in present), ts, now)
 
             # Crowd moment: enough animals at once, and cooled down since the last.
-            if len(dets) >= self.control.crowd_threshold and now - self._last_crowd >= CROWD_COOLDOWN:
-                counts = dict(Counter(d.species for d in dets))
+            if len(present) >= self.control.crowd_threshold and now - self._last_crowd >= CROWD_COOLDOWN:
                 self._event(ts, "crowd_snapshot",
-                            {"total": len(dets), "counts": counts})
+                            {"total": len(present),
+                             "counts": dict(Counter(d.species for d in present))})
                 self._last_crowd = now
 
             annotated = annotate(frame, dets)
             self._record(annotated, ts)
             ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
 
-            counts = dict(Counter(d.species for d in dets))
+            counts = dict(Counter(d.species for d in present))
             tracks = [{"track_id": d.track_id, "species": d.species,
                        "conf": round(d.conf, 3), "box": list(d.box),
                        "coasting": d.coasting} for d in dets]
@@ -315,7 +321,8 @@ def _read_db_summary(conn, session_id, db_lock):
     """The DB-backed part of /state, read under the shared lock."""
     with db_lock:
         return {
-            "totals": storage.species_totals(conn, session_id),
+            "totals": storage.species_totals(
+                conn, session_id, min_frames=perception.CENSUS_AFTER_FRAMES),
             "recent_events": storage.recent_events(conn, 10),
         }
 
@@ -411,7 +418,9 @@ def create_app(source, conn, publisher=None):
         days = max(1, min(days, 90))
         today = date.today().isoformat()
         with db_lock:
-            census = storage.census_by_day(conn, days=days, today=today)
+            census = storage.census_by_day(
+                conn, days=days, today=today,
+                min_frames=perception.CENSUS_AFTER_FRAMES)
             runs = storage.training_runs(conn)
         return {"census": census,
                 "hard_frames": hard_frames_by_day(days, today),
@@ -424,7 +433,8 @@ def create_app(source, conn, publisher=None):
         except ValueError:
             return Response(status_code=422, content=f"not an ISO date: {day}")
         with db_lock:
-            hours = storage.day_hours(conn, day)
+            hours = storage.day_hours(
+                conn, day, min_frames=perception.CENSUS_AFTER_FRAMES)
         return {"date": day, "hours": hours}
 
     @app.post("/control")
