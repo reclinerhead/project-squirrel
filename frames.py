@@ -198,7 +198,8 @@ class RTSPFrameSource(FrameSource):
         # frames) forces the one-time warmup cost before any frame can queue.
         self.model = YOLO(os.environ.get("MERLE_MODEL", "models/current.pt"))
         self.model.predict(np.zeros((360, 640, 3), np.uint8),
-                           imgsz=perception.IMGSZ, verbose=False)
+                           imgsz=perception.IMGSZ, quantize=perception.QUANTIZE,
+                           verbose=False)
         self.names = self.model.names
         self.tm = perception.TrackMemory()
 
@@ -221,7 +222,8 @@ class RTSPFrameSource(FrameSource):
         if frame is None:
             return None, []
         results = self.model.track(frame, conf=perception.DETECT_FLOOR,
-                                   imgsz=perception.IMGSZ, persist=True,
+                                   imgsz=perception.IMGSZ,
+                                   quantize=perception.QUANTIZE, persist=True,
                                    tracker=perception.TRACKER_YAML, verbose=False)
         live, coasting = self.tm.ingest(
             perception.extract_detections(results[0], self.names))
