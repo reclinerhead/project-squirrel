@@ -22,6 +22,19 @@ Rehearsal without live animals — republish archived events onto the bus with o
 .\.venv\Scripts\python.exe replay_events.py --last 100 --speed 4
 ```
 
+### Services on pearl (systemd)
+
+The pearl-resident processes run as systemd units at `/etc/systemd/system/` — the narrator (Marlin) and `willard-weather.service` (Willard) — enabled so they survive reboots. Mosquitto is its own stock `mosquitto.service`. All Merle units follow one pattern: run as the login user, `WorkingDirectory=` the repo checkout (`/home/todd/project-squirrel`), `ExecStart=` the repo venv's python (`venv/bin/python` on pearl — never system python), `Restart=on-failure`, and `Environment=` lines carrying the process's env (each service sets `MERLE_MQTT=localhost:1883` — the broker is local; the narrator adds `MERLE_OLLAMA`, the weather post adds `MERLE_OWM_KEY`). **Every unit needs `Environment=PYTHONUNBUFFERED=1`**: the scripts log with bare `print()`, and under systemd stdout is a pipe, so Python block-buffers — `journalctl` shows nothing for hours and a TERM on stop discards the buffer. `WorkingDirectory` doubles as data placement: the weather post's `weather_history.json` lands in the repo dir because its default path is relative.
+
+Deploying new code to pearl:
+
+```bash
+cd ~/project-squirrel && git pull
+sudo systemctl restart willard-weather    # and/or the narrator's unit
+```
+
+Everything else: `systemctl status <unit>` for health, `journalctl -u <unit> -f` for live logs, `systemctl cat <unit>` to see (and crib from) an existing unit when adding the next service — new unit file, then `sudo systemctl daemon-reload && sudo systemctl enable --now <unit>`.
+
 ## System overview
 
 ```
@@ -139,6 +152,7 @@ Conditions at the seed pile (issue #25): a pearl-resident service (needs neither
 - **Timestamps on the weather topics are unix epoch seconds** (OpenWeather's native `dt`), not the ISO strings used elsewhere: the dashboard formats them in the viewer's locale and the narrator will compare against `time.time()` for staleness — nobody wants to parse.
 - **The 48h rolling window** is the one piece of state the service owns: appended on every poll, pruned by age *measured from the newest point* (deterministic for tests), republished whole to `weather/history` (~288 compact points, a few KB), and persisted to a JSON file on pearl so restarts don't blank the dashboard's observed-temperature trail. Deliberately a flat file, not SQLite — bounded, rewritten whole, refetchable. Rejected alternative: the dashboard accumulating history — the MCC is stateless by design and only runs when watched, while pearl is 24/7. A seasonal archive (real SQLite) is a possible follow-up if 48h ever feels short.
 - **Resilience**: any OpenWeather failure means a skipped report (logged, next poll retries — a failed forecast fetch retries on the next 10-min pass, not after a full hour), never a dead service; the error is logged without the URL, which carries the API key. The bus side inherits `EventPublisher`'s run-with-or-without-broker contract.
+- **Deployment**: runs on pearl as `willard-weather.service` (see Services on pearl under Quick start). The unit carries `MERLE_MQTT=localhost:1883` and `MERLE_OWM_KEY`; `WorkingDirectory` is the repo checkout, which is where the default-pathed `weather_history.json` lives. **The masthead lamp is freshness-only**: the weather post has no status topic and no MQTT Last Will (unlike narrators), so a stopped service stays green up to 30 minutes, then reads stale — that lag *is* the outage signal.
 - Pure logic (config/location parsing, OWM response → bus payload mapping, window roll/prune/persist) is covered by `test_weather.py`; the fetch loop and MQTT plumbing are desk-tested against the real broker (`weather/current` payload round-trips a fresh subscriber intact).
 
 ### The MCC dashboard (`mcc/`)
