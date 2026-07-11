@@ -152,7 +152,7 @@ def template_fields(event, bible):
 # --- Tier 2: LLM narration via Ollama ----------------------------------------
 
 OLLAMA_DEFAULT_PORT = 11434
-OLLAMA_DEFAULT_MODEL = "qwen2.5:14b"
+OLLAMA_DEFAULT_MODEL = "mistral-small3.2"
 # Generation blocks the paho network loop (on_message), so the timeout must
 # stay under the MQTT keepalive (60s). Events arriving mid-generation queue up
 # and mostly fall to the cooldown gate afterwards -- which is the pacing we
