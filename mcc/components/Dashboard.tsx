@@ -206,6 +206,13 @@ export default function Dashboard() {
               right={
                 asleep ? (
                   <span className="stamp text-xs text-inkfaint">no signal</span>
+                ) : !state ? (
+                  // Pre-first-poll: don't advertise LIVE while the daemon is
+                  // still an open question (very visible when the first /state
+                  // rides out the proxy's headers timeout).
+                  <span className="stamp text-xs text-inkfaint">
+                    reaching out…
+                  </span>
                 ) : paused ? (
                   <span className="flex items-center gap-2 text-xs text-inkdim">
                     <PauseIcon className="h-3 w-3" />
