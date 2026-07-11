@@ -170,7 +170,7 @@ OLLAMA_TIMEOUT_S = 30
 # Output rules live in code, not the persona file, so every persona gets them
 # and persona files stay pure character.
 LINE_RULES = (
-    "Deliver exactly ONE on-air line of one to three sentences. Spoken words "
+    "Deliver ONE or TWO (at most) on-air lines of one to three sentences. Spoken words "
     "only: no stage directions, no quotation marks, no emoji, no preamble. "
     "Never break character."
 )
