@@ -5,6 +5,8 @@
 
 import time
 
+import cv2
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
@@ -80,6 +82,65 @@ def test_mjpeg_frame_format():
 
 def test_stream_route_registered(client):
     assert "/stream" in {r.path for r in client.app.routes}
+
+
+def _decode(jpeg):
+    return cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+
+
+def test_encode_stream_jpeg_downscales_wide_frames():
+    # A camera-native 4K frame comes back 1080p (issue #49: 4K JPEGs at 15fps
+    # were ~26MB/s through the MCC proxy), aspect preserved.
+    jpeg = merle_daemon.encode_stream_jpeg(np.zeros((2160, 3840, 3), np.uint8))
+    assert _decode(jpeg).shape[:2] == (1080, 1920)
+
+
+def test_encode_stream_jpeg_leaves_narrow_frames_alone():
+    # Frames already at or under STREAM_WIDTH (the synthetic source, a future
+    # substream) must not be upscaled.
+    jpeg = merle_daemon.encode_stream_jpeg(np.zeros((720, 1280, 3), np.uint8))
+    assert _decode(jpeg).shape[:2] == (720, 1280)
+
+
+def test_snapshot_stays_full_resolution(client):
+    # The downscale is /stream-only: /snapshot keeps the source-native frame
+    # (1280x720 from the synthetic source).
+    r = client.get("/snapshot")
+    assert _decode(r.content).shape[:2] == (720, 1280)
+
+
+def test_worker_publishes_stream_jpeg_and_advancing_seq(client):
+    shared = client.app.state.shared
+    with shared.lock:
+        assert shared.stream_jpeg is not None
+        seq = shared.seq
+    assert seq > 0
+    # seq keeps advancing while frames flow -- this is what the /stream
+    # generator gates on.
+    for _ in range(100):
+        with shared.lock:
+            if shared.seq > seq:
+                break
+        time.sleep(0.02)
+    with shared.lock:
+        assert shared.seq > seq
+
+
+def test_next_stream_part_sends_only_new_frames():
+    jpeg = b"\xff\xd8JPEG\xff\xd9"
+    # No frame published yet: nothing to send.
+    assert merle_daemon.next_stream_part(None, 0, -1) == (None, -1)
+    # Fresh client (last_seq=-1) gets the current frame immediately, even if
+    # the worker is stood down and seq is stale -- last frame, not broken image.
+    part, last = merle_daemon.next_stream_part(jpeg, 7, -1)
+    assert part == merle_daemon.mjpeg_frame(jpeg)
+    assert last == 7
+    # Same seq again (stand-down, or ticking faster than the worker): silence.
+    assert merle_daemon.next_stream_part(jpeg, 7, 7) == (None, 7)
+    # Worker publishes a new frame: it goes out.
+    part, last = merle_daemon.next_stream_part(jpeg, 8, 7)
+    assert part is not None
+    assert last == 8
 
 
 def test_control_stop_and_start(client):
