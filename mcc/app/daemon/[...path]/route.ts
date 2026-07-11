@@ -17,6 +17,15 @@ import type { NextRequest } from "next/server";
 // before falling back to IPv4. Targeting IPv4 directly avoids the detour.
 const DAEMON = process.env.MERLE_DAEMON_URL ?? "http://127.0.0.1:8000";
 
+// Bound the wait for response HEADERS, not the body. A daemon that's merely
+// off on localhost refuses the connect instantly, but pearl -> bluejay hits
+// Windows Firewall, which silently DROPS packets to a listenerless port -- the
+// connect then hangs for minutes, the /state poll never settles, and the
+// dashboard sits on its pre-first-poll loading face forever (issue #35,
+// follow-up). 3s is an eternity on the LAN; the daemon answers headers in
+// milliseconds even mid model load.
+const HEADERS_TIMEOUT_MS = 3000;
+
 // Transition-logging state. Module-level is fine: one server process, and a
 // wrong guess after a restart costs one log line, not correctness. Starts true
 // so a server booting with the daemon already down logs the transition once.
@@ -36,7 +45,6 @@ async function proxy(
   const init: RequestInit & { duplex?: "half" } = {
     method: req.method,
     cache: "no-store",
-    signal: req.signal,
   };
   const contentType = req.headers.get("content-type");
   if (contentType) init.headers = { "content-type": contentType };
@@ -45,12 +53,23 @@ async function proxy(
     init.duplex = "half"; // required by Node fetch to stream a request body
   }
 
+  // One controller, two triggers: the client giving up (relays req.signal, and
+  // keeps relaying it so a closed tab also cancels an in-flight stream body)
+  // and the headers timer. The timer is cleared the moment headers land, so it
+  // can never abort the infinite MJPEG body mid-flow -- AbortSignal.timeout()
+  // would, which is why it isn't used here.
+  const ctrl = new AbortController();
+  req.signal.addEventListener("abort", () => ctrl.abort());
+  const timer = setTimeout(() => ctrl.abort(), HEADERS_TIMEOUT_MS);
+  init.signal = ctrl.signal;
+
   let upstream: Response;
   try {
     upstream = await fetch(url, init);
   } catch {
     // A tab that navigated away aborts our fetch -- that says nothing about
-    // the daemon, so it neither logs nor flips the transition state.
+    // the daemon, so it neither logs nor flips the transition state. A timer
+    // abort (headers never came) is the firewall-drop flavor of unreachable.
     if (req.signal.aborted) return new Response(null, { status: 499 });
     if (daemonWasUp) {
       daemonWasUp = false;
@@ -59,6 +78,8 @@ async function proxy(
       );
     }
     return Response.json({ error: "daemon unreachable" }, { status: 503 });
+  } finally {
+    clearTimeout(timer);
   }
 
   if (!daemonWasUp) {
