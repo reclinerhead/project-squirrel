@@ -585,13 +585,18 @@ function FieldJournal() {
           </span>
         }
       />
-      <div className="min-h-[110px] flex-1 px-4 pb-4">
+      {/* relative + absolute-fill list: the list is out of flow, so it can't
+          set the grid row's height -- the tallest sibling panel (Weather Post)
+          does, and the journal stretches to match, scrolling internally.
+          min-h-72 keeps a working height when the sibling is short (mobile
+          single-column), and the empty state reserves the same box. */}
+      <div className="relative min-h-72 flex-1">
         {entries.length > 0 ? (
-          <ul className="flex max-h-72 flex-col gap-3 overflow-y-auto pr-1">
+          <ul className="scrollpane absolute inset-0 flex flex-col gap-3 overflow-y-auto px-4 pb-4">
             {entries.map((e, i) => (
               <li
                 key={e.key}
-                className={`journal-in border-l-2 pl-3 ${
+                className={`journal-filed border-l-2 pl-3 ${
                   i === 0 ? "border-led" : "border-line"
                 }`}
               >
@@ -609,7 +614,7 @@ function FieldJournal() {
             ))}
           </ul>
         ) : (
-          <p className="py-2 text-sm leading-relaxed text-inkfaint">
+          <p className="px-4 pb-4 pt-2 text-sm leading-relaxed text-inkfaint">
             {!busUp ? (
               <>
                 the event bus isn&apos;t reachable. the broker lives on pearl —
