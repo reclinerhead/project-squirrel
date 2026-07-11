@@ -27,7 +27,7 @@
 # LLM tier config (env, following the MERLE_MQTT convention):
 #   MERLE_OLLAMA        Ollama "host" or "host:port" (port defaults to 11434).
 #                       UNSET = LLM tier off; templates carry the show.
-#   MERLE_OLLAMA_MODEL  model name (default: qwen2.5:14b)
+#   MERLE_OLLAMA_MODEL  model name (default: OLLAMA_DEFAULT_MODEL below)
 #
 # The narrator never plays audio itself -- it publishes; a consumer (the MCC
 # dashboard's TTS, someday a speaker on the porch) does the speaking.
@@ -332,28 +332,31 @@ def sanitize_line(text):
 
 
 class Ollama:
-    """Tier-2 narration: one blocking, non-streaming completion per line
-    (the bus contract is one JSON object per spoken line, and the dashboard
-    TTS speaks whole lines -- nothing downstream could use a token stream).
-    narrate() returns a clean line or None; it never raises, because a dead
-    LLM must degrade to templates, not kill the narrator."""
+    """One blocking, non-streaming completion per call (the bus contract is
+    one JSON object per spoken line, and the dashboard TTS speaks whole lines
+    -- nothing downstream could use a token stream). complete() is the generic
+    core, shared with the weather post's Willard segment (issue #45);
+    narrate() is the narrator-shaped wrapper. Both return None instead of
+    raising, because a dead LLM must degrade (templates, a skipped segment),
+    not kill the caller."""
 
     def __init__(self, host, port, model):
         self.url = f"http://{host}:{port}/api/generate"
         self.model = model
 
-    def narrate(self, persona, bible, event, memory=(), now=None, weather=None):
+    def complete(self, system, prompt, num_predict=120, temperature=0.9):
+        """Raw model text for one system+prompt pair, or None on any failure.
+        num_predict caps a model that ignores the length rules; the
+        temperature keeps repeat prompts from producing repeat prose."""
         payload = {
             "model": self.model,
-            "system": build_system_prompt(persona, bible),
-            "prompt": build_user_prompt(event, bible, memory, now, weather),
+            "system": system,
+            "prompt": prompt,
             "stream": False,
             # Driveway events can be an hour apart; without keep_alive every
-            # line would pay the cold model load (~2x latency, desk-tested).
+            # call would pay the cold model load (~2x latency, desk-tested).
             "keep_alive": "30m",
-            # num_predict caps a model that ignores the length rule; the
-            # temperature keeps repeat events from producing repeat lines.
-            "options": {"num_predict": 120, "temperature": 0.9},
+            "options": {"num_predict": num_predict, "temperature": temperature},
         }
         req = urllib.request.Request(
             self.url, data=json.dumps(payload).encode("utf-8"),
@@ -361,10 +364,15 @@ class Ollama:
         try:
             with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT_S) as resp:
                 reply = json.load(resp)
-        except Exception as e:   # any failure at all -> the template tier
-            print(f"[ollama] {type(e).__name__}: {e} -- falling back to template")
+        except Exception as e:   # any failure at all -> the caller's fallback
+            print(f"[ollama] {type(e).__name__}: {e} -- generation skipped")
             return None
-        return sanitize_line(reply.get("response"))
+        return reply.get("response")
+
+    def narrate(self, persona, bible, event, memory=(), now=None, weather=None):
+        return sanitize_line(self.complete(
+            build_system_prompt(persona, bible),
+            build_user_prompt(event, bible, memory, now, weather)))
 
 
 def generate(persona, bible, event, rng, ollama=None,

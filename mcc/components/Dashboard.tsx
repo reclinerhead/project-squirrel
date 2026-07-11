@@ -42,12 +42,15 @@ import {
   CurrentWeather,
   FUTURE_S,
   PAST_S,
+  REPORT_STALE_S,
   STALE_AFTER_S,
   WEATHER_CURRENT_TOPIC,
   WEATHER_FORECAST_TOPIC,
   WEATHER_HISTORY_TOPIC,
+  WEATHER_REPORT_TOPIC,
   WEATHER_STATUS_TOPIC,
   WeatherPoint,
+  WeatherReport,
   WeatherStatus,
   ageText,
   compass,
@@ -56,6 +59,7 @@ import {
   nightBands,
   parseCurrent,
   parsePoints,
+  parseReport,
   parseStatus,
   tempRange,
   timeTicks,
@@ -1471,6 +1475,10 @@ function WeatherPost() {
   const [current, setCurrent] = useState<CurrentWeather | null>(null);
   const [history, setHistory] = useState<WeatherPoint[]>([]);
   const [forecast, setForecast] = useState<WeatherPoint[]>([]);
+  // Willard's on-air segment (issue #45): retained LLM narration, absent
+  // entirely when the weather service runs without an Ollama (the topic is
+  // simply never published).
+  const [report, setReport] = useState<WeatherReport | null>(null);
   // Presence (issue #31): retained "online"/"offline" from weather/status.
   // null = no retained status on the broker (pre-#31 service), which falls
   // back to judging Willard purely by report freshness.
@@ -1508,6 +1516,7 @@ function WeatherPost() {
         WEATHER_CURRENT_TOPIC,
         WEATHER_FORECAST_TOPIC,
         WEATHER_HISTORY_TOPIC,
+        WEATHER_REPORT_TOPIC,
         WEATHER_STATUS_TOPIC,
       ]);
     });
@@ -1527,6 +1536,8 @@ function WeatherPost() {
         setForecast(parsePoints(text) ?? []);
       } else if (topic === WEATHER_HISTORY_TOPIC) {
         setHistory(parsePoints(text) ?? []);
+      } else if (topic === WEATHER_REPORT_TOPIC) {
+        setReport(parseReport(text));
       } else if (topic === WEATHER_STATUS_TOPIC) {
         setStatus(parseStatus(text));
       }
@@ -1545,6 +1556,11 @@ function WeatherPost() {
   const stale =
     current !== null && now !== null && current.ts < now - STALE_AFTER_S;
   const reporting = current !== null && !stale && !offline;
+  // The segment ages on its own clock (broadcasts are ~30 min apart, polls
+  // 10): past REPORT_STALE_S it's history, not news, and the between-
+  // broadcasts state takes over.
+  const onAir =
+    report !== null && now !== null && now - report.ts <= REPORT_STALE_S;
 
   // Hover scrub (issue #40): pointer x as a fraction of the chart width, null
   // when the pointer is elsewhere. Everything else is derived per render.
@@ -1856,6 +1872,33 @@ function WeatherPost() {
             now
           </span>
           <span className="absolute right-0">+48h</span>
+        </div>
+
+        {/* Willard's on-air segment (issue #45): the LLM narration, retained
+            on weather/report, in the display face -- the Field Journal
+            convention (voice = display, telemetry = mono). Inside the
+            dimmable block, so it fades with the rest when he's off duty.
+            min-h reserves the slot before (or between) broadcasts, so a
+            segment landing never shifts the chart above (house rule #1). */}
+        <div className="mt-3 min-h-[110px] border-t border-line pt-2">
+          {onAir && report !== null ? (
+            <>
+              <div className="flex gap-2 text-[11px]">
+                <span className="stamp text-inkdim">willard, on the air</span>
+                <span className="text-inkfaint">{clock(report.ts)}</span>
+              </div>
+              <p
+                className="journal-in mt-1 whitespace-pre-line text-[15px] leading-snug text-ink"
+                style={{ fontFamily: "var(--font-display)" }}
+              >
+                {report.text}
+              </p>
+            </>
+          ) : (
+            <p className="py-2 text-sm leading-relaxed text-inkfaint">
+              willard is between broadcasts — the forecast desk is quiet
+            </p>
+          )}
         </div>
         </div>
 
