@@ -136,6 +136,11 @@ Topics:
   reports, all **retained**: weather is state, not a moment, so a late
   joiner (fresh dashboard tab) gets the latest report straight from the
   broker with no HTTP path or poll loop of its own
+- `weather/report` — Willard's on-air segment (issue #45): the conditions +
+  outlook narrated by the LLM on bluejay in his Willard Scott voice, every
+  ~30 minutes, **retained** like the rest of the weather set. Only published
+  when the unit carries `MERLE_OLLAMA`; without it the topic simply never
+  exists
 - `weather/status` — Willard's retained presence, same `online`/`offline`
   contract as the narrators but in its own namespace so the dashboard's
   narrator wildcard never picks up a weather reporter
@@ -207,9 +212,11 @@ Code: `weather.py` in the same checkout + venv as the narrator.
 
 Polls OpenWeather's classic free APIs — current conditions every 10 minutes,
 the 5-day/3-hour forecast every hour (~170 calls/day against free limits of
-60/min and 1M/month) — and publishes the retained `weather/*` topics above.
+60/min and 1M/month) — and publishes the retained `weather/*` topics above,
+including the LLM-narrated on-air segment when `MERLE_OLLAMA` is set.
 Consumers: the dashboard's Weather Post panel (the "willard with the
-weather" masthead), and eventually the narrator's prompt context.
+weather" masthead and the segment beneath the chart), and the narrator's
+prompt context.
 
 Extra env in the unit:
 
@@ -218,6 +225,13 @@ Extra env in the unit:
   startup instead (the MERLE_MQTT philosophy).
 - `MERLE_WEATHER_LOC` — optional; `zip`, `zip,CC`, or `lat,lon`
   (default `49001,US`, the station's home turf).
+- `MERLE_OLLAMA=192.168.1.79:11434` — optional; turns on Willard's on-air
+  segment (issue #45), narrated by bluejay's Ollama every ~30 minutes and
+  published retained to `weather/report`. Same var, same semantics as the
+  narrator unit; unset means no segment and everything else runs as before.
+  An unreachable Ollama is a skipped broadcast retried on the next 10-minute
+  pass — look for `[ollama]` lines in the journal. `MERLE_OLLAMA_MODEL`
+  optionally picks the model (defaults to the code default in `narrator.py`).
 
 State: `weather_history.json` in the repo dir (that's `WorkingDirectory` +
 the default relative path) — the 48h rolling window behind the dashboard's
