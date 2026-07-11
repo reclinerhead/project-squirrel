@@ -9,8 +9,12 @@ The station spans two machines. **pearl** (`192.168.1.64`, always-on Ubuntu) hos
 ```powershell
 # 1. Perception daemon (needs MERLE_RTSP_PASS for the camera and MERLE_MQTT
 #    for the bus -- both set User-level on bluejay;
-#    set MERLE_SOURCE=synthetic for the camera-free world)
-.\.venv\Scripts\python.exe -m uvicorn merle_daemon:app --port 8000
+#    set MERLE_SOURCE=synthetic for the camera-free world).
+#    --host 0.0.0.0 so pearl's production dashboard can reach it across the
+#    LAN (loopback-only was the one-box era); needs a one-time Windows
+#    Firewall inbound allow on TCP 8000 -- the firewall silently DROPS
+#    blocked packets, so the symptom is a hang, not a refusal.
+.\.venv\Scripts\python.exe -m uvicorn merle_daemon:app --host 0.0.0.0 --port 8000
 
 # 2. The dashboard -> http://localhost:3000
 pnpm --dir mcc dev
@@ -26,12 +30,21 @@ Rehearsal without live animals — republish archived events onto the bus with o
 
 The pearl-resident processes run as systemd units at `/etc/systemd/system/` — the narrator (Marlin) and `willard-weather.service` (Willard) — enabled so they survive reboots. Mosquitto is its own stock `mosquitto.service`. All Merle units follow one pattern: run as the login user, `WorkingDirectory=` the repo checkout (`/home/todd/project-squirrel`), `ExecStart=` the repo venv's python (`venv/bin/python` on pearl — never system python), `Restart=on-failure`, and `Environment=` lines carrying the process's env (each service sets `MERLE_MQTT=localhost:1883` — the broker is local; the narrator adds `MERLE_OLLAMA`, the weather post adds `MERLE_OWM_KEY`). **Every unit needs `Environment=PYTHONUNBUFFERED=1`**: the scripts log with bare `print()`, and under systemd stdout is a pipe, so Python block-buffers — `journalctl` shows nothing for hours and a TERM on stop discards the buffer. `WorkingDirectory` doubles as data placement: the weather post's `weather_history.json` lands in the repo dir because its default path is relative.
 
-Deploying new code to pearl:
+Pearl also serves the production MCC as `mcc-dashboard.service` (port 3000,
+`next start` + a `fast-stop.conf` drop-in — see The MCC dashboard below and
+`Servers/Pearl.md` for the ops detail).
+
+Deploying new code to pearl — for the Python services, pull + restart is the
+whole deploy (they run from source):
 
 ```bash
 cd ~/project-squirrel && git pull
 sudo systemctl restart willard-weather    # and/or the narrator's unit
 ```
+
+The MCC deploys via `Servers/deploy-mcc.sh` instead (pull → install → build →
+restart, failing loudly at each step) — `next start` serves the compiled
+`.next/`, so pull + restart is *not* a deploy for it.
 
 Everything else: `systemctl status <unit>` for health, `journalctl -u <unit> -f` for live logs, `systemctl cat <unit>` to see (and crib from) an existing unit when adding the next service — new unit file, then `sudo systemctl daemon-reload && sudo systemctl enable --now <unit>`.
 
@@ -160,6 +173,7 @@ Conditions at the seed pile (issue #25): a pearl-resident service (needs neither
 
 The daemon's face: a Next.js App Router app, one page, one client component (`components/Dashboard.tsx`) that polls `/daemon/state` every second (10s while the daemon is asleep) and renders the live MJPEG stream plus the instrument rail (current counts, run census, controls, event log, and coming-soon placeholders for future panels).
 
+- **Production runs on pearl** as `mcc-dashboard.service` (`next start`, port 3000) and deploys via `Servers/deploy-mcc.sh` — the script enforces pull → install → build → restart, because `next start` serves the compiled `.next/`, not source: pull + restart re-serves the old code, and building after the restart rewrites `.next/` under the live server. A `fast-stop.conf` drop-in sets `TimeoutStopSec=5` (Next's graceful shutdown waits on browser keep-alive connections, up to systemd's 90s default — the MCC is a stateless proxy with nothing worth waiting for). The unit's `MERLE_DAEMON_URL` points at bluejay, which is why the daemon there runs with `--host 0.0.0.0` (see Quick start; the Asleep panel's wake command prints exactly that). Ops detail lives in `Servers/Pearl.md`.
 - **The rail panels have fixed species slots.** On the Pavement and Run Census render one row per species in the daemon's `/state` roster (stable roster order via `rosterCounts()` in `lib/daemon.ts`), zero or not — a zero-count row dims instead of disappearing. Rows never insert, remove, or reorder as counts change, so a species blinking in (or a one-second misidentification) lights its gauge rather than shoving everything below it down and back up. Species counted but absent from the roster (older daemon, future classes) are appended so nothing is hidden.
 
 - **All daemon traffic goes through an explicit proxy route** (`app/daemon/[...path]/route.ts` → `MERLE_DAEMON_URL`, default `127.0.0.1:8000`; on pearl it points at bluejay). The browser stays same-origin — no CORS in the daemon — and a phone on the LAN reaching the MCC also reaches the daemon through it; the infinite MJPEG stream passes through un-buffered as a piped body. It was a `next.config.ts` rewrite until issue #35: Next's internal proxy logs every failed upstream attempt, and with the MCC running 24/7 on pearl while the daemon only runs during bluejay test sessions, daemon-down is the *normal* state — at a 1s poll that was ~86k journal lines/day. The route instead answers a quiet `503` (any non-OK response is already the client's "asleep" path) and journals only the **transitions**: one line when the daemon drops, one when it returns. A client-side abort (closed tab) is neither logged nor treated as a transition. Upstream connects are bounded by a **3s headers timeout** (cleared once headers land, so it can never cut the infinite stream body): a dead daemon on localhost refuses instantly, but cross-machine Windows Firewall silently *drops* packets to a listenerless port and the connect would otherwise hang for minutes — the dashboard's first symptom was a permanently "loading" page on pearl. **Bus traffic is the one exception**: HTTP proxying can't carry WebSockets, so the browser connects to Mosquitto on pearl directly (`NEXT_PUBLIC_MERLE_MQTT_WS` in `mcc/.env.local`; `lib/bus.ts`).

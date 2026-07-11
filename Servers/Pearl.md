@@ -19,6 +19,7 @@ outage brings her back without anyone going downstairs.
 | Mosquitto | `mosquitto`       | 1883 (MQTT), 9001 (WebSockets) | The Merle event bus                                            |
 | Marlin    | `narrator-marlin` | —                              | Scene narrator, subscribes to events, publishes narration      |
 | Willard   | `willard-weather` | —                              | Weather post: polls OpenWeather, publishes retained `weather/*` |
+| MCC       | `mcc-dashboard`   | 3000 (HTTP)                    | The Merle dashboard, production build (`next start`)           |
 | Pi-hole   | `pihole-FTL`      | 53, 67 (DHCP), 80, 443         | Household DNS + DHCP                                           |
 
 Not here: the perception daemon and camera (those live on bluejay,
@@ -38,6 +39,7 @@ Green dot = running. That's it. Everything below is elaboration.
 systemctl status mosquitto
 systemctl status narrator-marlin
 systemctl status willard-weather
+systemctl status mcc-dashboard
 systemctl status pihole-FTL
 ```
 
@@ -72,18 +74,27 @@ sudo systemctl stop willard-weather
 sudo systemctl start willard-weather
 ```
 
-`enable` / `disable` control whether it comes back after a reboot. All four
+`enable` / `disable` control whether it comes back after a reboot. All five
 services are enabled. To check:
 
 ```
 systemctl is-enabled willard-weather
 ```
 
-Deploying new Merle code (both units run out of the same checkout):
+Deploying new Merle code (all units run out of the same checkout). For the
+**Python services** (narrator, weather), pull + restart is the whole deploy —
+they run from source:
 
 ```
 cd ~/project-squirrel && git pull
 sudo systemctl restart narrator-marlin willard-weather
+```
+
+The **MCC is different** — see The MCC dashboard below. Pull + restart is
+*not* a deploy for it; use the script:
+
+```
+~/project-squirrel/Servers/deploy-mcc.sh
 ```
 
 ---
@@ -94,9 +105,9 @@ sudo systemctl restart narrator-marlin willard-weather
 sudo ss -tlnp
 ```
 
-Expected: 22 (ssh), 53 (pihole), 80/443 (pihole web), 1883 + 9001 (mosquitto).
-Anything else deserves a question. (Marlin and Willard listen on nothing —
-they only talk to the broker.)
+Expected: 22 (ssh), 53 (pihole), 80/443 (pihole web), 1883 + 9001 (mosquitto),
+3000 (mcc-dashboard). Anything else deserves a question. (Marlin and Willard
+listen on nothing — they only talk to the broker.)
 
 ---
 
@@ -236,6 +247,40 @@ mosquitto_sub -h 192.168.1.64 -t 'weather/status' -C 1 -v
 
 ---
 
+## The MCC dashboard
+
+Unit: `/etc/systemd/system/mcc-dashboard.service`
+Drop-in: `/etc/systemd/system/mcc-dashboard.service.d/fast-stop.conf`
+Code: `mcc/` in the same checkout. Serves http://192.168.1.64:3000
+
+The production Next.js build, served by `next start`. It's a stateless proxy
+in front of the daemon on bluejay — the dashboard's state lives in the
+browser tab and the daemon; nothing on pearl is worth waiting for.
+
+**Deploying: `~/project-squirrel/Servers/deploy-mcc.sh` is *the* way.**
+Pull + restart is not a deploy — `next start` serves the compiled `.next/`,
+not source, so a restart without a build re-serves the old code, and a build
+run after the restart rewrites `.next/` under the live server (`Failed to
+load static file` errors). The script enforces the one valid order — pull →
+install → build → restart — and fails loudly at each step, so a broken build
+never restarts the service.
+
+**The fast-stop drop-in** sets `TimeoutStopSec=5`. Next's graceful shutdown
+waits on connections that browser tabs hold open (HTTP keep-alive), and
+systemd's default stop timeout is 90s — so `systemctl stop` used to sit the
+full 90s before SIGKILL. The MCC is stateless, so waiting buys nothing;
+stops now take ≤5s.
+
+**Reaching the daemon**: the dashboard proxies to the perception daemon on
+bluejay (`MERLE_DAEMON_URL` in the unit). For that to work the daemon on
+bluejay must bind the LAN, not loopback — `python -m uvicorn merle_daemon:app
+--host 0.0.0.0 --port 8000` — and Windows Firewall on bluejay needs a
+one-time inbound allow on TCP 8000. The daemon being down is the *normal*
+state (it only runs during bluejay sessions); the dashboard shows "Merle is
+asleep" and journals only the down/up transitions.
+
+---
+
 ## Pi-hole
 
 Web UI: http://192.168.1.64/admin
@@ -296,6 +341,8 @@ sudo tar czf ~/pearl-config-$(date +%F).tar.gz \
     /etc/mosquitto/conf.d/ \
     /etc/systemd/system/narrator-marlin.service \
     /etc/systemd/system/willard-weather.service \
+    /etc/systemd/system/mcc-dashboard.service \
+    /etc/systemd/system/mcc-dashboard.service.d/ \
     /etc/netplan/
 ```
 
@@ -306,8 +353,9 @@ OpenWeather API key, so treat the tarball accordingly.
 
 ## The rest of the system
 
-- bluejay `192.168.1.79` — desktop, RTX 5070 Ti. Perception daemon,
-  camera, Ollama (`:11434`), MCC dashboard dev server.
-  Needs `MERLE_MQTT=192.168.1.64:1883` in its environment.
+- bluejay `192.168.1.79` — desktop, RTX 5070 Ti. Perception daemon
+  (`:8000`, LAN-bound so pearl's dashboard can reach it), camera,
+  Ollama (`:11434`), MCC dev server. Needs `MERLE_MQTT=192.168.1.64:1883`
+  in its environment.
 - merle `192.168.1.103` — Raspberry Pi 5, the rover.
 - pearl `192.168.1.64` — you are here.
