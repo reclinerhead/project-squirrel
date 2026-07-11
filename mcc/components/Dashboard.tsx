@@ -52,10 +52,13 @@ import {
   ageText,
   compass,
   linePath,
+  nearestPoint,
+  nightBands,
   parseCurrent,
   parsePoints,
   parseStatus,
   tempRange,
+  timeTicks,
   trendSeries,
   windCeil,
 } from "@/lib/weather";
@@ -1441,6 +1444,9 @@ const WX_W = 320;
 const WX_H = 112;
 // "now" sits where the trailing 24h meets the leading 48h: 1/3 across.
 const WX_NOW_X = (PAST_S / (PAST_S + FUTURE_S)) * WX_W;
+// Time-axis ticks every 12h across the fixed window (issue #40) -- pure
+// geometry, so computed once at module scope.
+const WX_TICKS = timeTicks();
 const WEATHER_TICK_MS = 60_000;
 
 /** hh:mm from epoch seconds, viewer-local. Only ever rendered after bus data
@@ -1450,6 +1456,15 @@ function clock(ts: number | null): string {
   const d = new Date(ts * 1000);
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** "fri 14:05" -- weekday + clock, viewer-local. The chart spans three days,
+ * so the hover readout names the day, not just the hour. */
+function dayClock(ts: number): string {
+  const day = new Date(ts * 1000)
+    .toLocaleDateString(undefined, { weekday: "short" })
+    .toLowerCase();
+  return `${day} ${clock(ts)}`;
 }
 
 function WeatherPost() {
@@ -1531,6 +1546,10 @@ function WeatherPost() {
     current !== null && now !== null && current.ts < now - STALE_AFTER_S;
   const reporting = current !== null && !stale && !offline;
 
+  // Hover scrub (issue #40): pointer x as a fraction of the chart width, null
+  // when the pointer is elsewhere. Everything else is derived per render.
+  const [hoverFrac, setHoverFrac] = useState<number | null>(null);
+
   const trend =
     now !== null
       ? trendSeries(history, forecast, now)
@@ -1541,6 +1560,17 @@ function WeatherPost() {
   const hasChart = now !== null && range !== null && allPts.length > 1;
   const ts0 = (now ?? 0) - PAST_S;
   const ts1 = (now ?? 0) + FUTURE_S;
+
+  // The readout snaps to the nearest real report/forecast point -- the
+  // crosshair sits at that point's time, not at the raw pointer.
+  const hovered =
+    hasChart && hoverFrac !== null
+      ? nearestPoint(allPts, ts0 + hoverFrac * (ts1 - ts0))
+      : null;
+  const hoveredFrac = hovered ? (hovered.ts - ts0) / (ts1 - ts0) : 0;
+  const nights = hasChart
+    ? nightBands(current?.sunrise ?? null, current?.sunset ?? null, ts0, ts1)
+    : [];
 
   const round = (v: number | null) => (v === null ? "—" : Math.round(v));
 
@@ -1628,18 +1658,29 @@ function WeatherPost() {
 
         {/* The trend: observed temps trail left of "now" (solid), the forecast
             extends right (dashed). Wind rides its own scale underneath. */}
-        <div className="mt-2 flex items-baseline justify-between text-[10px] text-inkfaint">
+        {/* The scale itself now lives on the chart edges (issue #40); this
+            row is just the series key. */}
+        <div className="mt-2 text-[10px] text-inkfaint">
           <span>
             <span className="text-squirrel">—</span> temp °F ·{" "}
             <span className="text-inkdim">—</span> wind mph
           </span>
-          {hasChart && (
-            <span className="tabular-nums">
-              {range.min}–{range.max}°F · wind to {windMax}
-            </span>
-          )}
         </div>
-        <div className="mt-1 h-28 w-full">
+        {/* `relative` roots the hover overlay; pan-y leaves vertical page
+            scroll alone on touch while horizontal drags scrub the chart. */}
+        <div
+          className="relative mt-1 h-28 w-full"
+          style={{ touchAction: "pan-y" }}
+          onPointerMove={(e) => {
+            const r = e.currentTarget.getBoundingClientRect();
+            if (r.width > 0)
+              setHoverFrac(
+                Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)),
+              );
+          }}
+          onPointerLeave={() => setHoverFrac(null)}
+          onPointerCancel={() => setHoverFrac(null)}
+        >
           {hasChart && (
             <svg
               viewBox={`0 0 ${WX_W} ${WX_H}`}
@@ -1648,6 +1689,29 @@ function WeatherPost() {
               role="img"
               aria-label="Observed and forecast temperature and wind"
             >
+              {/* night first: shading sits behind everything else */}
+              {nights.map((b) => (
+                <rect
+                  key={b.start}
+                  x={((b.start - ts0) / (ts1 - ts0)) * WX_W}
+                  y={0}
+                  width={((b.end - b.start) / (ts1 - ts0)) * WX_W}
+                  height={WX_H}
+                  fill="black"
+                  opacity="0.25"
+                />
+              ))}
+              {WX_TICKS.map((t) => (
+                <line
+                  key={t.offsetS}
+                  x1={t.frac * WX_W}
+                  y1={0}
+                  x2={t.frac * WX_W}
+                  y2={WX_H}
+                  stroke="var(--line)"
+                  vectorEffect="non-scaling-stroke"
+                />
+              ))}
               <line
                 x1={WX_NOW_X}
                 y1={0}
@@ -1691,11 +1755,100 @@ function WeatherPost() {
                 opacity="0.65"
                 vectorEffect="non-scaling-stroke"
               />
+              {hovered && (
+                <line
+                  x1={hoveredFrac * WX_W}
+                  y1={0}
+                  x2={hoveredFrac * WX_W}
+                  y2={WX_H}
+                  stroke="var(--ink-dim)"
+                  strokeDasharray="1 3"
+                  vectorEffect="non-scaling-stroke"
+                />
+              )}
             </svg>
+          )}
+          {/* Scale whispers on the chart edges, tinted to their series so they
+              self-identify. Overlaid, not laid out -- zero footprint change,
+              and the empty skeleton keeps the exact same box. */}
+          {hasChart && range !== null && (
+            <>
+              <span className="pointer-events-none absolute left-1 top-0.5 text-[9px] tabular-nums text-squirrel opacity-60">
+                {range.max}°
+              </span>
+              <span className="pointer-events-none absolute bottom-0.5 left-1 text-[9px] tabular-nums text-squirrel opacity-60">
+                {range.min}°
+              </span>
+              <span className="pointer-events-none absolute right-1 top-0.5 text-[9px] tabular-nums text-inkfaint">
+                {windMax} mph
+              </span>
+            </>
+          )}
+          {/* Hover readout: dots mark the snapped point on each line, the chip
+              reads its conditions. HTML overlay (never SVG text): the viewBox
+              is stretched, and an overlay can't shift layout (house rule #1).
+              The chip rides the roomier side of the crosshair. */}
+          {hovered && range !== null && now !== null && (
+            <>
+              {hovered.temp_f !== null && (
+                <span
+                  className="pointer-events-none absolute h-2 w-2 -translate-x-1/2 -translate-y-1/2 rounded-full border border-squirrel bg-panel"
+                  style={{
+                    left: `${hoveredFrac * 100}%`,
+                    top: `${(1 - (hovered.temp_f - range.min) / (range.max - range.min)) * 100}%`,
+                  }}
+                />
+              )}
+              {hovered.wind_mph !== null && (
+                <span
+                  className="pointer-events-none absolute h-1.5 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-inkdim bg-panel"
+                  style={{
+                    left: `${hoveredFrac * 100}%`,
+                    top: `${(1 - hovered.wind_mph / windMax) * 100}%`,
+                  }}
+                />
+              )}
+              <div
+                className="pointer-events-none absolute top-1 z-10 whitespace-nowrap rounded-sm border border-linebright bg-panel2 px-2 py-1"
+                style={
+                  hoveredFrac < 0.5
+                    ? { left: `calc(${hoveredFrac * 100}% + 10px)` }
+                    : { right: `calc(${(1 - hoveredFrac) * 100}% + 10px)` }
+                }
+              >
+                <div className="stamp text-[10px] text-inkfaint">
+                  {dayClock(hovered.ts)} ·{" "}
+                  {hovered.ts <= now ? "observed" : "forecast"}
+                </div>
+                <div className="text-[11px] tabular-nums text-ink">
+                  {round(hovered.temp_f)}°
+                  {hovered.condition && (
+                    <span className="text-inkdim">
+                      {" "}
+                      · {hovered.condition.toLowerCase()}
+                    </span>
+                  )}
+                </div>
+                <div className="text-[10px] tabular-nums text-inkdim">
+                  wind {round(hovered.wind_mph)} mph
+                  {hovered.wind_gust_mph !== null &&
+                    ` · gusts ${Math.round(hovered.wind_gust_mph)}`}
+                </div>
+              </div>
+            </>
           )}
         </div>
         <div className="relative mt-0.5 h-4 text-[9px] text-inkfaint">
           <span className="absolute left-0">−24h</span>
+          {WX_TICKS.map((t) => (
+            <span
+              key={t.offsetS}
+              className="absolute -translate-x-1/2 tabular-nums"
+              style={{ left: `${t.frac * 100}%` }}
+            >
+              {t.offsetS > 0 ? `+${t.offsetS / 3600}h` : `−${-t.offsetS / 3600}h`}
+            </span>
+          ))}
           <span
             className="stamp absolute -translate-x-1/2 text-inkdim"
             style={{ left: `${(WX_NOW_X / WX_W) * 100}%` }}
