@@ -165,8 +165,12 @@ def test_sanitize_line(raw, expected):
 class StubOllama:
     def __init__(self, line):
         self.line = line
+        self.context = None   # kwargs of the last narrate() call
 
-    def narrate(self, persona, bible, event):
+    def narrate(self, persona, bible, event, **context):
+        # Snapshot the memory CONTENTS at call time -- the deque keeps living
+        # after the call, and what matters is what the prompt actually saw.
+        self.context = {**context, "memory": list(context.get("memory") or ())}
         return self.line
 
 
@@ -190,6 +194,162 @@ def test_narrator_speaks_the_llm_line_on_the_bus_shape():
     line = n.speak(ARRIVAL, now=100.0)
     assert line["text"] == "Magnificent beast."
     assert line["event_kind"] == "arrival"       # bus contract unchanged
+
+
+# --- weather context (issue #26) ----------------------------------------------
+
+NOW = 1_752_000_000.0   # any fixed epoch; weather ts values are relative to it
+
+def weather_report(**overrides):
+    """A fresh weather/current payload (5 minutes old against NOW)."""
+    return {"ts": NOW - 300, "temp_f": 78.2, "wind_mph": 5.0,
+            "condition": "Clouds", "description": "overcast clouds",
+            **overrides}
+
+
+def test_weather_sentence_states_the_conditions():
+    sentence = narrator.weather_sentence(weather_report(), now=NOW)
+    assert sentence == "It is 78F with a light breeze under overcast clouds."
+
+
+@pytest.mark.parametrize("mph,phrase", [
+    (0.4, "calm air"),
+    (5.0, "a light breeze"),
+    (12.0, "a steady breeze"),
+    (20.0, "a strong wind"),
+    (40.0, "a howling wind"),
+])
+def test_weather_sentence_speaks_wind_in_words(mph, phrase):
+    assert phrase in narrator.weather_sentence(weather_report(wind_mph=mph), now=NOW)
+
+
+def test_weather_sentence_survives_missing_fields():
+    # Wind and description are optional; temperature is the price of entry.
+    assert narrator.weather_sentence(
+        weather_report(wind_mph=None, description=None), now=NOW) == "It is 78F."
+    assert narrator.weather_sentence(weather_report(temp_f=None), now=NOW) is None
+
+
+def test_weather_sentence_staleness_cutoff():
+    # A report exactly at the threshold still speaks; one past it is silence.
+    at = weather_report(ts=NOW - narrator.WEATHER_STALE_S)
+    past = weather_report(ts=NOW - narrator.WEATHER_STALE_S - 1)
+    assert narrator.weather_sentence(at, now=NOW) is not None
+    assert narrator.weather_sentence(past, now=NOW) is None
+    assert narrator.weather_sentence(weather_report(ts=None), now=NOW) is None
+    assert narrator.weather_sentence(None, now=NOW) is None
+
+
+def test_event_summary_appends_fresh_weather():
+    summary = narrator.event_summary(ARRIVAL, BIBLE, weather=weather_report(), now=NOW)
+    assert summary.startswith("A chipmunk has just arrived")
+    assert summary.endswith("It is 78F with a light breeze under overcast clouds.")
+
+
+def test_event_summary_without_weather_is_byte_identical():
+    # No weather service, or a stale report: exactly today's output.
+    plain = narrator.event_summary(ARRIVAL, BIBLE)
+    stale = weather_report(ts=NOW - narrator.WEATHER_STALE_S - 1)
+    assert narrator.event_summary(ARRIVAL, BIBLE, weather=None, now=NOW) == plain
+    assert narrator.event_summary(ARRIVAL, BIBLE, weather=stale, now=NOW) == plain
+
+
+# --- recent-lines memory (issue #28) -------------------------------------------
+
+def test_memory_caps_and_evicts_oldest():
+    n = narrator.Narrator(PERSONA, BIBLE, rng=random.Random(0))
+    times = [100.0 * i for i in range(1, 13)]   # 12 spoken lines, cooldown apart
+    for t in times:
+        n.speak(ARRIVAL, now=t)
+    assert len(n.memory) == narrator.MEMORY_LINES == 10
+    assert [ts for ts, _, _ in n.memory] == times[2:]   # oldest two evicted
+
+
+def test_speak_records_exactly_what_it_publishes():
+    n = narrator.Narrator(PERSONA, BIBLE, rng=random.Random(0),
+                          ollama=StubOllama("A fine specimen."))
+    line = n.speak(ARRIVAL, now=100.0)
+    assert list(n.memory) == [(100.0, line["event_kind"], line["text"])]
+
+
+def test_prompt_with_memory_carries_lines_and_ages():
+    memory = [(NOW - 1200, "arrival", "Here in the dappled light..."),
+              (NOW - 120, "arrival", "Ah, if these grey squirrels could speak...")]
+    prompt = narrator.build_user_prompt(ARRIVAL, BIBLE, memory=memory, now=NOW)
+    assert "- [about 20 minutes ago, arrival] Here in the dappled light..." in prompt
+    assert "- [about 2 minutes ago, arrival] Ah, if these grey squirrels" in prompt
+    # Oldest first, above the event summary, guidance riding the block header.
+    assert prompt.index("dappled") < prompt.index("grey squirrels") \
+        < prompt.index("has just arrived")
+    assert "Do not reuse" in prompt
+    assert prompt.endswith("Your on-air line:")
+
+
+def test_prompt_with_empty_memory_is_byte_identical_to_today():
+    prompt = narrator.build_user_prompt(ARRIVAL, BIBLE, memory=(), now=NOW)
+    assert prompt == f"{narrator.event_summary(ARRIVAL, BIBLE)}\n\nYour on-air line:"
+
+
+def test_narrate_receives_memory_and_weather():
+    # The wiring: speak() hands its own memory and the cached weather report
+    # through generate() to the LLM call.
+    stub = StubOllama("Magnificent.")
+    n = narrator.Narrator(PERSONA, BIBLE, rng=random.Random(0), ollama=stub)
+    n.latest_weather = weather_report()
+    n.speak(ARRIVAL, now=100.0)
+    first_memory = list(n.memory)
+    n.speak(ARRIVAL, now=200.0)
+    assert stub.context["weather"] == weather_report()
+    assert stub.context["now"] == 200.0
+    assert list(stub.context["memory"]) == first_memory   # memory BEFORE this line
+
+
+def test_llm_failure_leaves_only_the_spoken_fallback_in_memory():
+    # The failed call itself must not pollute memory -- but the template line
+    # that replaced it DID go on air, so it counts.
+    n = narrator.Narrator(PERSONA, BIBLE, rng=random.Random(0),
+                          ollama=StubOllama(None))
+    line = n.speak(ARRIVAL, now=100.0)
+    assert "chipmunk" in line["text"]   # template fallback spoke
+    assert list(n.memory) == [(100.0, "arrival", line["text"])]
+
+
+class ScriptedRng:
+    """randrange() plays back a script -- rigs the template picker."""
+    def __init__(self, picks):
+        self.picks = list(picks)
+
+    def randrange(self, n):
+        return self.picks.pop(0)
+
+
+def test_template_reroll_dodges_an_immediate_repeat():
+    last = {}
+    first = narrator.generate(PERSONA, BIBLE, ARRIVAL, ScriptedRng([0]),
+                              last_template=last)
+    again = narrator.generate(PERSONA, BIBLE, ARRIVAL, ScriptedRng([0, 1]),
+                              last_template=last)
+    assert first != again          # the 0 re-rolled to 1
+    assert last["arrival"] == 1
+
+
+def test_template_reroll_lets_a_second_repeat_stand():
+    # One re-roll only: if the dice insist, the repeat airs.
+    last = {"arrival": 0}
+    line = narrator.generate(PERSONA, BIBLE, ARRIVAL, ScriptedRng([0, 0]),
+                             last_template=last)
+    assert line == narrator.TEMPLATES["arrival"][0].format(
+        **narrator.template_fields(ARRIVAL, BIBLE))
+
+
+def test_template_reroll_skips_single_template_kinds():
+    # A one-template kind never re-rolls (ScriptedRng would raise on a second
+    # draw). The fallback tuple has exactly one entry.
+    last = {"meteor_strike": 0}
+    event = {"kind": "meteor_strike"}
+    line = narrator.generate(PERSONA, BIBLE, event, ScriptedRng([0]),
+                             last_template=last)
+    assert "meteor_strike" in line
 
 
 # --- human_duration ----------------------------------------------------------

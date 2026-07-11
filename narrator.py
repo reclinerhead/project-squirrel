@@ -7,12 +7,18 @@
 # MERLE_OLLAMA is set, generate() synthesizes each line with a local LLM
 # (Ollama) in the persona's voice, falling back to the templates whenever the
 # LLM is absent, slow, or unwell. The pacing gate and bus contract are
-# identical across tiers.
+# identical across tiers. Issues #26/#28 enriched the LLM prompt: a fresh
+# weather/current report adds one dry factual sentence to the event summary,
+# and a rolling memory of the narrator's own recent lines gives the model
+# variety ("don't repeat yourself") and continuity (running-show callbacks).
 #
 #   python narrator.py --persona personas/marlin.yaml
 #
 # Bus contract (topics in bus.py):
 #   subscribes  driveway/events           the daemon's live event stream
+#   subscribes  weather/current           retained latest conditions -> prompt
+#                                         context (LLM tier only, never a
+#                                         speaking trigger)
 #   publishes   narration/lines           {ts, narrator, voice, text, event_kind}
 #   presence    narrators/<id>/status     "online"/"offline", retained; "offline"
 #                                         is the MQTT Last Will, so a crash flips
@@ -36,6 +42,7 @@ import os
 import random
 import time
 import urllib.request
+from collections import deque
 from datetime import datetime
 
 import paho.mqtt.client as mqtt
@@ -180,11 +187,49 @@ def ollama_address():
     return host, int(port) if port else OLLAMA_DEFAULT_PORT
 
 
-def event_summary(event, bible):
+# A weather/current report older than this is ignored: the weather service
+# polls every 10 minutes, so 30 minutes is 3 missed polls -- the service is
+# down or wedged, not merely between reads. A dead weather post must degrade
+# to exactly the no-weather prompt, never to narrating yesterday's rain.
+WEATHER_STALE_S = 30 * 60
+
+# Wind speed -> the dry phrase the summary uses (upper bound mph, phrase).
+WIND_WORDS = (
+    (1, "calm air"),
+    (8, "a light breeze"),
+    (16, "a steady breeze"),
+    (25, "a strong wind"),
+    (float("inf"), "a howling wind"),
+)
+
+
+def weather_sentence(report, now):
+    """One dry factual sentence from the retained weather/current payload, or
+    None when there is no report fresh enough to speak about. Like the event
+    summary itself, deliberately plain -- Marlin turns "overcast clouds" into
+    Wild Kingdom weather color on his own."""
+    if not report:
+        return None
+    ts = report.get("ts")   # unix epoch seconds, OpenWeather's own dt
+    if ts is None or now - ts > WEATHER_STALE_S:
+        return None
+    temp = report.get("temp_f")
+    if temp is None:
+        return None   # a report with no temperature isn't worth a sentence
+    parts = [f"It is {round(temp)}F"]
+    wind = report.get("wind_mph")
+    if wind is not None:
+        parts.append(f"with {next(p for cap, p in WIND_WORDS if wind < cap)}")
+    if report.get("description"):
+        parts.append(f"under {report['description']}")
+    return " ".join(parts) + "."
+
+
+def event_summary(event, bible, weather=None, now=None):
     """A factual one-line account of what just happened -- the LLM's raw
     material, deliberately dry so all the flavor comes from the persona.
-    This is the future hook for extra bus context (weather, etc.): more facts
-    get appended here and the prompt shape doesn't change."""
+    This is the hook for extra bus context: facts (like the weather sentence,
+    issue #26) get appended here and the prompt shape doesn't change."""
     f = template_fields(event, bible)
     kind = event.get("kind")
     if kind == "arrival":
@@ -201,6 +246,9 @@ def event_summary(event, bible):
     lore = (bible.get("species_lore") or {}).get(species)
     if lore:
         summary += f" Local lore about this species: {lore}."
+    clause = weather_sentence(weather, time.time() if now is None else now)
+    if clause:
+        summary += f" {clause}"
     return summary
 
 
@@ -215,6 +263,50 @@ def build_system_prompt(persona, bible):
             "World facts you may draw on:\n"
             + "\n".join(f"- {fact}" for fact in facts)
             + f"\n\n{LINE_RULES}")
+
+
+# Rolling memory of the narrator's own recent lines (issue #28), fed back into
+# every LLM prompt for variety (don't repeat your own phrasing) and continuity
+# (running-show callbacks). 10 lines x ~40 tokens is ~400 extra prompt tokens
+# -- trivial at the current model/timeout, so no config knob. A restart blanks
+# the memory; the show has dead air far longer than a restart, and MQTT
+# retains only one message per topic, so the in-process deque is the honest
+# simple design (no persistence, no bus-history mechanism).
+MEMORY_LINES = 10
+
+# The variety/continuity guidance travels WITH the memory block -- not in
+# LINE_RULES -- so an empty memory degrades the prompt to exactly the
+# pre-memory shape and the output contract stays untouched.
+MEMORY_HEADER = (
+    "Your most recent on-air lines (oldest first). Do not reuse their "
+    "openings, imagery, or sentence structure -- each line should sound like "
+    "a different moment of the same broadcast. You may reference earlier "
+    "moments for continuity -- a returning individual, a running count, a "
+    "callback -- when the timing makes it plausible:"
+)
+
+
+def memory_block(memory, now):
+    """The "recently on air" prompt section from (ts, event_kind, text)
+    entries, or "" when memory is empty. Ages are rendered with the
+    human_duration() vocabulary so the model reasons about time gaps in the
+    same units the show already speaks."""
+    if not memory:
+        return ""
+    lines = [f"- [{human_duration(now - ts)} ago, {kind}] {text}"
+             for ts, kind, text in memory]
+    return MEMORY_HEADER + "\n" + "\n".join(lines)
+
+
+def build_user_prompt(event, bible, memory=(), now=None, weather=None):
+    """The full user prompt: optional memory block, then the factual event
+    summary (with its optional weather sentence), then the cue. With no
+    memory and no weather this is byte-identical to the pre-#26/#28 prompt."""
+    now = time.time() if now is None else now
+    block = memory_block(memory, now)
+    summary = event_summary(event, bible, weather=weather, now=now)
+    body = f"{block}\n\n{summary}" if block else summary
+    return f"{body}\n\nYour on-air line:"
 
 
 def sanitize_line(text):
@@ -237,11 +329,11 @@ class Ollama:
         self.url = f"http://{host}:{port}/api/generate"
         self.model = model
 
-    def narrate(self, persona, bible, event):
+    def narrate(self, persona, bible, event, memory=(), now=None, weather=None):
         payload = {
             "model": self.model,
             "system": build_system_prompt(persona, bible),
-            "prompt": f"{event_summary(event, bible)}\n\nYour on-air line:",
+            "prompt": build_user_prompt(event, bible, memory, now, weather),
             "stream": False,
             # Driveway events can be an hour apart; without keep_alive every
             # line would pay the cold model load (~2x latency, desk-tested).
@@ -262,15 +354,27 @@ class Ollama:
         return sanitize_line(reply.get("response"))
 
 
-def generate(persona, bible, event, rng, ollama=None):
+def generate(persona, bible, event, rng, ollama=None,
+             memory=(), now=None, weather=None, last_template=None):
     """Tier 2 (LLM) when an Ollama client is provided and healthy; Tier-1
-    templates otherwise. The one place that decides which prose tier speaks."""
+    templates otherwise. The one place that decides which prose tier speaks.
+    Memory and weather ride the LLM prompt only -- templates stay v1, except
+    that a caller-held last_template dict (kind -> index) buys the cheap
+    variety: re-roll once when the same template comes up twice running."""
     if ollama is not None:
-        line = ollama.narrate(persona, bible, event)
+        line = ollama.narrate(persona, bible, event,
+                              memory=memory, now=now, weather=weather)
         if line:
             return line
-    templates = TEMPLATES.get(event.get("kind"), FALLBACK_TEMPLATES)
-    return rng.choice(templates).format(**template_fields(event, bible))
+    kind = event.get("kind")
+    templates = TEMPLATES.get(kind, FALLBACK_TEMPLATES)
+    if last_template is None:
+        last_template = {}
+    pick = rng.randrange(len(templates))
+    if len(templates) > 1 and pick == last_template.get(kind):
+        pick = rng.randrange(len(templates))   # re-roll once; a repeat may stand
+    last_template[kind] = pick
+    return templates[pick].format(**template_fields(event, bible))
 
 
 class Narrator:
@@ -282,20 +386,32 @@ class Narrator:
         self.rng = rng or random.Random()
         self.ollama = ollama
         self.last_spoke_at = float("-inf")   # never spoken -> first event is fair game
+        self.latest_weather = None           # last weather/current payload seen
+        self.memory = deque(maxlen=MEMORY_LINES)   # (ts, event_kind, text) spoken
+        self.last_template = {}              # kind -> last Tier-1 template index
 
     def wants(self, event, now):
         return worth_speaking(event, self.persona, now, self.last_spoke_at)
 
     def speak(self, event, now):
         self.last_spoke_at = now
-        return {
+        text = generate(self.persona, self.bible, event, self.rng, self.ollama,
+                        memory=self.memory, now=now, weather=self.latest_weather,
+                        last_template=self.last_template)
+        line = {
             "ts": datetime.now().isoformat(timespec="seconds"),
             "narrator": self.persona["name"],
             "mqtt_id": self.persona["mqtt_id"],
             "voice": self.persona["tts_voice"],
             "event_kind": event.get("kind"),
-            "text": generate(self.persona, self.bible, event, self.rng, self.ollama),
+            "text": text,
         }
+        # Memory records exactly what goes on the bus -- captured here, where
+        # the payload is built, so the two can never disagree. A template
+        # fallback line counts (it went on air); a failed LLM call leaves no
+        # trace beyond the fallback line that replaced it.
+        self.memory.append((now, line["event_kind"], text))
+        return line
 
 
 class Producer:
@@ -344,13 +460,21 @@ def main():
     def on_connect(c, userdata, flags, reason_code, properties):
         c.publish(status_topic, "online", retain=True)
         c.subscribe(bus.EVENTS_TOPIC)
+        # Retained, so the latest report arrives immediately on (re)connect.
+        # Weather is prompt context only -- never a reason to speak.
+        c.subscribe(bus.WEATHER_CURRENT_TOPIC)
         print(f"[{persona['name']}] on the air, listening to {bus.EVENTS_TOPIC}")
 
     def on_message(c, userdata, msg):
         try:
-            event = json.loads(msg.payload)
+            payload = json.loads(msg.payload)
         except (json.JSONDecodeError, UnicodeDecodeError):
             return   # not our JSON, not our problem
+        if msg.topic == bus.WEATHER_CURRENT_TOPIC:
+            for narrator in producer.roster:
+                narrator.latest_weather = payload
+            return
+        event = payload
         now = time.time()
         for narrator in producer.cast(event, now):
             line = narrator.speak(event, now)
