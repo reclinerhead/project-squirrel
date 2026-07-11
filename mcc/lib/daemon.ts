@@ -1,6 +1,6 @@
-// Client for the Merle daemon. All requests go through the /daemon/* rewrite
-// (see next.config.ts), so the browser stays same-origin and the daemon needs
-// no CORS config.
+// Client for the Merle daemon. All requests go through the /daemon/* proxy
+// route (app/daemon/[...path]/route.ts), so the browser stays same-origin and
+// the daemon needs no CORS config.
 
 export type Track = {
   track_id: number;

@@ -70,6 +70,11 @@ const SPECIES_COLOR: Record<string, string> = {
 const speciesColor = (name: string) => SPECIES_COLOR[name] ?? "var(--ink)";
 
 const POLL_MS = 1000;
+// While the daemon is asleep -- its normal state, since bluejay only runs it
+// during test sessions -- check in at a walk, not a sprint (issue #35). Waking
+// is still snappy: any control click polls immediately, and 10s is a fine
+// worst case for "I just started the daemon, when does the dashboard notice".
+const ASLEEP_POLL_MS = 10_000;
 
 // Shared look for the snapshot / record pair so they sit as a matched set.
 const CTRL_BTN =
@@ -103,9 +108,9 @@ export default function Dashboard() {
 
   useEffect(() => {
     poll();
-    const id = setInterval(poll, POLL_MS);
+    const id = setInterval(poll, asleep ? ASLEEP_POLL_MS : POLL_MS);
     return () => clearInterval(id);
-  }, [poll]);
+  }, [poll, asleep]);
 
   // Mobile browsers kill the long-lived MJPEG socket when the app is
   // backgrounded; an <img> never retries on its own, so returning to the tab
@@ -448,7 +453,7 @@ function FieldJournal() {
   const nextKey = useRef(0);
 
   useEffect(() => {
-    // Straight to the broker over WebSockets -- the /daemon rewrite can't
+    // Straight to the broker over WebSockets -- the /daemon proxy can't
     // carry them. Same host the page came from, so the phone-on-LAN case
     // works without config; mqtt.js reconnects on its own.
     const url = busUrl(
