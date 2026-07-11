@@ -8,9 +8,9 @@
 # (Ollama) in the persona's voice, falling back to the templates whenever the
 # LLM is absent, slow, or unwell. The pacing gate and bus contract are
 # identical across tiers. Issues #26/#28 enriched the LLM prompt: a fresh
-# weather/current report adds one dry factual sentence to the event summary,
-# and a rolling memory of the narrator's own recent lines gives the model
-# variety ("don't repeat yourself") and continuity (running-show callbacks).
+# weather/current report adds a dry current-conditions paragraph, and a
+# rolling memory of the narrator's own recent lines gives the model variety
+# ("don't repeat yourself") and continuity (running-show callbacks).
 #
 #   python narrator.py --persona personas/marlin.yaml
 #
@@ -225,11 +225,12 @@ def weather_sentence(report, now):
     return " ".join(parts) + "."
 
 
-def event_summary(event, bible, weather=None, now=None):
+def event_summary(event, bible):
     """A factual one-line account of what just happened -- the LLM's raw
     material, deliberately dry so all the flavor comes from the persona.
-    This is the hook for extra bus context: facts (like the weather sentence,
-    issue #26) get appended here and the prompt shape doesn't change."""
+    Extra bus context (like the weather, issue #26) rides build_user_prompt()
+    as its own labeled paragraph instead of being appended here: desk-tested,
+    a bare fact buried in the summary is context the model ignores."""
     f = template_fields(event, bible)
     kind = event.get("kind")
     if kind == "arrival":
@@ -246,9 +247,6 @@ def event_summary(event, bible, weather=None, now=None):
     lore = (bible.get("species_lore") or {}).get(species)
     if lore:
         summary += f" Local lore about this species: {lore}."
-    clause = weather_sentence(weather, time.time() if now is None else now)
-    if clause:
-        summary += f" {clause}"
     return summary
 
 
@@ -298,15 +296,30 @@ def memory_block(memory, now):
     return MEMORY_HEADER + "\n" + "\n".join(lines)
 
 
+# Like the memory guidance, the weather usage nudge travels WITH the weather
+# paragraph, so a weatherless prompt reproduces the old shape exactly.
+# Desk-tested against gemma3:12b: the bare sentence appended to the event
+# summary was ignored 4 generations out of 4; labeled as conditions with this
+# one-line nudge it was woven in (naturally) 4 out of 4.
+WEATHER_HEADER = "Current conditions at the station:"
+WEATHER_GUIDANCE = "Work the weather into your commentary when it adds color."
+
+
 def build_user_prompt(event, bible, memory=(), now=None, weather=None):
-    """The full user prompt: optional memory block, then the factual event
-    summary (with its optional weather sentence), then the cue. With no
-    memory and no weather this is byte-identical to the pre-#26/#28 prompt."""
+    """The full user prompt: optional memory block, the factual event summary,
+    an optional current-conditions paragraph, then the cue. With no memory and
+    no fresh weather this is byte-identical to the pre-#26/#28 prompt."""
     now = time.time() if now is None else now
+    parts = []
     block = memory_block(memory, now)
-    summary = event_summary(event, bible, weather=weather, now=now)
-    body = f"{block}\n\n{summary}" if block else summary
-    return f"{body}\n\nYour on-air line:"
+    if block:
+        parts.append(block)
+    parts.append(event_summary(event, bible))
+    clause = weather_sentence(weather, now)
+    if clause:
+        parts.append(f"{WEATHER_HEADER} {clause} {WEATHER_GUIDANCE}")
+    parts.append("Your on-air line:")
+    return "\n\n".join(parts)
 
 
 def sanitize_line(text):

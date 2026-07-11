@@ -240,18 +240,24 @@ def test_weather_sentence_staleness_cutoff():
     assert narrator.weather_sentence(None, now=NOW) is None
 
 
-def test_event_summary_appends_fresh_weather():
-    summary = narrator.event_summary(ARRIVAL, BIBLE, weather=weather_report(), now=NOW)
-    assert summary.startswith("A chipmunk has just arrived")
-    assert summary.endswith("It is 78F with a light breeze under overcast clouds.")
+def test_prompt_carries_fresh_weather_as_conditions_paragraph():
+    # The weather rides its own labeled paragraph between the event summary
+    # and the cue, guidance attached -- a bare sentence buried in the summary
+    # was context the model ignored (desk-tested).
+    prompt = narrator.build_user_prompt(ARRIVAL, BIBLE, weather=weather_report(), now=NOW)
+    assert ("Current conditions at the station: It is 78F with a light breeze "
+            "under overcast clouds. " + narrator.WEATHER_GUIDANCE) in prompt
+    assert prompt.index("has just arrived") < prompt.index("78F")
+    assert prompt.endswith("Your on-air line:")
 
 
-def test_event_summary_without_weather_is_byte_identical():
-    # No weather service, or a stale report: exactly today's output.
-    plain = narrator.event_summary(ARRIVAL, BIBLE)
+def test_prompt_without_weather_is_byte_identical():
+    # No weather service, or a stale report: exactly the weatherless prompt.
+    plain = narrator.build_user_prompt(ARRIVAL, BIBLE, now=NOW)
     stale = weather_report(ts=NOW - narrator.WEATHER_STALE_S - 1)
-    assert narrator.event_summary(ARRIVAL, BIBLE, weather=None, now=NOW) == plain
-    assert narrator.event_summary(ARRIVAL, BIBLE, weather=stale, now=NOW) == plain
+    assert narrator.build_user_prompt(ARRIVAL, BIBLE, weather=None, now=NOW) == plain
+    assert narrator.build_user_prompt(ARRIVAL, BIBLE, weather=stale, now=NOW) == plain
+    assert "conditions" not in plain
 
 
 # --- recent-lines memory (issue #28) -------------------------------------------
