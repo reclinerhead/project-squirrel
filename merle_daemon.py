@@ -59,6 +59,10 @@ SPECIES = [CLASS_NAMES[i] for i in sorted(CLASS_NAMES)]
 TARGET_FPS = 15          # cap the loop; the real camera runs ~15fps anyway
 CROWD_COOLDOWN = 10.0    # seconds between crowd-snapshot events, like live.py
 NO_FRAME_RETRY = 0.25    # pause between reads while the source has no frame
+STREAM_WIDTH = 1920      # /stream rides a downscaled copy: the camera's 4K
+                         # JPEGs are ~1.7MB each, which at 15fps is ~26MB/s
+                         # through the MCC proxy on pearl PER TAB (issue #49).
+                         # 1080p is a quarter of that; /snapshot stays full-res.
 
 # Arrival/departure debounce (SPECIES-level, not track-level). ByteTrack mints a
 # new track id when it loses an animal for more than its buffer and re-acquires
@@ -97,6 +101,32 @@ def mjpeg_frame(jpeg):
     return b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
 
 
+def encode_stream_jpeg(annotated):
+    """The /stream copy of an annotated frame: downscaled to STREAM_WIDTH (when
+    the source is wider) and JPEG-encoded. Returns bytes, or None if the encode
+    fails. The full-res encode for /snapshot happens separately."""
+    h, w = annotated.shape[:2]
+    if w > STREAM_WIDTH:
+        annotated = cv2.resize(
+            annotated, (STREAM_WIDTH, round(h * STREAM_WIDTH / w)),
+            interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    return buf.tobytes() if ok else None
+
+
+def next_stream_part(jpeg, seq, last_seq):
+    """One tick of the /stream generator's decision: send only frames the
+    worker hasn't already sent to this client (issue #49 -- the stream used to
+    re-send the last frame at TARGET_FPS forever, so a stood-down station still
+    pushed ~26MB/s of identical frozen frames). Returns (part_or_None, last_seq
+    to carry forward). A new client passes last_seq=-1, so its first tick sends
+    the current frame immediately -- a tab opened during stand-down shows the
+    last frame, not a broken image."""
+    if jpeg is None or seq == last_seq:
+        return None, last_seq
+    return mjpeg_frame(jpeg), seq
+
+
 def annotate(frame, dets):
     """Draw boxes + labels via the shared drawer, so the stream matches live.py
     (coasting tracks grey; annotations scaled for the frame size, since it's
@@ -123,7 +153,9 @@ class SharedState:
     def __init__(self, session_id):
         self.lock = threading.Lock()
         self.session_id = session_id
-        self.jpeg = None            # latest annotated frame, JPEG bytes
+        self.jpeg = None            # latest annotated frame, JPEG bytes (full-res, /snapshot)
+        self.stream_jpeg = None     # same frame downscaled for /stream (issue #49)
+        self.seq = 0                # bumps per published frame; /stream sends only on change
         self.counts = {}            # live per-class counts
         self.tracks = []            # live tracks: [{track_id, species, conf, box}]
         self.fps = 0.0
@@ -288,6 +320,7 @@ class Worker(threading.Thread):
             annotated = annotate(frame, dets)
             self._record(annotated, ts)
             ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            stream_jpeg = encode_stream_jpeg(annotated)
 
             counts = dict(Counter(d.species for d in present))
             tracks = [{"track_id": d.track_id, "species": d.species,
@@ -297,6 +330,9 @@ class Worker(threading.Thread):
                 self.state.signal = True
                 if ok:
                     self.state.jpeg = buf.tobytes()
+                if stream_jpeg is not None:
+                    self.state.stream_jpeg = stream_jpeg
+                    self.state.seq += 1
                 self.state.counts = counts
                 self.state.tracks = tracks
                 if len(self._loop_times) > 1:
@@ -399,13 +435,16 @@ def create_app(source, conn, publisher=None):
         # swaps in each new JPEG -- an <img src="/stream"> just works, no player.
         # Async + an is_disconnected() check so a closed tab frees the generator
         # promptly instead of looping forever (a sync generator blocked in sleep
-        # never notices the client left).
+        # never notices the client left). Sends the downscaled copy, and only
+        # when the worker has published a NEW frame -- see next_stream_part.
         async def gen():
+            last_seq = -1
             while not await request.is_disconnected():
                 with state.lock:
-                    jpeg = state.jpeg
-                if jpeg is not None:
-                    yield mjpeg_frame(jpeg)
+                    jpeg, seq = state.stream_jpeg, state.seq
+                part, last_seq = next_stream_part(jpeg, seq, last_seq)
+                if part is not None:
+                    yield part
                 await asyncio.sleep(1.0 / TARGET_FPS)
         return StreamingResponse(
             gen(), media_type="multipart/x-mixed-replace; boundary=frame")

@@ -100,7 +100,7 @@ Design rules:
 
 - **The daemon owns all state** (SQLite file, image folders). The MCC talks to it over HTTP only (via its `/daemon` proxy route, target `MERLE_DAEMON_URL`) — never touches the DB or filesystem directly. This keeps the daemon portable — it moved from same-box-as-the-MCC to "MCC on pearl, daemon on bluejay" with an env var, and a future mini-PC/Jetson is the same move.
 - **Images and clips live on the filesystem; SQLite stores metadata and paths.** No blobs in the DB.
-- **Video to the browser is MJPEG** (`/stream`, downscale-then-encode, q≈85) — browsers can't speak RTSP. Full-res single frames via `/snapshot`. WebRTC only if remote/multi-viewer needs appear.
+- **Video to the browser is MJPEG** (`/stream`, downscaled to `STREAM_WIDTH` (1080p) then encoded at q85) — browsers can't speak RTSP. Full-res single frames via `/snapshot`. WebRTC only if remote/multi-viewer needs appear. The downscale is load-bearing (issue #49): camera-native 4K JPEGs are ~1.7MB each, ~26MB/s at 15fps, and every byte transits the MCC's `/daemon` proxy per open tab.
 - **Runtime is local-only.** The MCC is not hostable on Vercel (needs LAN camera + GPU). Remote access later = Tailscale.
 
 ### Storage (`storage.py`)
@@ -115,11 +115,11 @@ Pure-logic tests in `test_storage.py` run in CI (stdlib-only, no model/camera). 
 
 ### The daemon (`merle_daemon.py`) and frame sources (`frames.py`)
 
-The daemon is a FastAPI app. A background `Worker` thread runs the perception loop — pull a frame + its detections from a **frame source**, annotate, JPEG-encode, publish to a lock-guarded `SharedState`, and persist sightings/events — while request handlers read that state. Endpoints:
+The daemon is a FastAPI app. A background `Worker` thread runs the perception loop — pull a frame + its detections from a **frame source**, annotate, JPEG-encode (twice: full-res for `/snapshot`, downscaled to `STREAM_WIDTH` for `/stream`), publish to a lock-guarded `SharedState` (bumping `seq` per frame), and persist sightings/events — while request handlers read that state. Endpoints:
 
 - `GET /state` — session id, control flags, the model's class roster (`species`, in class-id order), live counts/tracks/fps, run totals, recent events (JSON). The roster is advertised so the dashboard can render a fixed row per class instead of only the species currently counted — the daemon stays the single source of truth for what the model can see.
 - `GET /history?days=N` — the Station Records feed (one fetch, slow-poll — never the 1s loop; N clamped 1–90): per-day distinct-visitor census (`storage.census_by_day` — counted on the day a track *first* appeared, padded so quiet days exist), hard-frame counts per day (from `hard_frames/` file mtimes — live.py banks there with no DB record, so mtimes are the one honest source), and the `training_runs` table. `GET /history/day?day=YYYY-MM-DD` — that day's arrivals bucketed by hour.
-- `GET /stream` — the annotated feed as `multipart/x-mixed-replace` MJPEG (an `<img src>` in the browser; no player). Async + `is_disconnected()` so a closed tab frees the generator.
+- `GET /stream` — the annotated feed as `multipart/x-mixed-replace` MJPEG (an `<img src>` in the browser; no player). Async + `is_disconnected()` so a closed tab frees the generator. Serves the **downscaled** copy, and only frames the worker hasn't already sent to that client (`next_stream_part` gates on `SharedState.seq`) — a stood-down station streams ~zero bytes instead of re-sending the frozen frame at 15fps forever, which is what had `next-server` on pearl relaying 26MB/s at ~50% CPU while nothing moved (issue #49). A fresh client always gets the current frame immediately, so a tab opened during stand-down shows the last frame, not a broken image.
 - `GET /snapshot` — the latest annotated frame, one JPEG.
 - `POST /control` — `start`/`stop` the loop, `record_on`/`record_off`, `set_crowd_threshold`. Recording writes the **annotated** stream to `debug_frames/clip_*.mp4` (mp4v) from the worker thread — for watching/sharing a moment. (live.py's `V` key still writes *raw* clips, which is what you sample for training stills.) The writer is closed cleanly on `record_off`, lost feed, or shutdown, and a `clip_recorded` event is logged.
 
@@ -132,7 +132,7 @@ The **frame source** (`frames.py`) is the seam that keeps perception swappable. 
 
 The tracker bookkeeping and box-drawing are shared by **both** live.py and `RTSPFrameSource` so they can never drift (a real bug we already hit once between two files). It holds the detector/tracker config (`DETECT_FLOOR`, `IMGSZ`, tracker yaml, coasting windows, the hard-example flicker band, class colors), `extract_detections()` (pull ID-carrying detections out of a `model.track` result, ignoring the ID-less leak), `TrackMemory` (the coast/prune/vote bookkeeping + the `seen` run-total census), and `draw_tracks()` (boxes + labels; `scale=1.0` is tuned for 4K — the daemon passes `frame_height/2160`). Imports no ultralytics, so `test_perception.py` covers the bookkeeping camera-free. live.py is now a thin consumer of it; the model inference and RTSP capture (the untestable-in-CI parts) live in `RTSPFrameSource` and are verified against the real camera.
 
-`test_daemon.py` drives the app via FastAPI `TestClient` against the synthetic source + an in-memory DB (no camera/model), so the full HTTP surface runs in CI. The live MJPEG stream can't be consumed cleanly through TestClient (infinite multipart blocks it), so the frame framing is unit-tested via `mjpeg_frame()` and the stream is verified end-to-end by running uvicorn.
+`test_daemon.py` drives the app via FastAPI `TestClient` against the synthetic source + an in-memory DB (no camera/model), so the full HTTP surface runs in CI. The live MJPEG stream can't be consumed cleanly through TestClient (infinite multipart blocks it), so the frame framing is unit-tested via `mjpeg_frame()`, the downscale via `encode_stream_jpeg()`, the new-frames-only gating via `next_stream_part()`, and the stream is verified end-to-end by running uvicorn.
 
 Deps for the daemon are in `requirements.txt` (fastapi, uvicorn, opencv, numpy); ultralytics/torch stay out (installed per-machine, GPU-specific). CI installs headless opencv.
 
