@@ -1024,7 +1024,7 @@ function Asleep() {
         the daemon isn&apos;t reachable. wake it from the project root:
         <br />
         <code className="mt-1 inline-block rounded-sm bg-panel2 px-2 py-1 text-inkdim">
-          python -m uvicorn merle_daemon:app --port 8000
+          python -m uvicorn merle_daemon:app --host 0.0.0.0 --port 8000
         </code>
       </p>
     </div>
