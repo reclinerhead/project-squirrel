@@ -274,8 +274,12 @@ stops now take ≤5s.
 **Reaching the daemon**: the dashboard proxies to the perception daemon on
 bluejay (`MERLE_DAEMON_URL` in the unit). For that to work the daemon on
 bluejay must bind the LAN, not loopback — `python -m uvicorn merle_daemon:app
---host 0.0.0.0 --port 8000` — and Windows Firewall on bluejay needs a
-one-time inbound allow on TCP 8000. The daemon being down is the *normal*
+--host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 3` — and Windows
+Firewall on bluejay needs a one-time inbound allow on TCP 8000. The shutdown
+timeout is this dashboard's fault, same disease as the fast-stop drop-in
+above: it holds an MJPEG `/stream` connection around the clock, and uvicorn's
+graceful shutdown waits forever on a stream that never completes (Ctrl+C on
+the daemon did nothing until the flag). The daemon being down is the *normal*
 state (it only runs during bluejay sessions); the dashboard shows "Merle is
 asleep" and journals only the down/up transitions.
 

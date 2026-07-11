@@ -32,7 +32,12 @@ if ($Role) {
             } elseif (-not $env:MERLE_RTSP_PASS) {
                 Write-Warning 'MERLE_RTSP_PASS is not set - the camera will not open.'
             }
-            & .\.venv\Scripts\python.exe -m uvicorn merle_daemon:app --port 8000
+            # --host 0.0.0.0: pearl's dashboard proxies to this daemon across
+            # the LAN (loopback-only was the one-box era). The bounded shutdown
+            # exists because that dashboard runs 24/7 and always holds an MJPEG
+            # /stream connection, which never completes -- without the timeout,
+            # Ctrl+C waits on it forever (and a second Ctrl+C is ignored).
+            & .\.venv\Scripts\python.exe -m uvicorn merle_daemon:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 3
         }
         'mcc' {
             pnpm --dir mcc dev

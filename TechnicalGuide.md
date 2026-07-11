@@ -14,7 +14,11 @@ The station spans two machines. **pearl** (`192.168.1.64`, always-on Ubuntu) hos
 #    LAN (loopback-only was the one-box era); needs a one-time Windows
 #    Firewall inbound allow on TCP 8000 -- the firewall silently DROPS
 #    blocked packets, so the symptom is a hang, not a refusal.
-.\.venv\Scripts\python.exe -m uvicorn merle_daemon:app --host 0.0.0.0 --port 8000
+#    --timeout-graceful-shutdown: pearl's 24/7 dashboard always holds an MJPEG
+#    /stream connection, which never completes -- uvicorn's graceful shutdown
+#    would wait on it forever, so Ctrl+C hung until the flag bounded the wait
+#    (a second Ctrl+C is ignored too; the only other escape is killing the PID).
+.\.venv\Scripts\python.exe -m uvicorn merle_daemon:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 3
 
 # 2. The dashboard -> http://localhost:3000
 pnpm --dir mcc dev
