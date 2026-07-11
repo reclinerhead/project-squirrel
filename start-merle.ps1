@@ -40,7 +40,7 @@ if ($Role) {
             & .\.venv\Scripts\python.exe -m uvicorn merle_daemon:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 3
         }
         'mcc' {
-            pnpm --dir mcc dev
+            #pnpm --dir mcc dev
         }
     }
     return
@@ -57,4 +57,4 @@ foreach ($tab in 'daemon', 'mcc') {
 & wt @wtArgs
 
 Write-Host 'Merle station launching: daemon, mcc. (Broker + narrator run on pearl.)'
-Write-Host 'Dashboard: http://localhost:3000'
+Write-Host 'Dashboard: http://pearl:3000'
