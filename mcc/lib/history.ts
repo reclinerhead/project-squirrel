@@ -1,5 +1,5 @@
 // Client for the daemon's /history endpoints (Station Records panels: daily
-// census, hard-frame harvest, training rounds). Same rewrite-proxy path as
+// census, hard-frame harvest, training rounds). Same proxy-route path as
 // lib/daemon.ts. Fetched on demand + slow refresh -- never the 1s /state loop.
 
 export type DayCensus = { date: string; counts: Record<string, number> };
