@@ -18,7 +18,7 @@ outage brings her back without anyone going downstairs.
 | --------- | ----------------- | ------------------------------ | -------------------------------------------------------------- |
 | Mosquitto | `mosquitto`       | 1883 (MQTT), 9001 (WebSockets) | The Merle event bus                                            |
 | Marlin    | `narrator-marlin` | —                              | Scene narrator, subscribes to events, publishes narration      |
-| Willard   | `willard-weather` | —                              | Weather post: polls OpenWeather, publishes retained `weather/*` |
+| Willard   | `willard-weather` | —                              | Weather post: polls the Ecowitt gateway (+ OpenWeather forecast), publishes retained `weather/*` |
 | MCC       | `mcc-dashboard`   | 3000 (HTTP)                    | The Merle dashboard, production build (`next start`)           |
 | Pi-hole   | `pihole-FTL`      | 53, 67 (DHCP), 80, 443         | Household DNS + DHCP                                           |
 
@@ -210,19 +210,27 @@ MERLE_MQTT=localhost:1883 python narrator.py --persona personas/marlin.yaml
 Unit: `/etc/systemd/system/willard-weather.service`
 Code: `weather.py` in the same checkout + venv as the narrator.
 
-Polls OpenWeather's classic free APIs — current conditions every 10 minutes,
-the 5-day/3-hour forecast every hour (~170 calls/day against free limits of
-60/min and 1M/month) — and publishes the retained `weather/*` topics above,
-including the LLM-narrated on-air segment when `MERLE_OLLAMA` is set.
-Consumers: the dashboard's Weather Post panel (the "willard with the
-weather" masthead and the segment beneath the chart), and the narrator's
-prompt context.
+Reads the driveway's own weather station (issue #51) — the Ecowitt GW2000B
+gateway at `192.168.1.210`, polled every 60 s over its local HTTP JSON API —
+as the system of truth for everything measured, and keeps OpenWeather's
+classic free APIs for the two jobs the station can't do: the 5-day/3-hour
+forecast (hourly) and the sky garnish (condition text, sunrise/sunset, every
+10 minutes; ~170 calls/day against free limits of 60/min and 1M/month).
+Publishes the retained `weather/*` topics above, including the LLM-narrated
+on-air segment when `MERLE_OLLAMA` is set. Consumers: the dashboard's
+Weather Post panel + station view (the "willard with the weather" masthead
+and the segment beneath the chart), and the narrator's prompt context.
 
 Extra env in the unit:
 
+- `MERLE_ECOWITT=192.168.1.210` — the gateway, **required, no default**
+  (`host` or `host:port`). The station is the system of truth; a service
+  that can't reach it has no job, so it fails at startup (the MERLE_MQTT
+  philosophy). A gateway outage at runtime is a skipped poll retried every
+  60 s, never a fallback to OpenWeather numbers.
 - `MERLE_OWM_KEY` — the OpenWeather API key, **required, no default**. A
   keyless service would poll 401s while looking healthy, so it fails at
-  startup instead (the MERLE_MQTT philosophy).
+  startup instead.
 - `MERLE_WEATHER_LOC` — optional; `zip`, `zip,CC`, or `lat,lon`
   (default `49001,US`, the station's home turf).
 - `MERLE_OLLAMA=192.168.1.79:11434` — optional; turns on Willard's on-air
@@ -234,21 +242,27 @@ Extra env in the unit:
   optionally picks the model (defaults to the code default in `narrator.py`).
 
 State: `weather_history.json` in the repo dir (that's `WorkingDirectory` +
-the default relative path) — the 48h rolling window behind the dashboard's
-observed-temperature trail, persisted so a restart doesn't blank the chart.
-Safe to delete if it ever goes weird; it refills within 48h and OpenWeather
-is the archive of record.
+the default relative path) — the 48h rolling window (5-minute resolution)
+behind the dashboard's observed trail, persisted so a restart doesn't blank
+the chart. Safe to delete if it ever goes weird; it refills within 48h.
 
-An OpenWeather hiccup is a skipped report, never a dead service — the next
-poll retries. Look for `[weather] fetch failed` lines in the journal; the
-URL is never logged because it carries the API key.
+A gateway or OpenWeather hiccup is a skipped report, never a dead service —
+the next poll retries. Look for `[weather] fetch failed` lines in the
+journal; the OWM URL is never logged because it carries the API key.
 
 To run it by hand (stop the service first):
 
 ```
 sudo systemctl stop willard-weather
 cd ~/project-squirrel && source venv/bin/activate
-MERLE_MQTT=localhost:1883 MERLE_OWM_KEY=<key> python weather.py
+MERLE_MQTT=localhost:1883 MERLE_ECOWITT=192.168.1.210 MERLE_OWM_KEY=<key> python weather.py
+```
+
+The gateway itself answers on the LAN with no auth — a quick sanity check
+that the station is up and transmitting:
+
+```
+curl -s http://192.168.1.210/get_livedata_info | head -c 400
 ```
 
 Quick health check from any machine on the LAN — the retained report comes

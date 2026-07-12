@@ -61,6 +61,9 @@ import {
   parsePoints,
   parseReport,
   parseStatus,
+  pressureRange,
+  pressureTrend,
+  seriesCeil,
   tempRange,
   timeTicks,
   trendSeries,
@@ -1476,6 +1479,19 @@ function dayClock(ts: number): string {
   return `${day} ${clock(ts)}`;
 }
 
+/** "—" for a missing reading, the integer otherwise. Shared by the panel and
+ * the station view (issue #51) -- a hole in the data is an em-dash, never
+ * NaN°. */
+const wxRound = (v: number | null) => (v === null ? "—" : Math.round(v));
+
+/** Fixed decimals or the em-dash -- rain and pressure read in hundredths. */
+const wxFixed = (v: number | null, digits: number) =>
+  v === null ? "—" : v.toFixed(digits);
+
+/** The barometer's tendency as a compass-adjacent glyph. Null trend (trail
+ * too short) renders as empty -- the slot is reserved by the row itself. */
+const TREND_GLYPH = { rising: "↗", falling: "↘", steady: "→" } as const;
+
 function WeatherPost() {
   const [current, setCurrent] = useState<CurrentWeather | null>(null);
   const [history, setHistory] = useState<WeatherPoint[]>([]);
@@ -1571,6 +1587,9 @@ function WeatherPost() {
   // when the pointer is elsewhere. Everything else is derived per render.
   const [hoverFrac, setHoverFrac] = useState<number | null>(null);
 
+  // The station view (issue #51): a full-screen overlay off the masthead.
+  const [stationView, setStationView] = useState(false);
+
   const trend =
     now !== null
       ? trendSeries(history, forecast, now)
@@ -1592,43 +1611,58 @@ function WeatherPost() {
   const nights = hasChart
     ? nightBands(current?.sunrise ?? null, current?.sunset ?? null, ts0, ts1)
     : [];
+  // The barometer's tendency, judged from the observed trail (issue #51).
+  const baroTrend = now !== null ? pressureTrend(history, now) : null;
 
-  const round = (v: number | null) => (v === null ? "—" : Math.round(v));
+  const round = wxRound;
 
   return (
     <section className="panel flex flex-col rounded-sm border border-line bg-panel">
       {/* The masthead bills the reporter, Field Journal style -- conditions
-          themselves live down in the data block with the temperature. */}
+          themselves live down in the data block with the temperature. The
+          expand control opens the station view (issue #51). */}
       <PanelLabel
         title="Weather Post"
         right={
-          !busUp ? (
-            <span className="stamp text-xs text-inkfaint">bus quiet</span>
-          ) : offline ? (
-            <span className="flex items-center gap-1.5 text-xs">
-              <span className="inline-block h-2 w-2 rounded-full bg-inkfaint" />
-              <span className="stamp text-inkfaint">
-                willard · on coffee break
+          <span className="flex items-center gap-2.5">
+            {!busUp ? (
+              <span className="stamp text-xs text-inkfaint">bus quiet</span>
+            ) : offline ? (
+              <span className="flex items-center gap-1.5 text-xs">
+                <span className="inline-block h-2 w-2 rounded-full bg-inkfaint" />
+                <span className="stamp text-inkfaint">
+                  willard · on coffee break
+                </span>
               </span>
-            </span>
-          ) : current === null ? (
-            <span className="flex items-center gap-1.5 text-xs">
-              <span className="inline-block h-2 w-2 rounded-full bg-inkfaint" />
-              <span className="stamp text-inkfaint">willard · off the air</span>
-            </span>
-          ) : stale ? (
-            <span className="flex items-center gap-1.5 text-xs">
-              <span className="breathe inline-block h-2 w-2 rounded-full bg-turkey" />
-              <span className="stamp text-turkey">
-                willard · stale report {clock(current.ts)}
+            ) : current === null ? (
+              <span className="flex items-center gap-1.5 text-xs">
+                <span className="inline-block h-2 w-2 rounded-full bg-inkfaint" />
+                <span className="stamp text-inkfaint">
+                  willard · off the air
+                </span>
               </span>
-            </span>
-          ) : (
-            <span className="flex items-center gap-1.5 text-xs">
-              <span className="lamp inline-block h-2 w-2 rounded-full bg-led text-led" />
-              <span className="stamp text-led">willard with the weather</span>
-            </span>
-          )
+            ) : stale ? (
+              <span className="flex items-center gap-1.5 text-xs">
+                <span className="breathe inline-block h-2 w-2 rounded-full bg-turkey" />
+                <span className="stamp text-turkey">
+                  willard · stale report {clock(current.ts)}
+                </span>
+              </span>
+            ) : (
+              <span className="flex items-center gap-1.5 text-xs">
+                <span className="lamp inline-block h-2 w-2 rounded-full bg-led text-led" />
+                <span className="stamp text-led">willard with the weather</span>
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={() => setStationView(true)}
+              aria-label="Open the station view"
+              className="text-inkfaint transition-colors hover:text-squirrel"
+            >
+              <ExpandIcon />
+            </button>
+          </span>
         }
       />
       {/* `relative` so the off-air message can overlay the (dimmed) data
@@ -1643,8 +1677,10 @@ function WeatherPost() {
           }
         >
         {/* Current conditions -- a fixed-height block whether or not a report
-            is in, so the panel never shifts as data arrives (house rule #1). */}
-        <div className="flex min-h-[58px] items-end justify-between gap-3">
+            is in, so the panel never shifts as data arrives (house rule #1).
+            The right column grew with the station (issue #51): five fixed
+            rows, each rendered with em-dash placeholders before data. */}
+        <div className="flex min-h-[92px] items-end justify-between gap-3">
           <div>
             <div className="flex items-baseline gap-2">
               <span
@@ -1669,12 +1705,40 @@ function WeatherPost() {
               {current?.wind_gust_mph != null &&
                 ` · gusts ${Math.round(current.wind_gust_mph)}`}
             </span>
-            <span>humidity {round(current?.humidity_pct ?? null)}%</span>
+            <span>
+              humidity {round(current?.humidity_pct ?? null)}% · dew{" "}
+              {round(current?.dew_point_f ?? null)}°
+            </span>
+            <span>
+              baro {wxFixed(current?.pressure_rel_inhg ?? null, 2)} in
+              {baroTrend && ` ${TREND_GLYPH[baroTrend]}`}
+              {current?.uv_index != null &&
+                current.uv_index >= 1 &&
+                ` · uv ${Math.round(current.uv_index)}`}
+            </span>
+            <span>
+              rain {wxFixed(current?.rain_day_in ?? null, 2)} in today
+              {current?.raining === 1 &&
+                ` · ${wxFixed(current?.rain_rate_inhr ?? null, 2)}/hr`}
+            </span>
             <span className="stamp text-[10px] text-inkfaint">
               sun {clock(current?.sunrise ?? null)} –{" "}
               {clock(current?.sunset ?? null)}
             </span>
           </div>
+        </div>
+
+        {/* The gateway's indoor instruments: one quiet strip, deliberately
+            below the outdoor stage (issue #51) -- the station's other room,
+            never competing with the sky. Fixed single row, always rendered. */}
+        <div className="mt-2 flex items-baseline justify-between border-t border-line pt-1.5 text-[11px]">
+          <span className="stamp text-[10px] text-inkfaint">
+            indoors · at the gateway
+          </span>
+          <span className="tabular-nums text-inkdim">
+            {round(current?.indoor_temp_f ?? null)}° ·{" "}
+            {round(current?.indoor_humidity_pct ?? null)}% rh
+          </span>
         </div>
 
         {/* The trend: observed temps trail left of "now" (solid), the forecast
@@ -1944,6 +2008,759 @@ function WeatherPost() {
           </div>
         )}
       </div>
+
+      {/* The station view (issue #51): the same bus data, writ large. */}
+      {stationView && (
+        <WeatherStationView
+          current={current}
+          history={history}
+          forecast={forecast}
+          report={report}
+          now={now}
+          reporting={reporting}
+          offline={offline}
+          onAir={onAir}
+          baroTrend={baroTrend}
+          onClose={() => setStationView(false)}
+        />
+      )}
     </section>
+  );
+}
+
+/* --- The Station View (issue #51): the Weather Post, writ large ------------- */
+
+// Large-chart geometry. Same fixed 24h-back/48h-forward window and the same
+// stretched-viewBox rules as the panel chart (strokes carry vector-effect);
+// only the canvas is bigger. The strips underneath share ts0/ts1 with the
+// main chart, so every timestamp lines up vertically across all four.
+const WXL_W = 960;
+const WXL_H = 240;
+const WXL_STRIP_H = 52;
+const WX_NOW_FRAC = PAST_S / (PAST_S + FUTURE_S);
+
+/** One labeled reading in the hero grid: stamped label, instrument-sized
+ * value, the unit riding quietly after it. */
+function WxStat({
+  label,
+  value,
+  unit,
+  sub,
+}: {
+  label: string;
+  value: string | number;
+  unit?: string;
+  sub?: React.ReactNode;
+}) {
+  return (
+    <div className="border-l border-line pl-3">
+      <div className="stamp text-[10px] text-inkfaint">{label}</div>
+      <div className="text-xl tabular-nums text-ink">
+        {value}
+        {unit && <span className="ml-1 text-xs text-inkdim">{unit}</span>}
+      </div>
+      {/* min-h reserves the sub-line so the grid rows stay ranked even when
+          a reading has nothing extra to say (house rule #1). */}
+      <div className="min-h-[16px] text-[11px] text-inkdim">{sub}</div>
+    </div>
+  );
+}
+
+/** Segment meter for the WH90's battery (0-5) and radio signal (0-4) -- gear
+ * gauge, not percentage bar. Unknown level draws all sockets empty. */
+function SegMeter({
+  n,
+  of,
+  tone = "var(--led)",
+}: {
+  n: number | null;
+  of: number;
+  tone?: string;
+}) {
+  return (
+    <span className="inline-flex items-center gap-0.5">
+      {Array.from({ length: of }, (_, i) => (
+        <span
+          key={i}
+          className="h-1.5 w-2.5 rounded-[1px]"
+          style={
+            n !== null && i < n
+              ? { backgroundColor: tone }
+              : { backgroundColor: "var(--panel-2)", border: "1px solid var(--line)" }
+          }
+        />
+      ))}
+    </span>
+  );
+}
+
+/** One instrument strip under the main chart: its own svg sharing the time
+ * axis, the now-divider, and faint tick rules for alignment. The series
+ * itself comes in as svg children; the label sits in the forecast half,
+ * which the station's instruments leave honestly blank -- there are no
+ * measurements in the future. */
+function WxStrip({
+  label,
+  scale,
+  children,
+}: {
+  label: string;
+  scale: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="relative mt-1 h-[52px] w-full border-t border-line/60">
+      <svg
+        viewBox={`0 0 ${WXL_W} ${WXL_STRIP_H}`}
+        preserveAspectRatio="none"
+        className="h-full w-full"
+        aria-hidden="true"
+      >
+        {WX_TICKS.map((t) => (
+          <line
+            key={t.offsetS}
+            x1={t.frac * WXL_W}
+            y1={0}
+            x2={t.frac * WXL_W}
+            y2={WXL_STRIP_H}
+            stroke="var(--line)"
+            opacity="0.5"
+            vectorEffect="non-scaling-stroke"
+          />
+        ))}
+        <line
+          x1={WX_NOW_FRAC * WXL_W}
+          y1={0}
+          x2={WX_NOW_FRAC * WXL_W}
+          y2={WXL_STRIP_H}
+          stroke="var(--line-bright)"
+          strokeDasharray="2 4"
+          vectorEffect="non-scaling-stroke"
+        />
+        {children}
+      </svg>
+      <span className="stamp pointer-events-none absolute right-1 top-1 text-[9px] text-inkfaint">
+        {label}
+      </span>
+      <span className="pointer-events-none absolute left-1 top-0.5 text-[9px] tabular-nums text-inkfaint">
+        {scale}
+      </span>
+    </div>
+  );
+}
+
+function CloseIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="18"
+      height="18"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      aria-hidden="true"
+    >
+      <path d="M6 6l12 12M18 6L6 18" />
+    </svg>
+  );
+}
+
+function WeatherStationView({
+  current,
+  history,
+  forecast,
+  report,
+  now,
+  reporting,
+  offline,
+  onAir,
+  baroTrend,
+  onClose,
+}: {
+  current: CurrentWeather | null;
+  history: WeatherPoint[];
+  forecast: WeatherPoint[];
+  report: WeatherReport | null;
+  now: number | null;
+  reporting: boolean;
+  offline: boolean;
+  onAir: boolean;
+  baroTrend: "rising" | "falling" | "steady" | null;
+  onClose: () => void;
+}) {
+  // The Live Watch CSS-overlay contract: Escape closes, body scroll locks
+  // while the view is up. No requestFullscreen here -- this is a page of
+  // instruments, not a video, and it should scroll on small screens.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = "";
+    };
+  }, [onClose]);
+
+  // Hover scrub, the panel chart's contract: pointer x as a fraction of the
+  // chart stack's width; the crosshair spans main chart and strips alike.
+  const [hoverFrac, setHoverFrac] = useState<number | null>(null);
+
+  const trend =
+    now !== null
+      ? trendSeries(history, forecast, now)
+      : { observed: [], coming: [] };
+  const allPts = [...trend.observed, ...trend.coming];
+  const range = tempRange(allPts);
+  const windMax = windCeil(allPts);
+  const hasChart = now !== null && range !== null && allPts.length > 1;
+  const ts0 = (now ?? 0) - PAST_S;
+  const ts1 = (now ?? 0) + FUTURE_S;
+  const nights = hasChart
+    ? nightBands(current?.sunrise ?? null, current?.sunset ?? null, ts0, ts1)
+    : [];
+
+  // The strips chart the observed trail only -- the forecast carries none of
+  // these series, and an honest chart leaves the future blank.
+  const observed = trend.observed;
+  const rainMax = seriesCeil(observed, (p) => p.rain_rate_inhr, 0.25, 0.25);
+  const solarMax = seriesCeil(observed, (p) => p.solar_wm2, 200, 100);
+  const uvMax = seriesCeil(observed, (p) => p.uv_index, 4, 2);
+  const presRange = pressureRange(observed);
+
+  const hovered =
+    hasChart && hoverFrac !== null
+      ? nearestPoint(allPts, ts0 + hoverFrac * (ts1 - ts0))
+      : null;
+  const hoveredFrac = hovered ? (hovered.ts - ts0) / (ts1 - ts0) : 0;
+  // The station-series line of the readout: only what the hovered point
+  // actually measured (observed side; forecast points have none of it).
+  const hoveredExtras = hovered
+    ? [
+        hovered.rain_rate_inhr !== null && hovered.rain_rate_inhr > 0
+          ? `rain ${hovered.rain_rate_inhr.toFixed(2)}/hr`
+          : null,
+        hovered.pressure_rel_inhg !== null
+          ? `baro ${hovered.pressure_rel_inhg.toFixed(2)}`
+          : null,
+        hovered.solar_wm2 !== null
+          ? `solar ${Math.round(hovered.solar_wm2)}`
+          : null,
+        hovered.uv_index !== null && hovered.uv_index >= 1
+          ? `uv ${Math.round(hovered.uv_index)}`
+          : null,
+      ].filter(Boolean)
+    : [];
+
+  const battery = current?.station_battery ?? null;
+  const batteryTone =
+    battery !== null && battery <= 1
+      ? "var(--chipmunk)"
+      : battery === 2
+        ? "var(--turkey)"
+        : "var(--led)";
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Weather station view"
+      className="scrollpane fixed inset-0 z-50 overflow-y-auto bg-bg"
+    >
+      <div className="mx-auto w-full max-w-[1200px] px-4 pb-10 pt-5 sm:px-6">
+        {/* Masthead: the same billing as the panel, room to breathe. */}
+        <div className="flex items-center justify-between gap-3 border-b border-line pb-3">
+          <h2
+            className="text-2xl text-ink"
+            style={{ fontFamily: "var(--font-display)" }}
+          >
+            Weather Post{" "}
+            <span className="stamp ml-2 align-middle text-[10px] text-inkfaint">
+              station view
+            </span>
+          </h2>
+          <div className="flex items-center gap-4">
+            {offline ? (
+              <span className="flex items-center gap-1.5 text-xs">
+                <span className="inline-block h-2 w-2 rounded-full bg-inkfaint" />
+                <span className="stamp text-inkfaint">on coffee break</span>
+              </span>
+            ) : reporting ? (
+              <span className="flex items-center gap-1.5 text-xs">
+                <span className="lamp inline-block h-2 w-2 rounded-full bg-led text-led" />
+                <span className="stamp text-led">on duty</span>
+              </span>
+            ) : (
+              <span className="flex items-center gap-1.5 text-xs">
+                <span className="breathe inline-block h-2 w-2 rounded-full bg-turkey" />
+                <span className="stamp text-turkey">no fresh report</span>
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              autoFocus
+              aria-label="Close the station view"
+              className="rounded-sm border border-line p-1.5 text-inkdim transition-colors hover:border-linebright hover:text-squirrel"
+            >
+              <CloseIcon />
+            </button>
+          </div>
+        </div>
+
+        <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+          {/* --- The sky: hero conditions + the big chart ------------------ */}
+          <main className="min-w-0">
+            <section className="panel rounded-sm border border-line bg-panel px-4 pb-4 pt-3">
+              <div className="flex flex-wrap items-end gap-x-8 gap-y-4">
+                <div>
+                  <div className="flex items-baseline gap-3">
+                    <span
+                      className={`text-6xl font-bold tabular-nums ${reporting ? "text-ink" : "text-inkfaint"}`}
+                    >
+                      {wxRound(current?.temp_f ?? null)}°
+                    </span>
+                    <span className="text-sm text-inkdim">
+                      feels {wxRound(current?.feels_like_f ?? null)}°
+                    </span>
+                  </div>
+                  <div className="min-h-[20px] text-sm text-inkdim">
+                    {current?.description ?? ""}
+                  </div>
+                  <div className="stamp mt-1 text-[10px] text-inkfaint">
+                    sun {clock(current?.sunrise ?? null)} –{" "}
+                    {clock(current?.sunset ?? null)}
+                    {current !== null && now !== null && (
+                      <> · read {ageText(current.ts, now)}</>
+                    )}
+                  </div>
+                </div>
+                <div className="grid flex-1 grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3">
+                  <WxStat
+                    label="dew point"
+                    value={wxRound(current?.dew_point_f ?? null)}
+                    unit="°F"
+                  />
+                  <WxStat
+                    label="humidity"
+                    value={wxRound(current?.humidity_pct ?? null)}
+                    unit="%"
+                  />
+                  <WxStat
+                    label="wind"
+                    value={wxRound(current?.wind_mph ?? null)}
+                    unit="mph"
+                    sub={
+                      <>
+                        {compass(current?.wind_deg ?? null) || "—"}
+                        {current?.wind_gust_mph != null &&
+                          ` · gusts ${Math.round(current.wind_gust_mph)}`}
+                        {current?.wind_max_daily_gust_mph != null &&
+                          ` · max ${Math.round(current.wind_max_daily_gust_mph)}`}
+                      </>
+                    }
+                  />
+                  <WxStat
+                    label="barometer"
+                    value={wxFixed(current?.pressure_rel_inhg ?? null, 2)}
+                    unit="in"
+                    sub={baroTrend && `${TREND_GLYPH[baroTrend]} ${baroTrend}`}
+                  />
+                  <WxStat
+                    label="uv index"
+                    value={wxRound(current?.uv_index ?? null)}
+                    sub={
+                      current?.solar_wm2 != null &&
+                      `solar ${Math.round(current.solar_wm2)} W/m²`
+                    }
+                  />
+                  <WxStat
+                    label="rain today"
+                    value={wxFixed(current?.rain_day_in ?? null, 2)}
+                    unit="in"
+                    sub={
+                      current?.raining === 1 ? (
+                        <span className="flex items-center gap-1.5 text-led">
+                          <span className="lamp inline-block h-1.5 w-1.5 rounded-full bg-led text-led" />
+                          falling ·{" "}
+                          {wxFixed(current?.rain_rate_inhr ?? null, 2)}/hr
+                        </span>
+                      ) : (
+                        "dry"
+                      )
+                    }
+                  />
+                </div>
+              </div>
+              {/* The seldom-read dials, one quiet line: the piezo's ledgers
+                  and the agronomist's vapor number. */}
+              <div className="mt-3 border-t border-line pt-2 text-[11px] text-inkfaint">
+                rain event {wxFixed(current?.rain_event_in ?? null, 2)} in ·
+                week {wxFixed(current?.rain_week_in ?? null, 2)} · month{" "}
+                {wxFixed(current?.rain_month_in ?? null, 2)} · year{" "}
+                {wxFixed(current?.rain_year_in ?? null, 2)} in · vpd{" "}
+                {wxFixed(current?.vpd_inhg ?? null, 3)} in
+              </div>
+            </section>
+
+            {/* --- The trend, four instruments tall ------------------------ */}
+            <section className="panel mt-4 rounded-sm border border-line bg-panel px-4 pb-4 pt-3">
+              <div className="text-[10px] text-inkfaint">
+                <span>
+                  <span className="text-squirrel">—</span> temp °F ·{" "}
+                  <span className="text-inkdim">—</span> wind mph · observed
+                  solid, forecast dashed
+                </span>
+              </div>
+              <div
+                className="relative mt-1"
+                style={{ touchAction: "pan-y" }}
+                onPointerMove={(e) => {
+                  const r = e.currentTarget.getBoundingClientRect();
+                  if (r.width > 0)
+                    setHoverFrac(
+                      Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)),
+                    );
+                }}
+                onPointerLeave={() => setHoverFrac(null)}
+                onPointerCancel={() => setHoverFrac(null)}
+              >
+                {/* main chart: temperature + wind, the panel chart writ tall */}
+                <div className="relative h-56 w-full sm:h-64">
+                  {hasChart && (
+                    <svg
+                      viewBox={`0 0 ${WXL_W} ${WXL_H}`}
+                      preserveAspectRatio="none"
+                      className="h-full w-full"
+                      role="img"
+                      aria-label="Observed and forecast temperature and wind"
+                    >
+                      {nights.map((b) => (
+                        <rect
+                          key={b.start}
+                          x={((b.start - ts0) / (ts1 - ts0)) * WXL_W}
+                          y={0}
+                          width={((b.end - b.start) / (ts1 - ts0)) * WXL_W}
+                          height={WXL_H}
+                          fill="black"
+                          opacity="0.25"
+                        />
+                      ))}
+                      {WX_TICKS.map((t) => (
+                        <line
+                          key={t.offsetS}
+                          x1={t.frac * WXL_W}
+                          y1={0}
+                          x2={t.frac * WXL_W}
+                          y2={WXL_H}
+                          stroke="var(--line)"
+                          vectorEffect="non-scaling-stroke"
+                        />
+                      ))}
+                      <line
+                        x1={WX_NOW_FRAC * WXL_W}
+                        y1={0}
+                        x2={WX_NOW_FRAC * WXL_W}
+                        y2={WXL_H}
+                        stroke="var(--line-bright)"
+                        strokeDasharray="2 4"
+                        vectorEffect="non-scaling-stroke"
+                      />
+                      <path
+                        d={linePath(trend.observed, (p) => p.wind_mph, ts0, ts1, 0, windMax, WXL_W, WXL_H)}
+                        fill="none"
+                        stroke="var(--ink-dim)"
+                        strokeWidth="1"
+                        opacity="0.8"
+                        vectorEffect="non-scaling-stroke"
+                      />
+                      <path
+                        d={linePath(trend.coming, (p) => p.wind_mph, ts0, ts1, 0, windMax, WXL_W, WXL_H)}
+                        fill="none"
+                        stroke="var(--ink-dim)"
+                        strokeWidth="1"
+                        strokeDasharray="3 3"
+                        opacity="0.5"
+                        vectorEffect="non-scaling-stroke"
+                      />
+                      <path
+                        d={linePath(trend.observed, (p) => p.temp_f, ts0, ts1, range.min, range.max, WXL_W, WXL_H)}
+                        fill="none"
+                        stroke="var(--squirrel)"
+                        strokeWidth="1.8"
+                        vectorEffect="non-scaling-stroke"
+                      />
+                      <path
+                        d={linePath(trend.coming, (p) => p.temp_f, ts0, ts1, range.min, range.max, WXL_W, WXL_H)}
+                        fill="none"
+                        stroke="var(--squirrel)"
+                        strokeWidth="1.4"
+                        strokeDasharray="4 3"
+                        opacity="0.65"
+                        vectorEffect="non-scaling-stroke"
+                      />
+                    </svg>
+                  )}
+                  {hasChart && range !== null && (
+                    <>
+                      <span className="pointer-events-none absolute left-1 top-0.5 text-[9px] tabular-nums text-squirrel opacity-60">
+                        {range.max}°
+                      </span>
+                      <span className="pointer-events-none absolute bottom-0.5 left-1 text-[9px] tabular-nums text-squirrel opacity-60">
+                        {range.min}°
+                      </span>
+                      <span className="pointer-events-none absolute right-1 top-0.5 text-[9px] tabular-nums text-inkfaint">
+                        {windMax} mph
+                      </span>
+                    </>
+                  )}
+                  {/* snapped dots, the panel chart's HTML-overlay trick (the
+                      viewBox is stretched; svg circles would squash). */}
+                  {hovered && range !== null && (
+                    <>
+                      {hovered.temp_f !== null && (
+                        <span
+                          className="pointer-events-none absolute h-2 w-2 -translate-x-1/2 -translate-y-1/2 rounded-full border border-squirrel bg-panel"
+                          style={{
+                            left: `${hoveredFrac * 100}%`,
+                            top: `${(1 - (hovered.temp_f - range.min) / (range.max - range.min)) * 100}%`,
+                          }}
+                        />
+                      )}
+                      {hovered.wind_mph !== null && (
+                        <span
+                          className="pointer-events-none absolute h-1.5 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-inkdim bg-panel"
+                          style={{
+                            left: `${hoveredFrac * 100}%`,
+                            top: `${(1 - hovered.wind_mph / windMax) * 100}%`,
+                          }}
+                        />
+                      )}
+                    </>
+                  )}
+                </div>
+
+                {/* the station's own instruments, one strip each, sharing
+                    the time axis -- rain falls, the barometer wanders, the
+                    sun arcs, and they all line up under the temperature */}
+                {hasChart && (
+                  <>
+                    <WxStrip label="rain · in/hr" scale={`${rainMax}`}>
+                      {observed
+                        .filter(
+                          (p) =>
+                            p.rain_rate_inhr !== null && p.rain_rate_inhr > 0,
+                        )
+                        .map((p) => (
+                          <rect
+                            key={p.ts}
+                            x={((p.ts - ts0) / (ts1 - ts0)) * WXL_W - 0.7}
+                            y={
+                              WXL_STRIP_H -
+                              (Math.min(p.rain_rate_inhr!, rainMax) / rainMax) *
+                                WXL_STRIP_H
+                            }
+                            width={1.4}
+                            height={
+                              (Math.min(p.rain_rate_inhr!, rainMax) / rainMax) *
+                              WXL_STRIP_H
+                            }
+                            fill="var(--led)"
+                            opacity="0.75"
+                          />
+                        ))}
+                    </WxStrip>
+                    <WxStrip
+                      label="barometer · in"
+                      scale={
+                        presRange ? `${presRange.max}–${presRange.min}` : ""
+                      }
+                    >
+                      {presRange && (
+                        <path
+                          d={linePath(observed, (p) => p.pressure_rel_inhg, ts0, ts1, presRange.min, presRange.max, WXL_W, WXL_STRIP_H)}
+                          fill="none"
+                          stroke="var(--ink)"
+                          strokeWidth="1.2"
+                          opacity="0.55"
+                          vectorEffect="non-scaling-stroke"
+                        />
+                      )}
+                    </WxStrip>
+                    <WxStrip
+                      label="solar w/m² · uv dashed"
+                      scale={`${solarMax}`}
+                    >
+                      <path
+                        d={linePath(observed, (p) => p.solar_wm2, ts0, ts1, 0, solarMax, WXL_W, WXL_STRIP_H)}
+                        fill="none"
+                        stroke="var(--turkey)"
+                        strokeWidth="1.2"
+                        opacity="0.8"
+                        vectorEffect="non-scaling-stroke"
+                      />
+                      <path
+                        d={linePath(observed, (p) => p.uv_index, ts0, ts1, 0, uvMax, WXL_W, WXL_STRIP_H)}
+                        fill="none"
+                        stroke="var(--turkey)"
+                        strokeWidth="1"
+                        strokeDasharray="2 3"
+                        opacity="0.5"
+                        vectorEffect="non-scaling-stroke"
+                      />
+                    </WxStrip>
+                  </>
+                )}
+
+                {/* one crosshair through the whole instrument stack */}
+                {hovered && (
+                  <span
+                    className="pointer-events-none absolute inset-y-0 w-px bg-inkdim/40"
+                    style={{ left: `${hoveredFrac * 100}%` }}
+                  />
+                )}
+                {hovered && now !== null && (
+                  <div
+                    className="pointer-events-none absolute top-1 z-10 whitespace-nowrap rounded-sm border border-linebright bg-panel2 px-2 py-1"
+                    style={
+                      hoveredFrac < 0.5
+                        ? { left: `calc(${hoveredFrac * 100}% + 10px)` }
+                        : { right: `calc(${(1 - hoveredFrac) * 100}% + 10px)` }
+                    }
+                  >
+                    <div className="stamp text-[10px] text-inkfaint">
+                      {dayClock(hovered.ts)} ·{" "}
+                      {hovered.ts <= now ? "observed" : "forecast"}
+                    </div>
+                    <div className="text-[11px] tabular-nums text-ink">
+                      {wxRound(hovered.temp_f)}°
+                      {hovered.condition && (
+                        <span className="text-inkdim">
+                          {" "}
+                          · {hovered.condition.toLowerCase()}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-[10px] tabular-nums text-inkdim">
+                      wind {wxRound(hovered.wind_mph)} mph
+                      {hovered.wind_gust_mph !== null &&
+                        ` · gusts ${Math.round(hovered.wind_gust_mph)}`}
+                    </div>
+                    {hoveredExtras.length > 0 && (
+                      <div className="text-[10px] tabular-nums text-inkdim">
+                        {hoveredExtras.join(" · ")}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+              <div className="relative mt-0.5 h-4 text-[9px] text-inkfaint">
+                <span className="absolute left-0">−24h</span>
+                {WX_TICKS.map((t) => (
+                  <span
+                    key={t.offsetS}
+                    className="absolute -translate-x-1/2 tabular-nums"
+                    style={{ left: `${t.frac * 100}%` }}
+                  >
+                    {t.offsetS > 0
+                      ? `+${t.offsetS / 3600}h`
+                      : `−${-t.offsetS / 3600}h`}
+                  </span>
+                ))}
+                <span
+                  className="stamp absolute -translate-x-1/2 text-inkdim"
+                  style={{ left: `${WX_NOW_FRAC * 100}%` }}
+                >
+                  now
+                </span>
+                <span className="absolute right-0">+48h</span>
+              </div>
+            </section>
+          </main>
+
+          {/* --- The desk and the hardware: Willard + the station itself --- */}
+          <aside className="flex min-w-0 flex-col gap-4">
+            <section className="panel rounded-sm border border-line bg-panel">
+              <div className="flex items-baseline gap-2 px-4 pt-3 text-[11px]">
+                <span className="stamp text-inkdim">willard, on the air</span>
+                {onAir && report !== null && (
+                  <span className="text-inkfaint">{clock(report.ts)}</span>
+                )}
+              </div>
+              {onAir && report !== null ? (
+                <p
+                  className="px-4 pb-4 pt-2 text-[17px] leading-snug text-ink"
+                  style={{
+                    fontFamily: "var(--font-display)",
+                    whiteSpace: "pre-line",
+                  }}
+                >
+                  {report.text}
+                </p>
+              ) : (
+                <p className="px-4 pb-4 pt-2 text-sm leading-relaxed text-inkfaint">
+                  willard is between broadcasts — the forecast desk is quiet
+                </p>
+              )}
+            </section>
+
+            <section className="panel rounded-sm border border-line bg-panel">
+              <div className="px-4 pt-3">
+                <span className="stamp text-[11px] text-inkdim">
+                  the station itself
+                </span>
+              </div>
+              <dl className="flex flex-col gap-2.5 px-4 pb-4 pt-3 text-[12px]">
+                <div className="flex items-baseline justify-between gap-3">
+                  <dt className="stamp text-[10px] text-inkfaint">
+                    indoors · at the gateway
+                  </dt>
+                  <dd className="tabular-nums text-ink">
+                    {wxRound(current?.indoor_temp_f ?? null)}° ·{" "}
+                    {wxRound(current?.indoor_humidity_pct ?? null)}% rh
+                  </dd>
+                </div>
+                <div className="flex items-baseline justify-between gap-3">
+                  <dt className="stamp text-[10px] text-inkfaint">
+                    barometer · absolute
+                  </dt>
+                  <dd className="tabular-nums text-inkdim">
+                    {wxFixed(current?.pressure_abs_inhg ?? null, 2)} in
+                  </dd>
+                </div>
+                <div className="flex items-center justify-between gap-3 border-t border-line pt-2.5">
+                  <dt className="stamp text-[10px] text-inkfaint">
+                    wh90 battery
+                  </dt>
+                  <dd className="flex items-center gap-2 tabular-nums text-inkdim">
+                    <SegMeter n={battery} of={5} tone={batteryTone} />
+                    {current?.station_voltage != null &&
+                      `${current.station_voltage.toFixed(2)}v`}
+                  </dd>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="stamp text-[10px] text-inkfaint">
+                    radio signal
+                  </dt>
+                  <dd className="flex items-center gap-2 text-inkdim">
+                    <SegMeter n={current?.station_signal ?? null} of={4} />
+                  </dd>
+                </div>
+                <div className="flex items-baseline justify-between gap-3 border-t border-line pt-2.5">
+                  <dt className="stamp text-[10px] text-inkfaint">
+                    last report
+                  </dt>
+                  <dd className="tabular-nums text-inkdim">
+                    {current !== null && now !== null
+                      ? `${clock(current.ts)} · ${ageText(current.ts, now)}`
+                      : "—"}
+                  </dd>
+                </div>
+              </dl>
+            </section>
+          </aside>
+        </div>
+      </div>
+    </div>
   );
 }
