@@ -132,8 +132,9 @@ Topics:
 
 - `driveway/events` — daemon → world, one JSON event each
 - `narration/lines` — narrator → world (both of them: Marlin here, Jim on
-  merle). Jim also *subscribes* to it — a Marlin line naming him is his cue
-  (issue #80)
+  merle). Both also *subscribe* to it (issues #80/#88): a line naming a
+  colleague is that colleague's cue, and a follow-up never triggers a
+  follow-up (the reply-to-a-reply guard)
 - `narration/journal/<id>` — the field journal windows (issue #58,
   per-narrator since #80): each narrator's last 50 spoken lines, **retained**
   and republished whole on every new line, so a fresh dashboard tab gets the
@@ -141,7 +142,9 @@ Topics:
   merges). Marlin's is backed by `narration_journal.json` in the repo dir
   (see The narrator below); Jim's by the same file on merle
 - `narrators/<id>/status` — retained presence, `online` / `offline`
-  (`marlin` here, `jim` from merle)
+  (`marlin` here, `jim` from merle). Marlin also *subscribes* to it (issue
+  #88): while Jim's lamp is on, Marlin leaves the announcements to the
+  field and only follows up; when it goes dark he covers them himself
 - `weather/current`, `weather/forecast`, `weather/history` — Willard's
   reports, all **retained**: weather is state, not a moment, so a late
   joiner (fresh dashboard tab) gets the latest report straight from the
@@ -196,6 +199,11 @@ Unit: `/etc/systemd/system/narrator-marlin.service`
 Code: `/home/todd/project-squirrel/` (venv at `venv/`)
 Persona: `personas/marlin.yaml`
 World facts: `character_bible.yaml`
+
+Role since issue #88: the studio. Jim (on merle) announces the events;
+Marlin follows up on field reports that name him, and only takes over the
+announcements himself while Jim's presence lamp is dark — expect his lines
+to be reactions, not play-by-play, whenever both are on the air.
 Extra env in the unit: `MERLE_OLLAMA=192.168.1.79:11434` (bluejay's GPU
 serves the LLM; if it's unreachable the narrator silently degrades to
 template lines — check the log's "narration tier" line when prose sounds

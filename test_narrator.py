@@ -509,6 +509,99 @@ def test_speak_passes_heard_lines_to_the_llm():
     assert stub.context["heard"] == ((90.0, "Marlin", "Jim, see about that squirrel."),)
 
 
+# --- announcer roles (issue #88) -------------------------------------------------
+# The role split: a narrator carrying defer_events_to leaves raw events to the
+# field while any listed colleague is on the air, covers them (with a prompt
+# note) when the field is dark, and never defers its mention follow-ups. Plus
+# the two-listener loop guard: a follow-up never triggers a follow-up.
+
+STUDIO = {**PERSONA, "name": "Marlin", "mqtt_id": "marlin",
+          "answers_to": ["Marlin"], "defer_events_to": ["jim"]}
+
+
+def test_reply_to_a_reply_never_triggers():
+    # The ping-pong breaker: Marlin's follow-up names Jim, but its event_kind
+    # is colleague_mention, so Jim must not answer it.
+    followup = marlin_line("Splendid work, Jim -- now get closer.",
+                           event_kind="colleague_mention")
+    assert narrator.colleague_mention(followup, JIM) is None
+    # The same text on an announcement line triggers normally.
+    announcement = marlin_line("Splendid work, Jim -- now get closer.")
+    assert narrator.colleague_mention(announcement, JIM) is not None
+
+
+def test_defers_raw_events_while_the_field_is_on_the_air():
+    assert narrator.defers_event(ARRIVAL, STUDIO, {"jim": "online"})
+    assert not narrator.defers_event(ARRIVAL, STUDIO, {"jim": "offline"})
+    assert not narrator.defers_event(ARRIVAL, STUDIO, {})   # never seen -> cover
+
+
+def test_defer_knob_absent_means_off():
+    # The degradation rule: no knob, no behavior change, whatever presence says.
+    assert not narrator.defers_event(ARRIVAL, PERSONA, {"jim": "online"})
+    no_knob = {**STUDIO, "defer_events_to": []}
+    assert not narrator.defers_event(ARRIVAL, no_knob, {"jim": "online"})
+
+
+def test_mention_followups_are_never_deferred():
+    event = narrator.colleague_mention(
+        {**marlin_line("Back to you, Marlin."), "narrator": "Jim",
+         "mqtt_id": "jim"}, STUDIO)
+    assert not narrator.defers_event(event, STUDIO, {"jim": "online"})
+    assert not narrator.covering_field(event, STUDIO, {"jim": "offline"})
+
+
+def test_defers_while_any_listed_colleague_is_on():
+    two = {**STUDIO, "defer_events_to": ["jim", "rover2"]}
+    assert narrator.defers_event(ARRIVAL, two, {"jim": "offline", "rover2": "online"})
+    assert not narrator.defers_event(ARRIVAL, two, {"jim": "offline", "rover2": "offline"})
+
+
+def test_covering_is_the_exact_complement_on_raw_events():
+    assert narrator.covering_field(ARRIVAL, STUDIO, {"jim": "offline"})
+    assert narrator.covering_field(ARRIVAL, STUDIO, {})
+    assert not narrator.covering_field(ARRIVAL, STUDIO, {"jim": "online"})
+    assert not narrator.covering_field(ARRIVAL, PERSONA, {})   # knob off -> never
+
+
+def test_wants_respects_the_deferral():
+    n = narrator.Narrator(STUDIO, BIBLE, rng=random.Random(0))
+    n.colleagues["jim"] = "online"
+    assert not n.wants(ARRIVAL, now=100.0)          # the field has it
+    n.colleagues["jim"] = "offline"
+    assert n.wants(ARRIVAL, now=100.0)              # covering: gate math as ever
+
+
+def test_covering_note_rides_the_prompt_only_when_covering():
+    covered = narrator.build_user_prompt(ARRIVAL, BIBLE, now=NOW, covering=True)
+    assert narrator.COVERING_NOTE in covered
+    assert covered.index("has just arrived") < covered.index(narrator.COVERING_NOTE)
+    assert covered.endswith("Your on-air line:")
+    # Not covering: byte-identical to the plain prompt (the degradation rule).
+    plain = narrator.build_user_prompt(ARRIVAL, BIBLE, now=NOW)
+    assert narrator.build_user_prompt(ARRIVAL, BIBLE, now=NOW, covering=False) == plain
+
+
+def test_speak_carries_the_covering_flag_to_the_llm():
+    stub = StubOllama("Jim is, I am told, on a coffee break.")
+    n = narrator.Narrator(STUDIO, BIBLE, rng=random.Random(0), ollama=stub)
+    n.colleagues["jim"] = "offline"
+    n.speak(ARRIVAL, now=100.0)
+    assert stub.context["covering"] is True
+    n.colleagues["jim"] = "online"
+    mention = narrator.colleague_mention(
+        {**marlin_line("Over to you, Marlin."), "narrator": "Jim",
+         "mqtt_id": "jim"}, STUDIO)
+    n.speak(mention, now=200.0)
+    assert stub.context["covering"] is False
+
+
+def test_load_persona_defaults_defer_off(tmp_path):
+    f = tmp_path / "minimal.yaml"
+    f.write_text("name: Ghost\nmqtt_id: ghost\n", encoding="utf-8")
+    assert not narrator.load_persona(str(f))["defer_events_to"]
+
+
 # --- human_duration ----------------------------------------------------------
 
 @pytest.mark.parametrize("seconds,expected", [
