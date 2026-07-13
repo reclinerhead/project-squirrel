@@ -131,6 +131,10 @@ Topics:
 
 - `driveway/events` — daemon → world, one JSON event each
 - `narration/lines` — narrator → world
+- `narration/journal` — the field journal window (issue #58): the last 50
+  spoken lines, **retained** and republished whole on every new line, so a
+  fresh dashboard tab gets the journal back on reload. Backed by
+  `narration_journal.json` in the repo dir (see The narrator below)
 - `narrators/<id>/status` — retained presence, `online` / `offline`
 - `weather/current`, `weather/forecast`, `weather/history` — Willard's
   reports, all **retained**: weather is state, not a moment, so a late
@@ -194,6 +198,13 @@ suspiciously Mad-Libs).
 `Restart=always` in the unit is load-bearing: `narrator.py` calls `connect()`,
 not `connect_async()`, so it exits if the broker isn't up yet. On a cold boot
 it can lose that race. Restarting after 5s turns a fatal race into a shrug.
+
+State: `narration_journal.json` in the repo dir (`WorkingDirectory` + the
+default relative path; `MERLE_NARRATION_JOURNAL` overrides) — the field
+journal window (issue #58): the last 50 spoken lines behind the dashboard's
+Field Journal, persisted so a restart doesn't blank the show's record and
+published retained to `narration/journal`. Safe to delete if it ever goes
+weird; the journal simply starts fresh.
 
 To run it by hand (stop the service first):
 

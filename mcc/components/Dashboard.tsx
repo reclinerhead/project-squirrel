@@ -16,13 +16,17 @@ import {
   sendControl,
 } from "@/lib/daemon";
 import {
+  JournalEntry,
+  NARRATION_JOURNAL_TOPIC,
   NARRATION_TOPIC,
   NARRATOR_STATUS_WILDCARD,
   NarrationLine,
   busUrl,
+  parseJournal,
   parseLine,
   pickVoice,
   statusTopicId,
+  toJournalEntries,
 } from "@/lib/bus";
 import {
   DayCensus,
@@ -451,10 +455,8 @@ function speakLine(line: NarrationLine) {
   synth.speak(u);
 }
 
-// A journal entry with a stable client-side key: narration lines have no id on
-// the bus, and ts alone can collide when two lines land in the same second.
-type JournalEntry = NarrationLine & { key: number };
-
+// The entry cap, matching the narrator's JOURNAL_LINES window. JournalEntry
+// (content-derived stable keys) lives in lib/bus.ts with the parsers.
 const JOURNAL_LIMIT = 50;
 
 function FieldJournal() {
@@ -467,7 +469,6 @@ function FieldJournal() {
   // mirrors the state so the (stable) mqtt message handler reads it live.
   const [speaking, setSpeaking] = useState(false);
   const speakingRef = useRef(false);
-  const nextKey = useRef(0);
 
   useEffect(() => {
     // Straight to the broker over WebSockets -- the /daemon proxy can't
@@ -482,7 +483,17 @@ function FieldJournal() {
       console.debug("[bus] connect", url);
       setBusUp(true);
       setBusError(null);
-      client.subscribe([NARRATION_TOPIC, NARRATOR_STATUS_WILDCARD]);
+      // The retained journal window (issue #58) is the entries' source of
+      // truth -- the broker replays it the moment we subscribe, so a fresh
+      // tab gets the journal back the way the Weather Post gets its state.
+      // The live lines topic stays subscribed for TTS: speaking is a MOMENT
+      // (never re-speak a replayed window), exactly the state-vs-moment split
+      // the bus already draws.
+      client.subscribe([
+        NARRATION_JOURNAL_TOPIC,
+        NARRATION_TOPIC,
+        NARRATOR_STATUS_WILDCARD,
+      ]);
     });
     client.on("close", () => {
       console.debug("[bus] close");
@@ -506,11 +517,23 @@ function FieldJournal() {
         setPresence((p) => ({ ...p, [narratorId]: payload.toString() }));
         return;
       }
+      if (topic === NARRATION_JOURNAL_TOPIC) {
+        const lines = parseJournal(payload.toString());
+        if (lines) setEntries(toJournalEntries(lines));
+        return;
+      }
       const line = parseLine(payload.toString());
       if (!line) return;
-      setEntries((prev) =>
-        [{ ...line, key: nextKey.current++ }, ...prev].slice(0, JOURNAL_LIMIT),
-      );
+      // A live line lands here milliseconds before the narrator's window
+      // republish replaces the whole list; prepending it keeps the panel
+      // instant, and it also keeps a pre-#58 narrator (journal topic never
+      // published) working through a deploy. Content-derived keys make the
+      // two paths agree, so the replace is a no-op re-render, not a remount.
+      setEntries((prev) => {
+        const [entry] = toJournalEntries([line]);
+        if (prev.some((e) => e.key === entry.key)) return prev;
+        return [entry, ...prev].slice(0, JOURNAL_LIMIT);
+      });
       if (speakingRef.current) speakLine(line);
     });
     return () => {

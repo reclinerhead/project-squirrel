@@ -408,3 +408,47 @@ def test_load_persona_requires_identity(tmp_path):
     f.write_text("tts_voice: David\n", encoding="utf-8")
     with pytest.raises(ValueError, match="name"):
         narrator.load_persona(str(f))
+
+
+# --- the field journal window (issue #58) -------------------------------------
+
+def journal_line(i):
+    return {"ts": f"2026-07-06T10:00:{i:02d}", "narrator": "Test", "voice": "",
+            "text": f"line {i}", "event_kind": "arrival"}
+
+
+def test_roll_journal_appends_in_order():
+    window = narrator.roll_journal([journal_line(0)], journal_line(1))
+    assert [l["text"] for l in window] == ["line 0", "line 1"]
+
+
+def test_roll_journal_caps_at_the_limit_dropping_oldest():
+    window = []
+    for i in range(narrator.JOURNAL_LINES + 3):
+        window = narrator.roll_journal(window, journal_line(i))
+    assert len(window) == narrator.JOURNAL_LINES
+    assert window[0]["text"] == "line 3"      # the three oldest fell off
+    assert window[-1]["text"] == f"line {narrator.JOURNAL_LINES + 2}"
+
+
+def test_journal_round_trips_through_the_file(tmp_path):
+    path = str(tmp_path / "journal.json")
+    window = [journal_line(i) for i in range(3)]
+    narrator.save_journal(path, window)
+    assert narrator.load_journal(path) == window
+
+
+def test_missing_journal_file_starts_clean(tmp_path):
+    assert narrator.load_journal(str(tmp_path / "nope.json")) == []
+
+
+def test_corrupt_journal_file_starts_clean(tmp_path):
+    path = tmp_path / "journal.json"
+    path.write_text("{not json", encoding="utf-8")
+    assert narrator.load_journal(str(path)) == []
+
+
+def test_non_list_journal_file_starts_clean(tmp_path):
+    path = tmp_path / "journal.json"
+    path.write_text('{"lines": []}', encoding="utf-8")   # the BUS shape, not the file shape
+    assert narrator.load_journal(str(path)) == []
