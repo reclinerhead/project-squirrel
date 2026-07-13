@@ -23,7 +23,8 @@ outage brings her back without anyone going downstairs.
 | Pi-hole   | `pihole-FTL`      | 53, 67 (DHCP), 80, 443         | Household DNS + DHCP                                           |
 
 Not here: the perception daemon and camera (those live on bluejay,
-`192.168.1.79` — they need the GPU).
+`192.168.1.79` — they need the GPU), and Jim, the second narrator (he lives
+on merle, `192.168.1.103` — see `Servers/Merle.md`).
 
 ---
 
@@ -130,12 +131,17 @@ If the message appears in the subscriber, the bus works across the LAN.
 Topics:
 
 - `driveway/events` — daemon → world, one JSON event each
-- `narration/lines` — narrator → world
-- `narration/journal` — the field journal window (issue #58): the last 50
-  spoken lines, **retained** and republished whole on every new line, so a
-  fresh dashboard tab gets the journal back on reload. Backed by
-  `narration_journal.json` in the repo dir (see The narrator below)
+- `narration/lines` — narrator → world (both of them: Marlin here, Jim on
+  merle). Jim also *subscribes* to it — a Marlin line naming him is his cue
+  (issue #80)
+- `narration/journal/<id>` — the field journal windows (issue #58,
+  per-narrator since #80): each narrator's last 50 spoken lines, **retained**
+  and republished whole on every new line, so a fresh dashboard tab gets the
+  journal back on reload (the dashboard subscribes `narration/journal/+` and
+  merges). Marlin's is backed by `narration_journal.json` in the repo dir
+  (see The narrator below); Jim's by the same file on merle
 - `narrators/<id>/status` — retained presence, `online` / `offline`
+  (`marlin` here, `jim` from merle)
 - `weather/current`, `weather/forecast`, `weather/history` — Willard's
   reports, all **retained**: weather is state, not a moment, so a late
   joiner (fresh dashboard tab) gets the latest report straight from the
@@ -203,8 +209,8 @@ State: `narration_journal.json` in the repo dir (`WorkingDirectory` + the
 default relative path; `MERLE_NARRATION_JOURNAL` overrides) — the field
 journal window (issue #58): the last 50 spoken lines behind the dashboard's
 Field Journal, persisted so a restart doesn't blank the show's record and
-published retained to `narration/journal`. Safe to delete if it ever goes
-weird; the journal simply starts fresh.
+published retained to `narration/journal/marlin` (per-narrator since #80).
+Safe to delete if it ever goes weird; the journal simply starts fresh.
 
 To run it by hand (stop the service first):
 
@@ -400,5 +406,7 @@ OpenWeather API key, so treat the tarball accordingly.
   (`:8000`, LAN-bound so pearl's dashboard can reach it), camera,
   Ollama (`:11434`), MCC dev server. Needs `MERLE_MQTT=192.168.1.64:1883`
   in its environment.
-- merle `192.168.1.103` — Raspberry Pi 5, the rover.
+- merle `192.168.1.103` — Raspberry Pi 5: Jim, the second narrator
+  (`narrator-jim`, needs the bus here and Ollama on bluejay — see
+  `Servers/Merle.md`). The rover's future brain; the unit rides along.
 - pearl `192.168.1.64` — you are here.

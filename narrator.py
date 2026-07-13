@@ -21,6 +21,18 @@
 # during the cooldown into ONE scene_update summary. Dropped moments are fine:
 # SQLite has the record; the bus is live transport.
 #
+# Issue #80 made the show a two-hander: a second narrator process (Jim, on
+# merle) runs this same script with its own persona. A persona carrying the
+# opt-in `answers_to` knob additionally subscribes to narration/lines and
+# treats a colleague's line that names it (word-boundary, case-insensitive)
+# as a synthetic `colleague_mention` event -- which rides the Editor's
+# moments shelf like everything else, so mentions respect the narration rate
+# limit. Every colleague line heard (mention or not) also feeds a small
+# broadcast-context memory rendered into the LLM prompt, so the follow-up
+# riffs on what was actually said instead of repeating it. Loop safety: a
+# narrator ignores lines carrying its own mqtt_id, and a persona without
+# `answers_to` never subscribes at all -- byte-identical to the one-voice era.
+#
 #   python narrator.py --persona personas/marlin.yaml
 #
 # Bus contract (topics in bus.py):
@@ -28,8 +40,12 @@
 #   subscribes  weather/current           retained latest conditions -> prompt
 #                                         context (LLM tier only, never a
 #                                         speaking trigger)
-#   publishes   narration/lines           {ts, narrator, voice, text, event_kind}
-#   publishes   narration/journal         {lines: [...]} -- the field journal
+#   subscribes  narration/lines           ONLY when the persona sets answers_to
+#                                         (issue #80): colleague lines -> heard
+#                                         memory + mention triggers
+#   publishes   narration/lines           {ts, narrator, mqtt_id, voice, text,
+#                                         event_kind}
+#   publishes   narration/journal/<id>    {lines: [...]} -- the field journal
 #                                         window (issue #58): the last
 #                                         JOURNAL_LINES spoken lines, oldest
 #                                         first, RETAINED and republished whole
@@ -37,6 +53,9 @@
 #                                         from the broker (the weather/history
 #                                         pattern). Persisted to a JSON file so
 #                                         a narrator restart doesn't blank it.
+#                                         Namespaced per narrator (issue #80)
+#                                         so two narrators can't clobber each
+#                                         other's retained window.
 #   presence    narrators/<id>/status     "online"/"offline", retained; "offline"
 #                                         is the MQTT Last Will, so a crash flips
 #                                         the dashboard lamp without any cleanup
@@ -66,6 +85,7 @@ import json
 import os
 import queue
 import random
+import re
 import time
 import urllib.request
 from collections import deque
@@ -81,6 +101,11 @@ PERSONA_DEFAULTS = {
     "cooldown_seconds": 20.0,
     "chattiness": 0.9,
     "interest_threshold": 0.4,
+    # Names this narrator answers to on narration/lines (issue #80). OPT-IN:
+    # absent/empty means the mention machinery is entirely off and the process
+    # behaves byte-identically to the one-voice era (the #26/#28 degradation
+    # convention). A tuple, not a list, so the shared default can't be mutated.
+    "answers_to": (),
 }
 
 # How inherently remark-worthy each event kind is (0..1). Scaled by the
@@ -95,6 +120,10 @@ INTEREST = {
     # any narrator an arrival would.
     "scene_update": 0.7,
     "clip_recorded": 0.2,
+    # A colleague naming you on the air is the marquee trigger (issue #80) --
+    # it must clear any sane persona's threshold. Rare by construction: only
+    # Marlin's occasional "trusty assistant Jim" flourishes mint one.
+    "colleague_mention": 0.95,
 }
 UNKNOWN_INTEREST = 0.3   # future event kinds: mildly interesting, never spam
 
@@ -126,6 +155,13 @@ TEMPLATES = {
         "Busy stretch out there. Where things stand now: {scene}.",
         "Taking stock after the commotion: {scene}. {station} rolls on.",
         "The dust settles, and the tally reads: {scene}.",
+    ),
+    # Tier-1 fallback for a mention (issue #80): only a mention-listening
+    # narrator ever receives this kind, so the acknowledgment can lean field-
+    # correspondent without stepping on any other persona.
+    "colleague_mention": (
+        "Right, {colleague}. On my way -- someone has to do the field work.",
+        "I heard you, {colleague}. Heading in for a closer look, as usual.",
     ),
 }
 FALLBACK_TEMPLATES = (
@@ -159,6 +195,39 @@ def worth_speaking(event, persona, now, last_spoke_at):
     if now - last_spoke_at < persona["cooldown_seconds"]:
         return False
     return score_event(event) * persona["chattiness"] >= persona["interest_threshold"]
+
+
+# --- Colleague mentions (issue #80) -------------------------------------------
+# A mention-listening narrator (persona knob `answers_to`) watches
+# narration/lines for a colleague naming it and turns the hit into a synthetic
+# colleague_mention event. The event then rides the Editor's moments shelf and
+# the normal pacing gate -- NEVER a direct reply channel; everything rides the
+# bus. Loop safety: lines carrying the narrator's own mqtt_id are ignored, and
+# a persona without the knob never subscribes at all, so with one listener
+# (Jim) and one non-listener (Marlin) there is no ping-pong path.
+
+def mentions_name(text, names):
+    """True when any of the names appears in text as a whole word,
+    case-insensitive -- a line about 'Jimmy' is not a mention of Jim."""
+    return any(re.search(rf"\b{re.escape(name)}\b", text or "", re.IGNORECASE)
+               for name in names)
+
+
+def colleague_mention(line, persona):
+    """The synthetic colleague_mention event for a narration/lines payload,
+    or None when it isn't one: knob absent/empty (feature off), the
+    narrator's own line (loop safety), or no name matched."""
+    names = persona.get("answers_to") or ()
+    if not names:
+        return None
+    if line.get("mqtt_id") == persona["mqtt_id"]:
+        return None
+    if not mentions_name(line.get("text"), names):
+        return None
+    return {"ts": line.get("ts"), "kind": "colleague_mention",
+            "details": {"narrator": line.get("narrator"),
+                        "mqtt_id": line.get("mqtt_id"),
+                        "text": line.get("text")}}
 
 
 def human_duration(seconds):
@@ -203,6 +272,8 @@ def template_fields(event, bible):
         "station": bible.get("station", "the driveway"),
         "seed_pile": bible.get("seed_pile", "the seed pile"),
         "big_chonk": (bible.get("legends") or {}).get("big_chonk", "Big Chonk"),
+        # colleague_mention events carry who did the mentioning (issue #80).
+        "colleague": details.get("narrator", "the studio"),
     }
 
 
@@ -303,6 +374,13 @@ def event_summary(event, bible):
                        "the pavement has gone quiet.")
     elif kind == "clip_recorded":
         summary = "A video clip of the recent activity was just saved to the archive."
+    elif kind == "colleague_mention":
+        # A colleague named this narrator on the air (issue #80). Dry facts +
+        # the cue to follow up; the persona provides all the flavor.
+        details = event.get("details") or {}
+        summary = (f"Your colleague {details.get('narrator', 'in the studio')} "
+                   f"just said on air: '{details.get('text', '')}' -- "
+                   "he mentioned you. Pick up the thread.")
     else:
         summary = f"Something just happened out there (event: {f['kind']})."
     species = (event.get("details") or {}).get("species")
@@ -360,6 +438,33 @@ def memory_block(memory, now):
     return MEMORY_HEADER + "\n" + "\n".join(lines)
 
 
+# Broadcast-context memory (issue #80): what the OTHER voices said recently.
+# Only a mention-listening narrator ever hears anything (it's the only one
+# subscribed to narration/lines), and only IT gets this block -- which is what
+# makes a mention follow-up context-aware instead of redundantly re-telling
+# what the colleague already told the audience. Kept smaller than the own-lines
+# memory: it's a cue sheet, not a transcript. Empty block = prompt
+# byte-identical to today (the memory/weather degradation convention).
+HEARD_LINES = 5
+
+HEARD_HEADER = (
+    "Recently on the broadcast, other voices (oldest first) -- your "
+    "colleagues' latest on-air lines. The audience already heard these: "
+    "don't repeat them, build on them or answer them when it suits the "
+    "moment:"
+)
+
+
+def heard_block(heard, now):
+    """The other-voices prompt section from (ts, narrator, text) entries, or
+    "" when nothing has been heard. Same age vocabulary as the memory block."""
+    if not heard:
+        return ""
+    lines = [f"- [{human_duration(now - ts)} ago] {who}: {text}"
+             for ts, who, text in heard]
+    return HEARD_HEADER + "\n" + "\n".join(lines)
+
+
 # Like the memory guidance, the weather usage nudge travels WITH the weather
 # paragraph, so a weatherless prompt reproduces the old shape exactly.
 # Desk-tested against gemma3:12b: the bare sentence appended to the event
@@ -369,15 +474,16 @@ WEATHER_HEADER = "Current conditions at the station:"
 WEATHER_GUIDANCE = "Work the weather into your commentary when it adds color."
 
 
-def build_user_prompt(event, bible, memory=(), now=None, weather=None):
-    """The full user prompt: optional memory block, the factual event summary,
-    an optional current-conditions paragraph, then the cue. With no memory and
-    no fresh weather this is byte-identical to the pre-#26/#28 prompt."""
+def build_user_prompt(event, bible, memory=(), now=None, weather=None, heard=()):
+    """The full user prompt: optional memory block, optional other-voices
+    block, the factual event summary, an optional current-conditions
+    paragraph, then the cue. With no memory, nothing heard, and no fresh
+    weather this is byte-identical to the pre-#26/#28 prompt."""
     now = time.time() if now is None else now
     parts = []
-    block = memory_block(memory, now)
-    if block:
-        parts.append(block)
+    for block in (memory_block(memory, now), heard_block(heard, now)):
+        if block:
+            parts.append(block)
     parts.append(event_summary(event, bible))
     clause = weather_sentence(weather, now)
     if clause:
@@ -433,22 +539,25 @@ class Ollama:
             return None
         return reply.get("response")
 
-    def narrate(self, persona, bible, event, memory=(), now=None, weather=None):
+    def narrate(self, persona, bible, event, memory=(), now=None, weather=None,
+                heard=()):
         return sanitize_line(self.complete(
             build_system_prompt(persona, bible),
-            build_user_prompt(event, bible, memory, now, weather)))
+            build_user_prompt(event, bible, memory, now, weather, heard)))
 
 
 def generate(persona, bible, event, rng, ollama=None,
-             memory=(), now=None, weather=None, last_template=None):
+             memory=(), now=None, weather=None, last_template=None, heard=()):
     """Tier 2 (LLM) when an Ollama client is provided and healthy; Tier-1
     templates otherwise. The one place that decides which prose tier speaks.
-    Memory and weather ride the LLM prompt only -- templates stay v1, except
-    that a caller-held last_template dict (kind -> index) buys the cheap
-    variety: re-roll once when the same template comes up twice running."""
+    Memory, weather, and heard lines ride the LLM prompt only -- templates
+    stay v1, except that a caller-held last_template dict (kind -> index) buys
+    the cheap variety: re-roll once when the same template comes up twice
+    running."""
     if ollama is not None:
         line = ollama.narrate(persona, bible, event,
-                              memory=memory, now=now, weather=weather)
+                              memory=memory, now=now, weather=weather,
+                              heard=heard)
         if line:
             return line
     kind = event.get("kind")
@@ -627,15 +736,27 @@ class Narrator:
         self.latest_weather = None           # last weather/current payload seen
         self.memory = deque(maxlen=MEMORY_LINES)   # (ts, event_kind, text) spoken
         self.last_template = {}              # kind -> last Tier-1 template index
+        # Broadcast-context memory (issue #80): (ts, narrator, text) heard from
+        # OTHER narrators. A plain tuple rebuilt on every hear() -- assignment
+        # is atomic, so the network thread can write while the pacing loop
+        # reads (the latest_weather pattern), no lock, no torn iteration.
+        self.heard = ()
 
     def wants(self, event, now):
         return worth_speaking(event, self.persona, now, self.last_spoke_at)
+
+    def hear(self, line, now):
+        """A colleague's narration/lines payload -> broadcast-context memory.
+        Callers filter out this narrator's own lines; everything a colleague
+        says is context, mention or not."""
+        entry = (now, line.get("narrator", "a colleague"), line.get("text", ""))
+        self.heard = (self.heard + (entry,))[-HEARD_LINES:]
 
     def speak(self, event, now):
         self.last_spoke_at = now
         text = generate(self.persona, self.bible, event, self.rng, self.ollama,
                         memory=self.memory, now=now, weather=self.latest_weather,
-                        last_template=self.last_template)
+                        last_template=self.last_template, heard=self.heard)
         line = {
             "ts": datetime.now().isoformat(timespec="seconds"),
             "narrator": self.persona["name"],
@@ -703,6 +824,11 @@ def main():
               f"from {journal_path}")
 
     status_topic = bus.narrator_status_topic(persona["mqtt_id"])
+    journal_topic = bus.narration_journal_topic(persona["mqtt_id"])
+    answers_to = persona.get("answers_to") or ()
+    if answers_to:
+        print(f"[{persona['name']}] answering to: {', '.join(answers_to)} "
+              f"(listening to {bus.NARRATION_TOPIC})")
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=persona["mqtt_id"])
     # Last Will: if this process dies without saying goodbye, the broker flips
     # the retained status to offline for us -- presence lives on the bus.
@@ -714,12 +840,17 @@ def main():
         # republishing on every (re)connect heals the retained copy after a
         # broker restart (Mosquitto only keeps retained state across restarts
         # when persistence is configured -- don't depend on it).
-        c.publish(bus.NARRATION_JOURNAL_TOPIC,
+        c.publish(journal_topic,
                   json.dumps({"lines": journal}), retain=True)
         c.subscribe(bus.EVENTS_TOPIC)
         # Retained, so the latest report arrives immediately on (re)connect.
         # Weather is prompt context only -- never a reason to speak.
         c.subscribe(bus.WEATHER_CURRENT_TOPIC)
+        # Mention listening is opt-in (issue #80): a persona without
+        # answers_to never subscribes, so its process is byte-identical to
+        # the one-voice era -- and there is no ping-pong path.
+        if answers_to:
+            c.subscribe(bus.NARRATION_TOPIC)
         print(f"[{persona['name']}] on the air, listening to {bus.EVENTS_TOPIC}")
 
     # on_message runs on paho's network thread and must stay instant (issue
@@ -738,6 +869,24 @@ def main():
         if msg.topic == bus.WEATHER_CURRENT_TOPIC:
             for narrator in producer.roster:
                 narrator.latest_weather = payload
+            return
+        if msg.topic == bus.NARRATION_TOPIC:
+            # A colleague's line (issue #80). Own lines are ignored outright
+            # (loop safety); everything else feeds the broadcast-context
+            # memory, and a line naming this narrator additionally mints a
+            # colleague_mention event for the Editor's moments shelf -- so a
+            # mention respects the narration rate limit like everything else.
+            # Both steps are instant (parse + tuple rebuild), safe on paho's
+            # network thread.
+            if payload.get("mqtt_id") == persona["mqtt_id"] \
+                    or not payload.get("text"):
+                return
+            now = time.time()
+            for narrator in producer.roster:
+                narrator.hear(payload, now)
+            mention = colleague_mention(payload, persona)
+            if mention:
+                events.put((now, mention))
             return
         events.put((time.time(), payload))
 
@@ -772,7 +921,7 @@ def main():
                 # two loses a broadcast, never the record.
                 journal = roll_journal(journal, line)
                 save_journal(journal_path, journal)
-                client.publish(bus.NARRATION_JOURNAL_TOPIC,
+                client.publish(journal_topic,
                                json.dumps({"lines": journal}), retain=True)
                 print(f"[{line['narrator']}] {line['text']}")
     except KeyboardInterrupt:
