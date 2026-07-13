@@ -44,6 +44,7 @@ import {
 } from "@/lib/history";
 import {
   CurrentWeather,
+  DayTick,
   FUTURE_S,
   PAST_S,
   REPORT_STALE_S,
@@ -2293,6 +2294,50 @@ function WxStrip({
   );
 }
 
+/** The station chart's calendar axis (#60): weekday labels centered over
+ * their day's slice between midnight gridlines, endpoints and the now stamp
+ * anchoring the window. Narrow partial days at the window's edges and
+ * anything shadowing the now stamp stay quiet -- the hover chip names every
+ * point anyway. Rendered twice since issue #65's follow-up: once above the
+ * chart stack and once below, so neither end of a tall chart leaves the
+ * reader guessing which day they're over. */
+function WxTimeAxis({
+  days,
+  className,
+}: {
+  days: DayTick[];
+  className: string;
+}) {
+  return (
+    <div className={`relative h-4 text-[10px] text-inkfaint ${className}`}>
+      <span className="absolute left-0">−24h</span>
+      {days.map((t, i) => {
+        const end = days[i + 1]?.frac ?? 1;
+        const center = (t.frac + end) / 2;
+        if (end - t.frac < 0.05) return null;
+        if (Math.abs(center - WXL_NOW_FRAC) < 0.04) return null;
+        if (center > 0.96) return null;
+        return (
+          <span
+            key={t.ts}
+            className="stamp absolute -translate-x-1/2"
+            style={{ left: `${center * 100}%` }}
+          >
+            {t.label}
+          </span>
+        );
+      })}
+      <span
+        className="stamp absolute -translate-x-1/2 text-inkdim"
+        style={{ left: `${WXL_NOW_FRAC * 100}%` }}
+      >
+        now
+      </span>
+      <span className="absolute right-0">+5d</span>
+    </div>
+  );
+}
+
 function CloseIcon() {
   return (
     <svg
@@ -2625,6 +2670,7 @@ function WeatherStationView({
                   solid, forecast dashed
                 </span>
               </div>
+              <WxTimeAxis days={days} className="mt-1.5" />
               <div
                 className="relative mt-1"
                 style={{ touchAction: "pan-y" }}
@@ -2954,37 +3000,7 @@ function WeatherStationView({
                   </div>
                 )}
               </div>
-              {/* the axis reads as a calendar (#60): each weekday label sits
-                  centered over its day's slice between midnight gridlines.
-                  Narrow partial days at the window's edges and anything
-                  shadowing the now stamp stay quiet -- the hover chip names
-                  every point anyway. */}
-              <div className="relative mt-0.5 h-4 text-[10px] text-inkfaint">
-                <span className="absolute left-0">−24h</span>
-                {days.map((t, i) => {
-                  const end = days[i + 1]?.frac ?? 1;
-                  const center = (t.frac + end) / 2;
-                  if (end - t.frac < 0.05) return null;
-                  if (Math.abs(center - WXL_NOW_FRAC) < 0.04) return null;
-                  if (center > 0.96) return null;
-                  return (
-                    <span
-                      key={t.ts}
-                      className="stamp absolute -translate-x-1/2"
-                      style={{ left: `${center * 100}%` }}
-                    >
-                      {t.label}
-                    </span>
-                  );
-                })}
-                <span
-                  className="stamp absolute -translate-x-1/2 text-inkdim"
-                  style={{ left: `${WXL_NOW_FRAC * 100}%` }}
-                >
-                  now
-                </span>
-                <span className="absolute right-0">+5d</span>
-              </div>
+              <WxTimeAxis days={days} className="mt-0.5" />
             </section>
           </main>
 
