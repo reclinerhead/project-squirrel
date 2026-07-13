@@ -30,8 +30,17 @@
 # limit. Every colleague line heard (mention or not) also feeds a small
 # broadcast-context memory rendered into the LLM prompt, so the follow-up
 # riffs on what was actually said instead of repeating it. Loop safety: a
-# narrator ignores lines carrying its own mqtt_id, and a persona without
-# `answers_to` never subscribes at all -- byte-identical to the one-voice era.
+# narrator ignores lines carrying its own mqtt_id, a follow-up line never
+# triggers a follow-up (never reply to a reply -- what bounds the chain now
+# that both narrators listen, issue #88), and a persona without `answers_to`
+# never subscribes at all -- byte-identical to the one-voice era.
+#
+# Issue #88 split the ROLES: Jim (the field man) makes the announcements;
+# Marlin carries `defer_events_to: [jim]` and stays quiet on raw events while
+# Jim's retained presence reads online, speaking instead through mention
+# follow-ups (studio instructions). When the field goes dark -- rover off,
+# merle down -- the deferring narrator covers the announcements automatically,
+# with a dry covering note in the prompt for the persona to rib.
 #
 #   python narrator.py --persona personas/marlin.yaml
 #
@@ -43,6 +52,9 @@
 #   subscribes  narration/lines           ONLY when the persona sets answers_to
 #                                         (issue #80): colleague lines -> heard
 #                                         memory + mention triggers
+#   subscribes  narrators/+/status        ONLY when the persona sets
+#                                         defer_events_to (issue #88):
+#                                         colleague presence -> defer vs cover
 #   publishes   narration/lines           {ts, narrator, mqtt_id, voice, text,
 #                                         event_kind}
 #   publishes   narration/journal/<id>    {lines: [...]} -- the field journal
@@ -106,6 +118,14 @@ PERSONA_DEFAULTS = {
     # behaves byte-identically to the one-voice era (the #26/#28 degradation
     # convention). A tuple, not a list, so the shared default can't be mutated.
     "answers_to": (),
+    # Colleague mqtt_ids this narrator defers the play-by-play to (issue #88).
+    # OPT-IN, same degradation rule: absent/empty = off. When set, the
+    # narrator watches those colleagues' retained presence and stays quiet on
+    # raw driveway events while any of them is on the air -- the field has the
+    # announcements. Mention follow-ups are never deferred (they're this
+    # narrator's own beat), and when every listed colleague is dark the
+    # announcements come back with a covering note in the prompt.
+    "defer_events_to": (),
 }
 
 # How inherently remark-worthy each event kind is (0..1). Scaled by the
@@ -216,11 +236,18 @@ def mentions_name(text, names):
 def colleague_mention(line, persona):
     """The synthetic colleague_mention event for a narration/lines payload,
     or None when it isn't one: knob absent/empty (feature off), the
-    narrator's own line (loop safety), or no name matched."""
+    narrator's own line (loop safety), a follow-up line (never reply to a
+    reply -- with two mention-listeners on the air since issue #88, this is
+    what bounds the chain at announcement -> one follow-up instead of
+    ping-ponging forever), or no name matched. A standing instruction still
+    reaches the colleague through the heard-lines memory; it just can't
+    trigger."""
     names = persona.get("answers_to") or ()
     if not names:
         return None
     if line.get("mqtt_id") == persona["mqtt_id"]:
+        return None
+    if line.get("event_kind") == "colleague_mention":
         return None
     if not mentions_name(line.get("text"), names):
         return None
@@ -228,6 +255,49 @@ def colleague_mention(line, persona):
             "details": {"narrator": line.get("narrator"),
                         "mqtt_id": line.get("mqtt_id"),
                         "text": line.get("text")}}
+
+
+# --- Announcer roles (issue #88) -----------------------------------------------
+# Two live narrators both cleared their gates on the same event and the show
+# double-announced. The fix is a role split, not coordination: the field man
+# (Jim) announces, and a narrator carrying `defer_events_to` (Marlin) stays
+# quiet on raw events while any listed colleague's retained presence reads
+# "online" -- presence is already on the bus with Last-Will semantics, so a
+# dead rover flips the studio back to covering the announcements within
+# seconds, no new machinery. Mention follow-ups are never deferred: reacting
+# to the field report IS the studio's beat.
+
+def defers_event(event, persona, colleagues):
+    """True when this narrator should leave the event to the field: the
+    defer knob is set, the event is a raw one (a mention follow-up is never
+    deferred), and at least one listed colleague is on the air."""
+    targets = persona.get("defer_events_to") or ()
+    if not targets or event.get("kind") == "colleague_mention":
+        return False
+    return any(colleagues.get(t) == "online" for t in targets)
+
+
+def covering_field(event, persona, colleagues):
+    """True when this narrator is announcing a raw event ONLY because every
+    colleague it defers to is off the air -- the cue for the prompt's
+    covering note (and the coffee-break ribbing the persona hangs on it)."""
+    targets = persona.get("defer_events_to") or ()
+    if not targets or event.get("kind") == "colleague_mention":
+        return False
+    return not any(colleagues.get(t) == "online" for t in targets)
+
+
+# Rides the prompt only while covering (issue #88): dry facts, no flavor --
+# the persona decides whether an absent field man means worry or a pointed
+# remark about coffee breaks. Absent = prompt byte-identical, as ever. Like
+# the weather paragraph (#26), the fact travels with a one-line usage nudge:
+# desk-tested, without it the model kept addressing the absent colleague as
+# if they were at their post.
+COVERING_NOTE = (
+    "Note: your colleague out in the field is away from their post right "
+    "now and cannot be reached, so you are covering the field watch from "
+    "the studio yourself. Do not hand anything off to them; acknowledge "
+    "their absence in your delivery.")
 
 
 def human_duration(seconds):
@@ -474,17 +544,21 @@ WEATHER_HEADER = "Current conditions at the station:"
 WEATHER_GUIDANCE = "Work the weather into your commentary when it adds color."
 
 
-def build_user_prompt(event, bible, memory=(), now=None, weather=None, heard=()):
+def build_user_prompt(event, bible, memory=(), now=None, weather=None, heard=(),
+                      covering=False):
     """The full user prompt: optional memory block, optional other-voices
-    block, the factual event summary, an optional current-conditions
-    paragraph, then the cue. With no memory, nothing heard, and no fresh
-    weather this is byte-identical to the pre-#26/#28 prompt."""
+    block, the factual event summary, an optional covering note (issue #88),
+    an optional current-conditions paragraph, then the cue. With no memory,
+    nothing heard, not covering, and no fresh weather this is byte-identical
+    to the pre-#26/#28 prompt."""
     now = time.time() if now is None else now
     parts = []
     for block in (memory_block(memory, now), heard_block(heard, now)):
         if block:
             parts.append(block)
     parts.append(event_summary(event, bible))
+    if covering:
+        parts.append(COVERING_NOTE)
     clause = weather_sentence(weather, now)
     if clause:
         parts.append(f"{WEATHER_HEADER} {clause} {WEATHER_GUIDANCE}")
@@ -540,14 +614,16 @@ class Ollama:
         return reply.get("response")
 
     def narrate(self, persona, bible, event, memory=(), now=None, weather=None,
-                heard=()):
+                heard=(), covering=False):
         return sanitize_line(self.complete(
             build_system_prompt(persona, bible),
-            build_user_prompt(event, bible, memory, now, weather, heard)))
+            build_user_prompt(event, bible, memory, now, weather, heard,
+                              covering)))
 
 
 def generate(persona, bible, event, rng, ollama=None,
-             memory=(), now=None, weather=None, last_template=None, heard=()):
+             memory=(), now=None, weather=None, last_template=None, heard=(),
+             covering=False):
     """Tier 2 (LLM) when an Ollama client is provided and healthy; Tier-1
     templates otherwise. The one place that decides which prose tier speaks.
     Memory, weather, and heard lines ride the LLM prompt only -- templates
@@ -557,7 +633,7 @@ def generate(persona, bible, event, rng, ollama=None,
     if ollama is not None:
         line = ollama.narrate(persona, bible, event,
                               memory=memory, now=now, weather=weather,
-                              heard=heard)
+                              heard=heard, covering=covering)
         if line:
             return line
     kind = event.get("kind")
@@ -741,8 +817,15 @@ class Narrator:
         # is atomic, so the network thread can write while the pacing loop
         # reads (the latest_weather pattern), no lock, no torn iteration.
         self.heard = ()
+        # Colleague presence (issue #88): mqtt_id -> latest retained status
+        # string, written from the network thread (per-key dict assignment is
+        # atomic, same contract as latest_weather). Only consulted when the
+        # persona carries defer_events_to.
+        self.colleagues = {}
 
     def wants(self, event, now):
+        if defers_event(event, self.persona, self.colleagues):
+            return False   # the field has it -- deferring beats all pacing math
         return worth_speaking(event, self.persona, now, self.last_spoke_at)
 
     def hear(self, line, now):
@@ -756,7 +839,9 @@ class Narrator:
         self.last_spoke_at = now
         text = generate(self.persona, self.bible, event, self.rng, self.ollama,
                         memory=self.memory, now=now, weather=self.latest_weather,
-                        last_template=self.last_template, heard=self.heard)
+                        last_template=self.last_template, heard=self.heard,
+                        covering=covering_field(event, self.persona,
+                                                self.colleagues))
         line = {
             "ts": datetime.now().isoformat(timespec="seconds"),
             "narrator": self.persona["name"],
@@ -829,6 +914,10 @@ def main():
     if answers_to:
         print(f"[{persona['name']}] answering to: {', '.join(answers_to)} "
               f"(listening to {bus.NARRATION_TOPIC})")
+    defer_to = persona.get("defer_events_to") or ()
+    if defer_to:
+        print(f"[{persona['name']}] deferring the play-by-play to: "
+              f"{', '.join(defer_to)} (watching {bus.NARRATOR_STATUS_WILDCARD})")
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=persona["mqtt_id"])
     # Last Will: if this process dies without saying goodbye, the broker flips
     # the retained status to offline for us -- presence lives on the bus.
@@ -847,10 +936,15 @@ def main():
         # Weather is prompt context only -- never a reason to speak.
         c.subscribe(bus.WEATHER_CURRENT_TOPIC)
         # Mention listening is opt-in (issue #80): a persona without
-        # answers_to never subscribes, so its process is byte-identical to
-        # the one-voice era -- and there is no ping-pong path.
+        # answers_to never subscribes. With two listeners on the air (issue
+        # #88) the no-ping-pong guarantee moved into colleague_mention():
+        # a follow-up line never triggers a follow-up.
         if answers_to:
             c.subscribe(bus.NARRATION_TOPIC)
+        # Deferring narrators watch colleague presence (issue #88). Retained,
+        # so the roster's lamps arrive the moment we subscribe.
+        if defer_to:
+            c.subscribe(bus.NARRATOR_STATUS_WILDCARD)
         print(f"[{persona['name']}] on the air, listening to {bus.EVENTS_TOPIC}")
 
     # on_message runs on paho's network thread and must stay instant (issue
@@ -862,6 +956,16 @@ def main():
     events = queue.Queue()
 
     def on_message(c, userdata, msg):
+        # Presence first (issue #88): status payloads are raw strings, not
+        # JSON (they predate the JSON topics), so they must not fall into the
+        # parse below. Our own retained echo lands here too -- stored under
+        # our own id, which no defer knob lists, so it's inert.
+        colleague = bus.narrator_status_id(msg.topic)
+        if colleague is not None:
+            status = msg.payload.decode("utf-8", "replace")
+            for narrator in producer.roster:
+                narrator.colleagues[colleague] = status
+            return
         try:
             payload = json.loads(msg.payload)
         except (json.JSONDecodeError, UnicodeDecodeError):

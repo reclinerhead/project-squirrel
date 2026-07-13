@@ -481,6 +481,9 @@ function FieldJournal() {
   // mirrors the state so the (stable) mqtt message handler reads it live.
   const [speaking, setSpeaking] = useState(false);
   const speakingRef = useRef(false);
+  // The broadcast view (issue #89): the station-view treatment for the
+  // narrators' back-and-forth -- same entries state, real reading room.
+  const [broadcastView, setBroadcastView] = useState(false);
   // Per-narrator journal windows (issue #80), keyed by mqtt_id from the topic.
   // A ref, not state: only the merged entries render, and the mqtt handler
   // must read the latest windows synchronously when any one of them arrives.
@@ -584,6 +587,7 @@ function FieldJournal() {
   const anyoneOn = narrators.some(([, status]) => status === "online");
 
   return (
+    <>
     <section className="panel flex flex-col rounded-sm border border-line bg-panel">
       <PanelLabel
         title="Field Journal"
@@ -596,40 +600,7 @@ function FieldJournal() {
                 no narrator hired
               </span>
             ) : (
-              // One dot + name per narrator (issue #84): the pulsing green
-              // lamp reads as "live" on its own, so a roster of two fits the
-              // header without the "· on/off the air" suffix crowding it. A
-              // non-standard retained status (a future "coffee break") still
-              // shows its text -- the name alone can't convey an arbitrary
-              // state.
-              narrators.map(([id, status]) => {
-                const online = status === "online";
-                const offline = status === "offline";
-                return (
-                  <span key={id} className="flex items-center gap-1.5 text-xs">
-                    <span
-                      className={`inline-block h-2 w-2 rounded-full ${
-                        online
-                          ? "lamp bg-led text-led"
-                          : offline
-                            ? "bg-inkfaint"
-                            : "breathe bg-turkey"
-                      }`}
-                    />
-                    <span
-                      className={`stamp ${
-                        online
-                          ? "text-led"
-                          : offline
-                            ? "text-inkfaint"
-                            : "text-turkey"
-                      }`}
-                    >
-                      {online || offline ? id : `${id} · ${status}`}
-                    </span>
-                  </span>
-                );
-              })
+              <PresenceChips narrators={narrators} />
             )}
             <button
               type="button"
@@ -644,6 +615,14 @@ function FieldJournal() {
               }`}
             >
               <SpeakerIcon muted={!speaking} />
+            </button>
+            <button
+              type="button"
+              onClick={() => setBroadcastView(true)}
+              aria-label="Open the broadcast view"
+              className="text-inkfaint transition-colors hover:text-squirrel"
+            >
+              <ExpandIcon />
             </button>
           </span>
         }
@@ -706,6 +685,227 @@ function FieldJournal() {
         )}
       </div>
     </section>
+    {broadcastView && (
+      <FieldJournalView
+        entries={entries}
+        narrators={narrators}
+        busUp={busUp}
+        anyoneOn={anyoneOn}
+        speaking={speaking}
+        onToggleSpeaking={toggleSpeaking}
+        onClose={() => setBroadcastView(false)}
+      />
+    )}
+    </>
+  );
+}
+
+/** Per-narrator presence: a dot + the name (issue #84) -- the pulsing green
+ * lamp reads as "live" on its own, so a roster of two fits a masthead
+ * without "· on/off the air" suffixes crowding it. A non-standard retained
+ * status (a future "coffee break") still shows its text: the name alone
+ * can't convey an arbitrary state. Shared by the panel and the broadcast
+ * view (issue #89). */
+function PresenceChips({ narrators }: { narrators: [string, string][] }) {
+  return (
+    <>
+      {narrators.map(([id, status]) => {
+        const online = status === "online";
+        const offline = status === "offline";
+        return (
+          <span key={id} className="flex items-center gap-1.5 text-xs">
+            <span
+              className={`inline-block h-2 w-2 rounded-full ${
+                online
+                  ? "lamp bg-led text-led"
+                  : offline
+                    ? "bg-inkfaint"
+                    : "breathe bg-turkey"
+              }`}
+            />
+            <span
+              className={`stamp ${
+                online
+                  ? "text-led"
+                  : offline
+                    ? "text-inkfaint"
+                    : "text-turkey"
+              }`}
+            >
+              {online || offline ? id : `${id} · ${status}`}
+            </span>
+          </span>
+        );
+      })}
+    </>
+  );
+}
+
+/** The broadcast view (issue #89): the Field Journal writ large -- the
+ * station-view treatment for the narrators' back-and-forth. Live from the
+ * same entries state the panel holds (one bus client, no new
+ * subscriptions), but read like a conversation: oldest first, pinned to
+ * the newest line at the bottom, with mention follow-ups (event_kind
+ * "colleague_mention") indented under the report they answer -- threading
+ * is data-driven, no narrator hardcoding. More will land on this page
+ * later; for now it is the reading room. */
+function FieldJournalView({
+  entries,
+  narrators,
+  busUp,
+  anyoneOn,
+  speaking,
+  onToggleSpeaking,
+  onClose,
+}: {
+  entries: JournalEntry[];
+  narrators: [string, string][];
+  busUp: boolean;
+  anyoneOn: boolean;
+  speaking: boolean;
+  onToggleSpeaking: () => void;
+  onClose: () => void;
+}) {
+  // The Live Watch CSS-overlay contract (the WeatherStationView mechanics):
+  // Escape closes, body scroll locks while the view is up.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = "";
+    };
+  }, [onClose]);
+
+  // Chat order: the panel stays newest-first, but a conversation reads top
+  // to bottom -- so the thread reverses and stays pinned to the newest line
+  // at the bottom. Scrolling up to reread unpins; returning to the bottom
+  // re-pins (checked per scroll, with slack for rounding).
+  const thread = [...entries].reverse();
+  const paneRef = useRef<HTMLDivElement>(null);
+  const pinnedRef = useRef(true);
+  useEffect(() => {
+    const pane = paneRef.current;
+    if (pane && pinnedRef.current) pane.scrollTop = pane.scrollHeight;
+  }, [entries]);
+  const onScroll = () => {
+    const pane = paneRef.current;
+    if (!pane) return;
+    pinnedRef.current =
+      pane.scrollHeight - pane.scrollTop - pane.clientHeight < 48;
+  };
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Field journal broadcast view"
+      className="fixed inset-0 z-50 flex flex-col bg-bg"
+    >
+      {/* A reading column, not an instrument wall: max-w-3xl is a book-ish
+          measure for the display face. The masthead stays put; the thread
+          scrolls inside. */}
+      <div className="mx-auto flex h-full w-full max-w-3xl flex-col px-4 sm:px-6">
+        <div className="flex items-center justify-between gap-3 border-b border-line pb-3 pt-5">
+          <h2
+            className="text-2xl text-ink"
+            style={{ fontFamily: "var(--font-display)" }}
+          >
+            Field Journal{" "}
+            <span className="stamp ml-2 align-middle text-[10px] text-inkfaint">
+              broadcast view
+            </span>
+          </h2>
+          <div className="flex items-center gap-3">
+            {!busUp ? (
+              <span className="stamp text-xs text-inkfaint">bus quiet</span>
+            ) : narrators.length === 0 ? (
+              <span className="stamp text-xs text-inkfaint">
+                no narrator hired
+              </span>
+            ) : (
+              <PresenceChips narrators={narrators} />
+            )}
+            <button
+              type="button"
+              onClick={onToggleSpeaking}
+              aria-pressed={speaking}
+              aria-label={speaking ? "Mute narration" : "Speak narration aloud"}
+              title={speaking ? "mute narration" : "speak narration aloud"}
+              className={`rounded-sm border p-1.5 transition-colors ${
+                speaking
+                  ? "border-squirrel text-squirrel"
+                  : "border-linebright text-inkdim hover:border-squirrel hover:text-squirrel"
+              }`}
+            >
+              <SpeakerIcon muted={!speaking} />
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              autoFocus
+              aria-label="Close the broadcast view"
+              className="rounded-sm border border-line p-1.5 text-inkdim transition-colors hover:border-linebright hover:text-squirrel"
+            >
+              <CloseIcon />
+            </button>
+          </div>
+        </div>
+
+        <div
+          ref={paneRef}
+          onScroll={onScroll}
+          className="scrollpane flex-1 overflow-y-auto py-6"
+        >
+          {thread.length > 0 ? (
+            <ol className="flex flex-col gap-6">
+              {thread.map((e, i) => {
+                const reply = e.event_kind === "colleague_mention";
+                const newest = i === thread.length - 1;
+                return (
+                  <li
+                    key={e.key}
+                    className={`journal-filed border-l-2 pl-4 ${
+                      newest ? "border-led" : "border-line"
+                    } ${reply ? "ml-8 sm:ml-16" : ""}`}
+                  >
+                    <div className="flex items-baseline gap-2 text-xs">
+                      {reply && (
+                        <span aria-hidden className="text-inkfaint">
+                          ↳
+                        </span>
+                      )}
+                      <span className="stamp text-inkdim">{e.narrator}</span>
+                      <span className="text-inkfaint">{eventClock(e.ts)}</span>
+                      {reply && (
+                        <span className="stamp text-[10px] text-inkfaint">
+                          follow-up
+                        </span>
+                      )}
+                    </div>
+                    <p
+                      className="mt-1 text-lg leading-relaxed text-ink"
+                      style={{ fontFamily: "var(--font-display)" }}
+                    >
+                      {e.text}
+                    </p>
+                  </li>
+                );
+              })}
+            </ol>
+          ) : (
+            <p className="text-sm leading-relaxed text-inkfaint">
+              {!busUp
+                ? "the event bus isn't reachable — the broker lives on pearl"
+                : anyoneOn
+                  ? "nothing filed yet — the driveway is between stories"
+                  : "the bus is up but nobody's reporting"}
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 

@@ -161,14 +161,17 @@ Same script as Marlin (`narrator.py`), different persona
 (`personas/jim.yaml`), same shared world canon (`character_bible.yaml` —
 written for exactly this day). What makes Jim Jim:
 
-- **Quieter pacing knobs**: routine arrivals and departures remain Marlin's
-  beat; Jim clears his gate on the bigger moments (crowds) and whenever he's
-  mentioned.
+- **The announcer** (issue #88): Jim is the field man and the first voice on
+  any new development — arrivals, departures, crowds, and scene updates all
+  clear his announcer-level knobs. Marlin defers the raw play-by-play to him
+  while Jim's presence lamp is on, and covers it (with remarks about coffee
+  breaks) whenever merle is off — so a dead rover never silences the show.
 - **Mention triggers** (issue #80): the `answers_to: [Jim]` knob subscribes
   him to `narration/lines`; a Marlin line naming him becomes a
   `colleague_mention` event, and Jim follows up within about a minute —
   context-aware, riding the same Editor rate limit as everything else.
-  Never a direct reply channel; everything rides the bus.
+  Never a direct reply channel; everything rides the bus, and a follow-up
+  line never triggers a follow-up (the reply-to-a-reply guard, issue #88).
 - **His own journal window**: `narration/journal/jim`, retained, backed by
   `narration_journal.json` in the WorkingDirectory
   (`MERLE_NARRATION_JOURNAL` overrides). Safe to delete if it ever goes
