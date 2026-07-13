@@ -62,6 +62,18 @@ def test_state_shape_and_live_counts(client):
     assert body["running"] is True
 
 
+def test_state_carries_provenance_and_churn(client):
+    # Issue #74, Phase 0: /state answers "what is the daemon actually watching"
+    # (never a mystery again) and carries the tracker churn metrics -- honestly
+    # None in the trackerless synthetic world.
+    body = client.get("/state").json()
+    prov = body["provenance"]
+    assert prov["source"] == "synthetic"
+    assert prov["resolution"] == [1280, 720]
+    assert prov["model"] is None
+    assert body["churn"] is None
+
+
 def test_snapshot_returns_jpeg(client):
     r = client.get("/snapshot")
     assert r.status_code == 200

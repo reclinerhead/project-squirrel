@@ -251,6 +251,160 @@ def test_stitched_frames_accumulate_toward_tenure():
     assert tm.seen == {1: "squirrel"}                   # 2 + 1 frames = tenured
 
 
+# --- churn instrumentation (issue #74, Phase 0) --------------------------------
+# Measure before building: mint/birth/stitch/death counting, per-track
+# confidence stats, and the rolling metrics every Phase 2 change is graded
+# against. All camera-free; the daemon and replay_fixture.py just read these.
+
+def test_metrics_counts_mints_births_and_stitches():
+    tm = TrackMemory(census_after=1)
+    tm.ingest([det(1)])
+    tm.ingest([])
+    tm.ingest([det(7, box=(11, 10, 51, 50))])       # re-mint -> stitched
+    m = tm.metrics()
+    assert m["ids_minted"] == 2                     # ByteTrack minted two raw ids
+    assert m["births"] == 1                         # ...but one canonical animal
+    assert m["stitches"] == 1
+
+
+def test_duplicate_box_still_counts_as_a_mint():
+    # Dedupe drops the box before the bookkeeping, but ByteTrack DID mint the
+    # id -- and tracker churn is what the metric measures, so it counts.
+    tm = TrackMemory(census_after=1)
+    tm.ingest([det(1)])
+    tm.ingest([det(1, conf=0.6), det(88, conf=0.9, box=(11, 10, 51, 50))])
+    m = tm.metrics()
+    assert m["ids_minted"] == 2
+    assert m["births"] == 1
+
+
+def test_conf_stats_track_the_dips():
+    tm = TrackMemory()
+    tm.ingest([det(1, conf=0.3)])
+    tm.ingest([det(1, conf=0.8)])
+    live, _ = tm.ingest([det(1, conf=0.4)])
+    t = live[0][1]
+    assert t["conf_min"] == 0.3
+    assert t["conf_max"] == 0.8
+    assert abs(t["conf_sum"] / t["frames"] - 0.5) < 1e-9
+
+
+def test_death_records_lifetime_and_tenure():
+    tm = TrackMemory(coast_frames=1, prune_frames=2, census_after=2)
+    tm.ingest([det(9)])                             # one matched frame of junk
+    for _ in range(4):
+        tm.ingest([])
+    m = tm.metrics()
+    assert m["deaths_window"] == 1
+    assert m["never_confirmed_window"] == 1         # died below census tenure
+    assert m["median_lifetime_frames"] == 1
+
+
+def test_metrics_rates_and_fragmentation():
+    tm = TrackMemory(census_after=1)
+    for _ in range(60):                             # two steady animals, 4s at 15fps
+        tm.ingest([det(1), det(2, box=(100, 10, 140, 50))])
+    m = tm.metrics(fps=15.0)
+    assert m["ids_per_minute"] == 30.0              # 2 mints in 1/15 of a minute
+    assert m["mean_concurrency"] == 2.0
+    assert m["fragmentation"] == 1.0                # one id per animal: no churn
+    assert m["median_lifetime_frames"] is None      # nobody has died
+
+
+def test_fragmentation_is_none_on_an_empty_pavement():
+    tm = TrackMemory()
+    for _ in range(30):
+        tm.ingest([])
+    assert tm.metrics()["fragmentation"] is None    # never divide by ~zero
+
+
+def test_metrics_window_forgets_old_mints_and_deaths():
+    tm = TrackMemory(coast_frames=1, prune_frames=2, census_after=1,
+                     metrics_window=10)
+    tm.ingest([det(1)])                             # mint at frame 1...
+    for _ in range(15):                             # ...then die and age out
+        tm.ingest([])
+    m = tm.metrics()
+    assert m["ids_minted"] == 1                     # the all-time count survives
+    assert m["ids_minted_window"] == 0              # the window has moved on
+    assert m["deaths_window"] == 0
+
+
+def test_lifecycle_log_narrates_births_stitches_and_deaths():
+    lines = []
+    tm = TrackMemory(coast_frames=1, prune_frames=2, census_after=2,
+                     log=lines.append)
+    tm.ingest([det(1, conf=0.62)])
+    tm.ingest([])
+    tm.ingest([det(7, box=(11, 10, 51, 50))])       # stitched back onto #1
+    for _ in range(4):                              # prune it (2 matched frames = tenured)
+        tm.ingest([])
+    text = "\n".join(lines)
+    assert "born #1 squirrel conf=0.62" in text
+    assert "#7 stitched onto #1" in text
+    assert "died #1 squirrel after 2 matched frames (tenured)" in text
+
+
+def test_lifecycle_log_flags_never_confirmed_junk():
+    lines = []
+    tm = TrackMemory(coast_frames=1, prune_frames=2, census_after=5,
+                     log=lines.append)
+    tm.ingest([det(9)])
+    for _ in range(4):
+        tm.ingest([])
+    assert any("never confirmed" in line for line in lines)
+
+
+def test_silent_by_default():
+    # No log hook -> no output machinery in the way of live.py or the tests.
+    tm = TrackMemory()
+    assert tm.log is None
+
+
+# --- species-presence debounce (moved from the daemon, issue #74 Phase 0.5) ----
+# The exact logic the Worker runs, now pure and replayable offline. The
+# end-to-end paths (events reaching SQLite + the bus) stay covered in
+# test_daemon.py; these lock the state machine itself.
+
+def test_presence_announces_arrival_after_hold():
+    p = perception.SpeciesPresence(arrive_after=2.0, depart_after=12.0)
+    assert p.observe({"squirrel": 1}, now=0.0) == []
+    assert p.observe({"squirrel": 1}, now=1.0) == []
+    assert p.observe({"squirrel": 1}, now=2.5) == \
+        [("arrival", {"species": "squirrel", "count": 1})]
+    assert p.observe({"squirrel": 1}, now=3.0) == []   # announced once
+
+
+def test_presence_wobble_resets_the_clock():
+    p = perception.SpeciesPresence(arrive_after=2.0, depart_after=12.0)
+    p.observe({"squirrel": 1}, now=0.0)
+    p.observe({}, now=1.0)                             # dipped back before the hold
+    assert p.observe({"squirrel": 1}, now=3.0) == []   # clock restarted here
+    assert p.observe({"squirrel": 1}, now=5.5) == \
+        [("arrival", {"species": "squirrel", "count": 1})]
+
+
+def test_presence_departure_duration_only_when_last_one_leaves():
+    p = perception.SpeciesPresence(arrive_after=1.0, depart_after=2.0)
+    p.observe({"squirrel": 2}, now=0.0)
+    assert p.observe({"squirrel": 2}, now=1.5) == \
+        [("arrival", {"species": "squirrel", "count": 2})]
+    p.observe({"squirrel": 1}, now=10.0)
+    # One of two left: no duration (can't know which individual).
+    assert p.observe({"squirrel": 1}, now=12.5) == \
+        [("departure", {"species": "squirrel", "count": 1})]
+    p.observe({}, now=20.0)
+    events = p.observe({}, now=22.5)
+    assert events[0][0] == "departure"
+    assert events[0][1]["duration_s"] == 21.0          # since the arrival at 1.5
+
+
+def test_presence_defaults_match_the_daemon():
+    p = perception.SpeciesPresence()
+    assert p.arrive_after == perception.ARRIVE_AFTER_S == 2.0
+    assert p.depart_after == perception.DEPART_AFTER_S == 12.0
+
+
 def test_class_colors_are_stable_and_cover_names():
     colors = perception.class_colors({0: "chipmunk", 1: "squirrel", 2: "turkey"})
     assert set(colors) == {"chipmunk", "squirrel", "turkey"}

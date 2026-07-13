@@ -32,6 +32,32 @@ READ_TIMEOUT = 1.0         # seconds read() waits for a fresh frame before
                            # reporting "no signal" (the daemon shows its
                            # reconnecting veil while reads return None)
 
+# Force RTSP over TCP (UDP silently drops packets under load and smears
+# frames) and trim FFmpeg's own buffering: nobuffer skips the demuxer's
+# startup buffering, low_delay tells the decoder not to hold frames.
+# Must be in the environment BEFORE a capture opens -- FFmpeg reads it once at
+# open. A module constant so the fixture recorder opens the stream with the
+# exact same knobs as the daemon.
+RTSP_FFMPEG_OPTIONS = "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay"
+
+
+def rtsp_url():
+    """The camera URL from MERLE_RTSP_* -> (url, redacted_url). ONE
+    construction shared by the daemon source and the fixture recorder (issue
+    #74 Phase 0: what stream we're on must never be a mystery, so there is
+    exactly one place that decides it). subtype=0 is the Amcrest MAIN stream
+    -- the sub-stream (subtype=1) is low-res and would starve distant-animal
+    detection. The redacted twin is for logs and /state; the password never
+    leaves the process."""
+    user = os.environ.get("MERLE_RTSP_USER", "admin")
+    pw = os.environ.get("MERLE_RTSP_PASS")
+    if not pw:
+        raise RuntimeError("MERLE_RTSP_PASS is not set -- needed for the camera source.")
+    host = os.environ.get("MERLE_RTSP_HOST", "192.168.1.102")
+    path = "/cam/realmonitor?channel=1&subtype=0"
+    return (f"rtsp://{user}:{pw}@{host}:554{path}",
+            f"rtsp://{user}:***@{host}:554{path}")
+
 
 @dataclass
 class Detection:
@@ -49,10 +75,22 @@ class FrameSource:
     """Base interface. read() returns (frame_bgr, [Detection, ...]); the frame is
     None when the source has ended. Sources may block in read() to pace to their
     real frame rate (a camera does); the daemon also caps its own loop rate, so a
-    source that returns instantly (the synthetic one) won't spin the CPU."""
+    source that returns instantly (the synthetic one) won't spin the CPU.
+
+    provenance() answers "what is this source actually connected to" (issue
+    #74 Phase 0 -- stream, native resolution, imgsz, model, classes); the
+    daemon logs it once and serves it on /state so it is never a mystery.
+    metrics(fps) surfaces the tracker's churn numbers, or None for sources
+    with no tracker."""
 
     def read(self):
         raise NotImplementedError
+
+    def provenance(self):
+        return {"source": type(self).__name__}
+
+    def metrics(self, fps=15.0):
+        return None
 
     def close(self):
         pass
@@ -69,6 +107,14 @@ class SyntheticFrameSource(FrameSource):
         self.w = width
         self.h = height
         self.i = 0
+
+    def provenance(self):
+        # The full shape the RTSP source serves, with the camera-only fields
+        # honestly null -- the dashboard can render one schema for both worlds.
+        return {"source": "synthetic", "url": None,
+                "resolution": [self.w, self.h],
+                "imgsz": None, "quantize": None, "model": None,
+                "classes": ["squirrel", "chipmunk"]}
 
     def read(self):
         self.i += 1
@@ -177,36 +223,47 @@ class RTSPFrameSource(FrameSource):
     def __init__(self):
         from ultralytics import YOLO   # lazy: heavy, GPU-specific, camera-only path
 
-        user = os.environ.get("MERLE_RTSP_USER", "admin")
-        pw = os.environ.get("MERLE_RTSP_PASS")
-        if not pw:
-            raise RuntimeError("MERLE_RTSP_PASS is not set -- needed for the camera source.")
+        self.url, redacted = rtsp_url()
         self.host = os.environ.get("MERLE_RTSP_HOST", "192.168.1.102")
-        self.url = (f"rtsp://{user}:{pw}@{self.host}:554"
-                    "/cam/realmonitor?channel=1&subtype=0")
-        # Force RTSP over TCP (UDP silently drops packets under load and smears
-        # frames) and trim FFmpeg's own buffering: nobuffer skips the demuxer's
-        # startup buffering, low_delay tells the decoder not to hold frames.
-        # Must be set BEFORE the capture opens -- FFmpeg reads it once at open.
-        os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS",
-                              "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay")
+        os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", RTSP_FFMPEG_OPTIONS)
 
         # Model first, camera second: YOLO(...) takes seconds and the first
         # inference pays CUDA init on top. With the stream already open that
         # wait used to pile up as queued frames -- the daemon's permanent 6-7s
         # delay. The dummy predict (not track: the tracker must see only real
         # frames) forces the one-time warmup cost before any frame can queue.
-        self.model = YOLO(os.environ.get("MERLE_MODEL", "models/current.pt"))
+        model_path = os.environ.get("MERLE_MODEL", "models/current.pt")
+        self.model = YOLO(model_path)
         self.model.predict(np.zeros((360, 640, 3), np.uint8),
                            imgsz=perception.IMGSZ, quantize=perception.QUANTIZE,
                            verbose=False)
         self.names = self.model.names
-        self.tm = perception.TrackMemory()
+        # Track lifecycle logging (issue #74, Phase 0): on by default, cheap
+        # (a line per birth/stitch/death, not per frame); MERLE_TRACK_LOG=0
+        # silences it.
+        track_log = print if os.environ.get("MERLE_TRACK_LOG", "1") != "0" else None
+        self.tm = perception.TrackMemory(log=track_log)
+
+        # Runtime provenance (issue #74, Phase 0): exactly what this source is
+        # connected to and how it infers -- logged by the daemon and served on
+        # /state so the stream/imgsz question is never a mystery again.
+        # Resolution starts as the capture's claim and is overwritten by the
+        # first real frame (the one honest source; also tracks a mid-run
+        # camera settings change).
+        self._provenance = {
+            "source": "rtsp", "url": redacted, "resolution": None,
+            "imgsz": perception.IMGSZ, "quantize": perception.QUANTIZE,
+            "model": model_path,
+            "classes": [self.names[i] for i in sorted(self.names)],
+        }
 
         cap = self._open()
         if not cap.isOpened():
             raise RuntimeError(f"Could not open the RTSP stream at {self.host}. Check "
                                "the camera is reachable and MERLE_RTSP_* are correct.")
+        w, h = cap.get(cv2.CAP_PROP_FRAME_WIDTH), cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        if w and h:
+            self._provenance["resolution"] = [int(w), int(h)]
         self._reader = FreshestFrameReader(cap, self._open, label=self.host)
         self._reader.start()
         self._seq = 0
@@ -217,10 +274,19 @@ class RTSPFrameSource(FrameSource):
         # FreshestFrameReader draining the queue, not from a buffer setting.
         return cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
 
+    def provenance(self):
+        return dict(self._provenance)
+
+    def metrics(self, fps=15.0):
+        return self.tm.metrics(fps)
+
     def read(self):
         frame, self._seq = self._reader.next_frame(self._seq)
         if frame is None:
             return None, []
+        h, w = frame.shape[:2]
+        if self._provenance["resolution"] != [w, h]:
+            self._provenance["resolution"] = [w, h]
         results = self.model.track(frame, conf=perception.DETECT_FLOOR,
                                    imgsz=perception.IMGSZ,
                                    quantize=perception.QUANTIZE, persist=True,
