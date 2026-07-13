@@ -75,6 +75,7 @@ import {
   pressureTrend,
   seriesCeil,
   seriesTrend,
+  snowSeason,
   tempRange,
   timeTicks,
   trendSeries,
@@ -2451,6 +2452,14 @@ function WeatherStationView({
     1,
     0.5,
   );
+  // The snow strip goes seasonal (issue #69, owner's call): hidden April
+  // through October rather than sitting dead for seven months -- but a
+  // forecast actually carrying snow shows it in any month. The valve only
+  // ever ADDS the row; the gate never hides real data.
+  const showSnow =
+    now !== null &&
+    (snowSeason(now) ||
+      trend.coming.some((p) => (p.snow_3h_in ?? 0) > 0));
   const solarMax = seriesCeil(observed, (p) => p.solar_wm2, 200, 100);
   const uvMax = seriesCeil(observed, (p) => p.uv_index, 4, 2);
   const presRange = pressureRange(observed);
@@ -2901,12 +2910,14 @@ function WeatherStationView({
                             );
                           })}
                     </WxStrip>
-                    {/* snow, forecast-only (issue #65): the piezo cannot see
-                        snow, so the observed half is honestly blank forever
-                        -- but a Michigan winter deserves its own ledger, and
-                        the empty July strip reserves the space (house rule
-                        #1) rather than appearing with the first flurry.
-                        Snow-white ink, not the rain's LED green. */}
+                    {/* snow, forecast-only (issue #65) and seasonal (issue
+                        #69): the piezo cannot see snow, so the observed half
+                        is honestly blank forever, and April through October
+                        the whole row stands down -- unless the forecast
+                        actually carries snow, which overrides the calendar
+                        in any month. Snow-white ink, not the rain's LED
+                        green. */}
+                    {showSnow && (
                     <WxStrip
                       label="snow · forecast in per 3h"
                       scale={`${snowMax}`}
@@ -2944,6 +2955,7 @@ function WeatherStationView({
                             );
                           })}
                     </WxStrip>
+                    )}
                     <WxStrip
                       label="barometer · in"
                       scale={
