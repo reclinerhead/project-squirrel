@@ -13,6 +13,7 @@
 # pulled out of a model result -- so its tests run fast and camera-free.
 # =============================================================================
 
+import math
 import os
 import statistics
 from collections import Counter, deque
@@ -46,10 +47,14 @@ TRACKER_YAML = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # Coasting: ByteTrack keeps a lost track alive internally but only OUTPUTS tracks
 # matched THIS frame, so a single missed frame used to blink the box off. Keep
 # drawing a lost track (greyed) for COAST_FRAMES (~1s at 15fps); it stays in
-# memory as a stitch target until PRUNE_FRAMES (~30s -- longer than ByteTrack's
-# 12s track_buffer, because re-minted IDs by definition appear after it).
+# memory as a stitch/necromancer target until PRUNE_FRAMES (~60s). The prune
+# window was 450 (~30s -- "longer than ByteTrack's 12s track_buffer"); the
+# issue #74 gap analysis found stationary feeders re-appearing ON their own
+# grave (145px) 44.5s and 51.6s after vanishing -- past the old window, each
+# one a fresh census visitor. 900 covers the observed gaps with ~15% margin
+# at half the same-spot-false-merge exposure of a 90s window.
 COAST_FRAMES = 15
-PRUNE_FRAMES = 450
+PRUNE_FRAMES = 900
 
 # Identity stitching (issue #22): a stationary feeding squirrel flickers out of
 # detection long enough for ByteTrack to mint it a NEW id on re-acquisition --
@@ -58,11 +63,41 @@ PRUNE_FRAMES = 450
 # failure mode is an animal that ISN'T moving, so a brand-new id whose box sits
 # on a recently-lost track of the same species is that track come back: adopt
 # the old identity. Trade-off, accepted: a different animal taking the exact
-# same spot within the prune window merges with its predecessor -- rare at
-# ~30s, and the census error it replaces ran 5x the other way. NOTE all these
+# same spot within the prune window (~60s since issue #74) merges with its
+# predecessor -- rare, and the census error it replaces ran 5x the other way.
+# NOTE all these
 # frame-denominated windows assume the fixed 15fps camera; the rover era
 # (moving camera, ~60fps) is a different tuning regime.
 STITCH_IOU = 0.4
+
+# Fragment re-association -- the "necromancer" pass (issue #74, Phase 2.4).
+# The IoU stitch above only resurrects an animal that came back WHERE it
+# vanished; the crowd fixture showed that in a feeding scene under half of the
+# re-mints overlap their corpse (23 of 62) -- squirrels shuffle a body length
+# or two between the tracker losing them and re-acquiring them, and each leak
+# became a fresh census "visitor" (19 counted for ~5 real animals). So when no
+# stitch target exists, a brand-new id of species S born within reach of
+# where an S track was LOST (not matched this frame, not yet pruned) is that
+# track come back: same alias mechanics, same census identity; ByteTrack's
+# fresh id stays internal. The reach scales with the dead track's box (a near
+# animal is bigger AND moves more pixels per body length -- one constant
+# serves the whole yard). Accepted trade-off, same direction as the stitch's:
+# a different squirrel claiming a dead one's patch within the prune window
+# merges into its census identity -- the overcount it replaces ran ~4x the
+# other way on the fixture.
+#
+# The reach is TWO-TIER. Gap analysis on the crowd fixture found the single
+# biggest leak was FAST REPOSITIONS: a squirrel hops, ByteTrack fails the IoU
+# association mid-hop, and a new id births 2-12 frames later only 30-230px
+# away -- zero overlap, old track still coasting (5 of the 10 leaked births).
+# So a coasting corpse is raisable too, but only within ONE body length:
+# tight, because a track missed for under a second is still effectively on
+# screen and a real second animal beside it must not merge into it. A
+# vanished corpse (past the coast window) gets the full reach -- that animal
+# had time to wander. Matched-this-frame tracks are never raisable, same as
+# the stitch.
+NECRO_REACH = 2.0            # vanished corpse: body-lengths of wander allowed
+NECRO_REACH_COASTING = 1.0   # coasting corpse: the mid-hop re-mint only
 
 # The model is NMS-free (end-to-end head), so it can emit TWO boxes on one
 # animal. The labeling path dedupes these (label_utils.dedupe_boxes); the live
@@ -188,9 +223,11 @@ class TrackMemory:
         self.metrics_window = metrics_window
         self.total_minted = 0    # raw ByteTrack ids ever seen (tracker churn)
         self.total_births = 0    # canonical tracks created (post-stitch churn)
-        self.total_stitches = 0  # re-minted ids folded back onto a lost track
+        self.total_stitches = 0  # re-minted ids folded back by the IoU stitch
+        self.total_raised = 0    # ...and by the necromancer's distance gate
         self._known = set()      # every raw ByteTrack id ever seen
         self._minted = deque()   # frame_idx of each raw-id mint, window-pruned
+        self._births = deque()   # frame_idx of each canonical birth, window-pruned
         self._deaths = deque()   # (frame_idx, matched_frames, tenured), window-pruned
         self._live_counts = deque(maxlen=metrics_window)   # matched tracks per frame
 
@@ -204,10 +241,12 @@ class TrackMemory:
                 "conf_min": float(conf), "conf_max": float(conf), "conf_sum": 0.0,
             }
             self.total_births += 1
+            self._births.append(self.frame_idx)
             if self.log:
                 cx = (int(xyxy[0]) + int(xyxy[2])) // 2
                 cy = (int(xyxy[1]) + int(xyxy[3])) // 2
-                self.log(f"[track] born #{tid} {name} conf={conf:.2f} @({cx},{cy})")
+                self.log(f"[track] born #{tid} {name} conf={conf:.2f} "
+                         f"@({cx},{cy}) f={self.frame_idx}")
         t["xyxy"] = [int(v) for v in xyxy]
         t["conf"] = float(conf)
         t["conf_min"] = min(t["conf_min"], float(conf))
@@ -230,9 +269,11 @@ class TrackMemory:
         if self.log:
             mean = t["conf_sum"] / t["frames"]
             why = "tenured" if tenured else "never confirmed"
+            x1, y1, x2, y2 = t["xyxy"]
             self.log(f"[track] died #{tid} {voted(t)} after {t['frames']} matched "
                      f"frames ({why}), conf min/mean/max "
-                     f"{t['conf_min']:.2f}/{mean:.2f}/{t['conf_max']:.2f}")
+                     f"{t['conf_min']:.2f}/{mean:.2f}/{t['conf_max']:.2f}, "
+                     f"last seen f={t['last_frame']} @({(x1 + x2) // 2},{(y1 + y2) // 2})")
 
     def _stitch_target(self, name, xyxy):
         """The lost track a brand-new id should adopt, if any: the best-
@@ -246,6 +287,30 @@ class TrackMemory:
             overlap = iou(t["xyxy"], xyxy)
             if overlap >= best_iou:
                 best, best_iou = tid, overlap
+        return best
+
+    def _necro_target(self, name, xyxy):
+        """The lost track a brand-new id should resurrect, if any: the nearest
+        same-species track not matched this frame whose grave lies within
+        reach of the newcomer -- the full NECRO_REACH for a vanished corpse,
+        the tight NECRO_REACH_COASTING for one still coasting (see the
+        two-tier rationale above). Runs only after _stitch_target comes up
+        empty -- an overlapping corpse is the stronger claim -- and catches
+        the animal that MOVED between losing the tracker and being
+        re-acquired."""
+        cx = (xyxy[0] + xyxy[2]) / 2
+        cy = (xyxy[1] + xyxy[3]) / 2
+        best, best_dist = None, None
+        for tid, t in self.tracks.items():
+            age = self.frame_idx - t["last_frame"]
+            if age == 0 or voted(t) != name:
+                continue
+            bodies = NECRO_REACH if age > self.coast_frames else NECRO_REACH_COASTING
+            bx1, by1, bx2, by2 = t["xyxy"]
+            reach = bodies * max(bx2 - bx1, by2 - by1)
+            dist = math.hypot((bx1 + bx2) / 2 - cx, (by1 + by2) / 2 - cy)
+            if dist <= reach and (best is None or dist < best_dist):
+                best, best_dist = tid, dist
         return best
 
     def ingest(self, detections):
@@ -275,13 +340,24 @@ class TrackMemory:
                 fresh.append((raw_tid, name, conf, xyxy))
         for raw_tid, name, conf, xyxy in fresh:
             canon = self._stitch_target(name, xyxy)
+            raised = False
+            if canon is None:
+                canon = self._necro_target(name, xyxy)
+                raised = canon is not None
             if canon is not None:
                 # aliases map to CANONICAL ids, so chains flatten (B->A then
                 # C->A, never C->B->A) and one lookup always lands.
                 self.aliases[raw_tid] = canon
-                self.total_stitches += 1
-                if self.log:
-                    self.log(f"[track] #{raw_tid} stitched onto #{canon} ({name})")
+                if raised:
+                    self.total_raised += 1
+                    if self.log:
+                        gap = self.frame_idx - self.tracks[canon]["last_frame"]
+                        self.log(f"[track] #{raw_tid} raised onto #{canon} "
+                                 f"({name}, dead {gap}f)")
+                else:
+                    self.total_stitches += 1
+                    if self.log:
+                        self.log(f"[track] #{raw_tid} stitched onto #{canon} ({name})")
             self._absorb(canon if canon is not None else raw_tid, name, conf, xyxy)
 
         live, coasting = [], []
@@ -301,6 +377,8 @@ class TrackMemory:
         horizon = self.frame_idx - self.metrics_window
         while self._minted and self._minted[0] <= horizon:
             self._minted.popleft()
+        while self._births and self._births[0] <= horizon:
+            self._births.popleft()
         while self._deaths and self._deaths[0][0] <= horizon:
             self._deaths.popleft()
         return live, coasting
@@ -322,16 +400,25 @@ class TrackMemory:
             "ids_minted_window": minted_w,
             "ids_per_minute": round(minted_w / minutes, 2) if minutes else None,
             "births": self.total_births,
+            "births_window": len(self._births),
             "stitches": self.total_stitches,
+            "raised": self.total_raised,
             "deaths_window": len(self._deaths),
             "never_confirmed_window": sum(1 for *_, ten in self._deaths if not ten),
             "median_lifetime_frames": (statistics.median(lifetimes)
                                        if lifetimes else None),
             "mean_concurrency": round(concurrency, 2),
-            # Guarded against an empty pavement: with ~nobody on screen the
-            # ratio would divide by ~zero and read as infinite churn.
+            # Both fragmentations guarded against an empty pavement: with
+            # ~nobody on screen the ratio would divide by ~zero and read as
+            # infinite churn. `fragmentation` is RAW tracker churn (ByteTrack
+            # mints per concurrent animal -- what the tracker-tuning phases
+            # act on); `canonical_fragmentation` is what survives stitching +
+            # the necromancer (identities per concurrent animal -- the number
+            # the census actually experiences, and the issue #74 target).
             "fragmentation": (round(minted_w / concurrency, 1)
                               if concurrency >= 0.05 else None),
+            "canonical_fragmentation": (round(len(self._births) / concurrency, 1)
+                                        if concurrency >= 0.05 else None),
             "window_minutes": round(minutes, 1),
         }
 
