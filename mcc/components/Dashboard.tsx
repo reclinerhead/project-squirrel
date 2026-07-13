@@ -1679,22 +1679,30 @@ function WeatherPost() {
         {/* Current conditions -- a fixed-height block whether or not a report
             is in, so the panel never shifts as data arrives (house rule #1).
             The right column grew with the station (issue #51): five fixed
-            rows, each rendered with em-dash placeholders before data. */}
-        <div className="flex min-h-[92px] items-end justify-between gap-3">
+            rows, each rendered with em-dash placeholders before data.
+            Top-aligned (issue #54): items-end left a dead void between the
+            masthead and the temperature once the right column stretched the
+            block -- the headline belongs up under the masthead, sized to
+            fill the height the telemetry rows set. */}
+        <div className="flex min-h-[92px] items-start justify-between gap-3">
           <div>
-            <div className="flex items-baseline gap-2">
+            <div className="flex items-baseline gap-2.5">
               <span
-                className={`text-4xl font-bold tabular-nums ${reporting ? "text-ink" : "text-inkfaint"}`}
+                className={`text-5xl font-bold tabular-nums ${reporting ? "text-ink" : "text-inkfaint"}`}
               >
                 {round(current?.temp_f ?? null)}°
               </span>
-              <span className="text-xs text-inkfaint">
+              <span className="text-base text-inkdim">
                 feels {round(current?.feels_like_f ?? null)}°
               </span>
             </div>
-            {/* Conditions ride with the temperature. min-h reserves the line
-                before the first report, so nothing shifts when it lands. */}
-            <div className="min-h-[18px] text-xs text-inkdim">
+            {/* Conditions ride with the temperature -- the sky gets headline
+                billing next to the number (issue #54), not caption type.
+                min-h reserves the line before the first report, so nothing
+                shifts when it lands. */}
+            <div
+              className={`mt-0.5 min-h-[24px] text-base ${reporting ? "text-ink" : "text-inkfaint"}`}
+            >
               {current?.description ?? ""}
             </div>
           </div>
