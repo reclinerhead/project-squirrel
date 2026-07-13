@@ -452,3 +452,165 @@ def test_non_list_journal_file_starts_clean(tmp_path):
     path = tmp_path / "journal.json"
     path.write_text('{"lines": []}', encoding="utf-8")   # the BUS shape, not the file shape
     assert narrator.load_journal(str(path)) == []
+
+
+# --- the editor's desk (issue #74) ---------------------------------------------
+# Hysteresis + rate limit + burst collapse between the bus and the talent. All
+# pure logic with an injected clock; the queue/tick plumbing in main() is I/O
+# and desk-tested per policy.
+
+def presence(kind, species, count, **details):
+    return {"ts": "2026-07-13T10:00:00", "kind": kind,
+            "details": {"species": species, "count": count, **details}}
+
+
+def desk():
+    return narrator.Editor(stable_s=20.0, min_interval_s=30.0)
+
+
+def test_editor_holds_a_change_until_it_persists():
+    e = desk()
+    e.ingest(presence("arrival", "squirrel", 1), now=0.0)
+    assert e.poll(10.0) is None                    # not stable yet -> silence
+    story = e.poll(21.0)
+    assert story["kind"] == "arrival"              # the real event, verbatim
+    assert story["details"]["count"] == 1
+
+
+def test_editor_cancels_the_churn_signature():
+    # Departure immediately undone by an arrival of the same species is the
+    # id-churn signature: the same animal re-minted under a new track id.
+    # The explicit outcome is SILENCE -- cancelled, not merely delayed.
+    e = desk()
+    e.ingest(presence("arrival", "squirrel", 1), now=0.0)
+    assert e.poll(25.0)["kind"] == "arrival"       # presence established
+    e.ingest(presence("departure", "squirrel", 0), now=60.0)
+    e.ingest(presence("arrival", "squirrel", 1), now=64.0)
+    assert e.poll(120.0) is None
+    assert e.poll(300.0) is None
+
+
+def test_editor_hard_caps_the_narration_rate():
+    e = desk()
+    e.ingest(presence("arrival", "squirrel", 1), now=0.0)
+    assert e.poll(20.0) is not None                # slot spent at t=20
+    e.ingest(presence("arrival", "turkey", 1), now=21.0)
+    assert e.poll(45.0) is None                    # ripe at t=41, but capped
+    assert e.poll(51.0)["details"]["species"] == "turkey"
+
+
+def test_editor_burst_collapses_to_one_scene_update():
+    # Two changes stabilize inside one slot -> ONE summary event, not two calls.
+    e = desk()
+    e.ingest(presence("arrival", "squirrel", 2), now=0.0)
+    e.ingest(presence("arrival", "turkey", 1), now=1.0)
+    story = e.poll(30.0)
+    assert story["kind"] == "scene_update"
+    assert story["details"]["counts"] == {"squirrel": 2, "turkey": 1}
+    assert e.poll(61.0) is None                    # nothing left unsaid
+
+
+def test_scene_update_snapshots_the_whole_scene():
+    # Species that didn't change still appear -- the summary is where the
+    # scene ended up, not a diff.
+    e = desk()
+    e.ingest(presence("arrival", "squirrel", 3), now=0.0)
+    assert e.poll(25.0)["kind"] == "arrival"
+    e.ingest(presence("arrival", "turkey", 1), now=60.0)
+    e.ingest(presence("arrival", "squirrel", 4), now=61.0)
+    story = e.poll(90.0)
+    assert story["kind"] == "scene_update"
+    assert story["details"]["counts"] == {"squirrel": 4, "turkey": 1}
+
+
+def test_editor_drifting_change_keeps_the_original_clock():
+    # 0 -> 1 -> 2 without ever settling back: the count has differed from
+    # stable the whole time, so the clock runs from the FIRST divergence.
+    e = desk()
+    e.ingest(presence("arrival", "squirrel", 1), now=0.0)
+    e.ingest(presence("arrival", "squirrel", 2), now=10.0)
+    story = e.poll(21.0)
+    assert story["details"]["count"] == 2
+
+
+def test_editor_passes_a_lone_moment_straight_through():
+    # Non-presence moments are already daemon-debounced; no hysteresis hold.
+    e = desk()
+    e.ingest(CROWD, now=0.0)
+    assert e.poll(1.0) is CROWD
+
+
+def test_editor_same_kind_moment_burst_keeps_the_latest():
+    e = desk()
+    e.ingest({"kind": "crowd_snapshot", "details": {"total": 5}}, now=0.0)
+    e.ingest({"kind": "crowd_snapshot", "details": {"total": 6}}, now=1.0)
+    assert e.poll(2.0)["details"]["total"] == 6
+
+
+def test_editor_collapses_a_moment_plus_a_change():
+    e = desk()
+    e.ingest(presence("arrival", "squirrel", 5), now=0.0)
+    e.ingest(CROWD, now=1.0)
+    story = e.poll(30.0)
+    assert story["kind"] == "scene_update"
+    assert story["details"]["counts"] == {"squirrel": 5}
+
+
+def test_editor_empty_scene_reads_quiet():
+    e = desk()
+    e.ingest(presence("arrival", "squirrel", 1), now=0.0)
+    e.ingest(presence("arrival", "turkey", 1), now=1.0)
+    assert e.poll(25.0)["kind"] == "scene_update"
+    e.ingest(presence("departure", "squirrel", 0, duration_s=100.0), now=60.0)
+    e.ingest(presence("departure", "turkey", 0, duration_s=90.0), now=61.0)
+    story = e.poll(95.0)
+    assert story["kind"] == "scene_update"
+    assert story["details"]["counts"] == {}
+    assert "quiet" in narrator.event_summary(story, BIBLE)
+
+
+def test_editor_treats_a_countless_presence_event_as_a_moment():
+    # A malformed arrival (no count) can't drive hysteresis -- pass it through
+    # rather than holding it hostage or crashing.
+    e = desk()
+    odd = {"kind": "arrival", "details": {"species": "squirrel"}}
+    e.ingest(odd, now=0.0)
+    assert e.poll(1.0) is odd
+
+
+@pytest.mark.parametrize("counts,phrase", [
+    ({}, "a quiet stretch of pavement"),
+    ({"squirrel": 0}, "a quiet stretch of pavement"),
+    ({"squirrel": 1}, "1 squirrel"),
+    ({"squirrel": 4}, "4 squirrels"),
+    ({"turkey": 1, "squirrel": 4}, "4 squirrels and 1 turkey"),
+    ({"turkey": 3, "chipmunk": 1, "squirrel": 2}, "1 chipmunk, 2 squirrels and 3 turkeys"),
+])
+def test_scene_phrase(counts, phrase):
+    assert narrator.scene_phrase(counts) == phrase
+
+
+def test_scene_update_interests_the_narrator():
+    # The burst summary stands in for arrivals; it must clear the same gate.
+    story = {"kind": "scene_update", "details": {"counts": {"squirrel": 4}}}
+    assert narrator.worth_speaking(story, PERSONA, now=100.0, last_spoke_at=0.0)
+
+
+def test_scene_update_summary_names_the_tally():
+    story = {"kind": "scene_update",
+             "details": {"counts": {"squirrel": 4, "turkey": 1}}}
+    assert "4 squirrels and 1 turkey" in narrator.event_summary(story, BIBLE)
+
+
+def test_scene_update_template_lines_carry_the_scene():
+    story = {"kind": "scene_update", "details": {"counts": {"squirrel": 4}}}
+    rng = random.Random(0)
+    for _ in range(10):
+        assert "4 squirrels" in narrator.generate(PERSONA, BIBLE, story, rng)
+
+
+def test_env_float_default_and_override(monkeypatch):
+    monkeypatch.delenv("MERLE_NARRATE_STABLE_S", raising=False)
+    assert narrator.env_float("MERLE_NARRATE_STABLE_S", 20.0) == 20.0
+    monkeypatch.setenv("MERLE_NARRATE_STABLE_S", "45")
+    assert narrator.env_float("MERLE_NARRATE_STABLE_S", 20.0) == 45.0
