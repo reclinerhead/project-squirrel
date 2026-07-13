@@ -29,6 +29,7 @@ import {
   pickVoice,
   statusTopicId,
   toJournalEntries,
+  voiceColor,
 } from "@/lib/bus";
 import {
   DayCensus,
@@ -635,25 +636,38 @@ function FieldJournal() {
       <div className="relative min-h-72 flex-1">
         {entries.length > 0 ? (
           <ul className="scrollpane absolute inset-0 flex flex-col gap-3 overflow-y-auto px-4 pb-4">
-            {entries.map((e, i) => (
-              <li
-                key={e.key}
-                className={`journal-filed border-l-2 pl-3 ${
-                  i === 0 ? "border-led" : "border-line"
-                }`}
-              >
-                <div className="flex gap-2 text-[11px]">
-                  <span className="text-inkfaint">{eventClock(e.ts)}</span>
-                  <span className="stamp text-inkdim">{e.narrator}</span>
-                </div>
-                <p
-                  className="mt-0.5 text-[15px] leading-snug text-ink"
-                  style={{ fontFamily: "var(--font-display)" }}
+            {entries.map((e, i) => {
+              // Voice colors (issue #89 follow-up): the rail and name stamp
+              // wear the narrator's stable accent -- hue carries identity,
+              // intensity carries recency (newest at full strength, the rest
+              // dimmed). Body text stays ink.
+              const voice = voiceColor(e.narrator);
+              return (
+                <li
+                  key={e.key}
+                  className="journal-filed border-l-2 pl-3"
+                  style={{
+                    borderLeftColor:
+                      i === 0
+                        ? voice
+                        : `color-mix(in srgb, ${voice} 45%, transparent)`,
+                  }}
                 >
-                  {e.text}
-                </p>
-              </li>
-            ))}
+                  <div className="flex gap-2 text-[11px]">
+                    <span className="text-inkfaint">{eventClock(e.ts)}</span>
+                    <span className="stamp" style={{ color: voice }}>
+                      {e.narrator}
+                    </span>
+                  </div>
+                  <p
+                    className="mt-0.5 text-[15px] leading-snug text-ink"
+                    style={{ fontFamily: "var(--font-display)" }}
+                  >
+                    {e.text}
+                  </p>
+                </li>
+              );
+            })}
           </ul>
         ) : (
           <p className="px-4 pb-4 pt-2 text-sm leading-relaxed text-inkfaint">
@@ -863,12 +877,20 @@ function FieldJournalView({
               {thread.map((e, i) => {
                 const reply = e.event_kind === "colleague_mention";
                 const newest = i === thread.length - 1;
+                // Same voice treatment as the panel: the narrator's accent
+                // on rail + name, full strength on the newest line.
+                const voice = voiceColor(e.narrator);
                 return (
                   <li
                     key={e.key}
                     className={`journal-filed border-l-2 pl-4 ${
-                      newest ? "border-led" : "border-line"
-                    } ${reply ? "ml-8 sm:ml-16" : ""}`}
+                      reply ? "ml-8 sm:ml-16" : ""
+                    }`}
+                    style={{
+                      borderLeftColor: newest
+                        ? voice
+                        : `color-mix(in srgb, ${voice} 45%, transparent)`,
+                    }}
                   >
                     <div className="flex items-baseline gap-2 text-xs">
                       {reply && (
@@ -876,7 +898,9 @@ function FieldJournalView({
                           ↳
                         </span>
                       )}
-                      <span className="stamp text-inkdim">{e.narrator}</span>
+                      <span className="stamp" style={{ color: voice }}>
+                        {e.narrator}
+                      </span>
                       <span className="text-inkfaint">{eventClock(e.ts)}</span>
                       {reply && (
                         <span className="stamp text-[10px] text-inkfaint">
