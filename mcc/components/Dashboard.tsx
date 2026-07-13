@@ -48,6 +48,7 @@ import {
   PAST_S,
   REPORT_STALE_S,
   STALE_AFTER_S,
+  STATION_FUTURE_S,
   WEATHER_CURRENT_TOPIC,
   WEATHER_FORECAST_TOPIC,
   WEATHER_HISTORY_TOPIC,
@@ -58,6 +59,7 @@ import {
   WeatherStatus,
   ageText,
   compass,
+  dayTicks,
   linePath,
   nearestPoint,
   nightBands,
@@ -2061,14 +2063,16 @@ function WeatherPost() {
 
 /* --- The Station View (issue #51): the Weather Post, writ large ------------- */
 
-// Large-chart geometry. Same fixed 24h-back/48h-forward window and the same
-// stretched-viewBox rules as the panel chart (strokes carry vector-effect);
-// only the canvas is bigger. The strips underneath share ts0/ts1 with the
-// main chart, so every timestamp lines up vertically across all four.
+// Large-chart geometry. Same stretched-viewBox rules as the panel chart
+// (strokes carry vector-effect), but its own window (issue #60): 24h back +
+// the full 5-day forecast forward, "now" at the 1/6 mark. Gridlines are the
+// viewer's local midnights (dayTicks), not 12h offsets -- at 144h, days are
+// the honest unit. The strips underneath share ts0/ts1 with the main chart,
+// so every timestamp lines up vertically across all four.
 const WXL_W = 960;
 const WXL_H = 240;
 const WXL_STRIP_H = 72;
-const WX_NOW_FRAC = PAST_S / (PAST_S + FUTURE_S);
+const WXL_NOW_FRAC = PAST_S / (PAST_S + STATION_FUTURE_S);
 // OpenWeather's forecast step: each point's rain_rate_inhr (issue #56) is the
 // average over the 3 hours ENDING at its ts ("volume for last 3 hours"), so
 // its ghost bar spans that window on the strip.
@@ -2139,10 +2143,14 @@ function SegMeter({
 function WxStrip({
   label,
   scale,
+  ticks,
   children,
 }: {
   label: string;
   scale: string;
+  /** gridline positions as window fractions -- the midnights of dayTicks,
+   *  computed once by the station view so all four charts agree */
+  ticks: number[];
   children: React.ReactNode;
 }) {
   return (
@@ -2153,12 +2161,12 @@ function WxStrip({
         className="h-full w-full"
         aria-hidden="true"
       >
-        {WX_TICKS.map((t) => (
+        {ticks.map((frac) => (
           <line
-            key={t.offsetS}
-            x1={t.frac * WXL_W}
+            key={frac}
+            x1={frac * WXL_W}
             y1={0}
-            x2={t.frac * WXL_W}
+            x2={frac * WXL_W}
             y2={WXL_STRIP_H}
             stroke="var(--line)"
             opacity="0.5"
@@ -2166,9 +2174,9 @@ function WxStrip({
           />
         ))}
         <line
-          x1={WX_NOW_FRAC * WXL_W}
+          x1={WXL_NOW_FRAC * WXL_W}
           y1={0}
-          x2={WX_NOW_FRAC * WXL_W}
+          x2={WXL_NOW_FRAC * WXL_W}
           y2={WXL_STRIP_H}
           stroke="var(--line-bright)"
           strokeDasharray="2 4"
@@ -2243,19 +2251,24 @@ function WeatherStationView({
   // chart stack's width; the crosshair spans main chart and strips alike.
   const [hoverFrac, setHoverFrac] = useState<number | null>(null);
 
+  // The wide window (issue #60): the panel's 24h trail, but the forecast
+  // side runs the full 5 days the API publishes instead of the panel's 48h.
   const trend =
     now !== null
-      ? trendSeries(history, forecast, now)
+      ? trendSeries(history, forecast, now, PAST_S, STATION_FUTURE_S)
       : { observed: [], coming: [] };
   const allPts = [...trend.observed, ...trend.coming];
   const range = tempRange(allPts);
   const windMax = windCeil(allPts);
   const hasChart = now !== null && range !== null && allPts.length > 1;
   const ts0 = (now ?? 0) - PAST_S;
-  const ts1 = (now ?? 0) + FUTURE_S;
+  const ts1 = (now ?? 0) + STATION_FUTURE_S;
   const nights = hasChart
     ? nightBands(current?.sunrise ?? null, current?.sunset ?? null, ts0, ts1)
     : [];
+  // Local midnights, the window's gridlines and axis labels alike (#60).
+  const days = now !== null ? dayTicks(now) : [];
+  const dayFracs = days.map((d) => d.frac);
 
   // The strips chart the observed trail -- the forecast carries none of
   // these series, and an honest chart leaves the future blank. The one
@@ -2314,7 +2327,9 @@ function WeatherStationView({
       aria-label="Weather station view"
       className="scrollpane fixed inset-0 z-50 overflow-y-auto bg-bg"
     >
-      <div className="mx-auto w-full max-w-[1200px] px-4 pb-10 pt-5 sm:px-6">
+      {/* max-w matches the main dashboard's wrapper (issue #60) -- the right
+          rail is fixed 320px, so the extra room all goes to the chart. */}
+      <div className="mx-auto w-full max-w-[1500px] px-4 pb-10 pt-5 sm:px-6">
         {/* Masthead: the same billing as the panel, room to breathe. */}
         <div className="flex items-center justify-between gap-3 border-b border-line pb-3">
           <h2
@@ -2500,9 +2515,9 @@ function WeatherStationView({
                           opacity="0.25"
                         />
                       ))}
-                      {WX_TICKS.map((t) => (
+                      {days.map((t) => (
                         <line
-                          key={t.offsetS}
+                          key={t.ts}
                           x1={t.frac * WXL_W}
                           y1={0}
                           x2={t.frac * WXL_W}
@@ -2512,9 +2527,9 @@ function WeatherStationView({
                         />
                       ))}
                       <line
-                        x1={WX_NOW_FRAC * WXL_W}
+                        x1={WXL_NOW_FRAC * WXL_W}
                         y1={0}
-                        x2={WX_NOW_FRAC * WXL_W}
+                        x2={WXL_NOW_FRAC * WXL_W}
                         y2={WXL_H}
                         stroke="var(--line-bright)"
                         strokeDasharray="2 4"
@@ -2599,7 +2614,14 @@ function WeatherStationView({
                     sun arcs, and they all line up under the temperature */}
                 {hasChart && (
                   <>
-                    <WxStrip label="rain · in/hr" scale={`${rainMax}`}>
+                    <WxStrip
+                      label="rain · in/hr"
+                      scale={`${rainMax}`}
+                      ticks={dayFracs}
+                    >
+                      {/* bar width follows the window: 5-min points sit 0.56
+                          viewBox units apart across 144h, so wider bars would
+                          stack opacity into false intensity */}
                       {observed
                         .filter(
                           (p) =>
@@ -2608,13 +2630,13 @@ function WeatherStationView({
                         .map((p) => (
                           <rect
                             key={p.ts}
-                            x={((p.ts - ts0) / (ts1 - ts0)) * WXL_W - 0.7}
+                            x={((p.ts - ts0) / (ts1 - ts0)) * WXL_W - 0.35}
                             y={
                               WXL_STRIP_H -
                               (Math.min(p.rain_rate_inhr!, rainMax) / rainMax) *
                                 WXL_STRIP_H
                             }
-                            width={1.4}
+                            width={0.7}
                             height={
                               (Math.min(p.rain_rate_inhr!, rainMax) / rainMax) *
                               WXL_STRIP_H
@@ -2666,6 +2688,7 @@ function WeatherStationView({
                       scale={
                         presRange ? `${presRange.max}–${presRange.min}` : ""
                       }
+                      ticks={dayFracs}
                     >
                       {presRange && (
                         <path
@@ -2681,6 +2704,7 @@ function WeatherStationView({
                     <WxStrip
                       label="solar w/m² · uv dashed"
                       scale={`${solarMax}`}
+                      ticks={dayFracs}
                     >
                       <path
                         d={linePath(observed, (p) => p.solar_wm2, ts0, ts1, 0, solarMax, WXL_W, WXL_STRIP_H)}
@@ -2745,26 +2769,36 @@ function WeatherStationView({
                   </div>
                 )}
               </div>
+              {/* the axis reads as a calendar (#60): each weekday label sits
+                  centered over its day's slice between midnight gridlines.
+                  Narrow partial days at the window's edges and anything
+                  shadowing the now stamp stay quiet -- the hover chip names
+                  every point anyway. */}
               <div className="relative mt-0.5 h-4 text-[10px] text-inkfaint">
                 <span className="absolute left-0">−24h</span>
-                {WX_TICKS.map((t) => (
-                  <span
-                    key={t.offsetS}
-                    className="absolute -translate-x-1/2 tabular-nums"
-                    style={{ left: `${t.frac * 100}%` }}
-                  >
-                    {t.offsetS > 0
-                      ? `+${t.offsetS / 3600}h`
-                      : `−${-t.offsetS / 3600}h`}
-                  </span>
-                ))}
+                {days.map((t, i) => {
+                  const end = days[i + 1]?.frac ?? 1;
+                  const center = (t.frac + end) / 2;
+                  if (end - t.frac < 0.05) return null;
+                  if (Math.abs(center - WXL_NOW_FRAC) < 0.04) return null;
+                  if (center > 0.96) return null;
+                  return (
+                    <span
+                      key={t.ts}
+                      className="stamp absolute -translate-x-1/2"
+                      style={{ left: `${center * 100}%` }}
+                    >
+                      {t.label}
+                    </span>
+                  );
+                })}
                 <span
                   className="stamp absolute -translate-x-1/2 text-inkdim"
-                  style={{ left: `${WX_NOW_FRAC * 100}%` }}
+                  style={{ left: `${WXL_NOW_FRAC * 100}%` }}
                 >
                   now
                 </span>
-                <span className="absolute right-0">+48h</span>
+                <span className="absolute right-0">+5d</span>
               </div>
             </section>
           </main>
