@@ -2110,24 +2110,65 @@ function InfoIcon() {
   );
 }
 
+/** The wind cell's compass rose (issue #63): a ring with cardinal ticks and
+ * a needle rotated to the bearing the wind comes FROM (matching the letter
+ * beside it -- a "W" wind points the needle west). No bearing draws the
+ * ring and ticks alone, reserving the same footprint (house rule #1). */
+function CompassGlyph({ deg }: { deg: number | null }) {
+  return (
+    <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+      <circle
+        cx="8"
+        cy="8"
+        r="7"
+        fill="none"
+        stroke="var(--line-bright)"
+        strokeWidth="1"
+      />
+      {[0, 90, 180, 270].map((t) => (
+        <line
+          key={t}
+          x1="8"
+          y1="1"
+          x2="8"
+          y2="2.6"
+          stroke="var(--ink-faint)"
+          strokeWidth="1"
+          transform={`rotate(${t} 8 8)`}
+        />
+      ))}
+      {deg !== null && (
+        <path
+          d="M8 2.8 L10.1 10.2 L8 8.7 L5.9 10.2 Z"
+          fill="var(--squirrel)"
+          transform={`rotate(${deg} 8 8)`}
+        />
+      )}
+    </svg>
+  );
+}
+
 /** One labeled reading in the hero grid: stamped label, instrument-sized
- * value, the unit riding quietly after it. `info` (issue #63) appends a
- * quiet circled-i whose hover/focus reveals a field-manual note in the
- * readout chip's dress -- pure CSS, an absolute overlay (house rule #1:
- * revealing it can never shift the grid), focusable so keyboards and touch
- * taps get it too. */
+ * value, the unit riding quietly after it, `aside` riding to their right
+ * (the wind cell's compass). `info` (issue #63) appends a quiet circled-i
+ * whose hover/focus reveals a field-manual note in the readout chip's
+ * dress -- pure CSS, an absolute overlay (house rule #1: revealing it can
+ * never shift the grid), focusable so keyboards and touch taps get it
+ * too. */
 function WxStat({
   label,
   value,
   unit,
   sub,
   info,
+  aside,
 }: {
   label: string;
   value: string | number;
   unit?: string;
   sub?: React.ReactNode;
   info?: string;
+  aside?: React.ReactNode;
 }) {
   return (
     <div className="border-l border-line pl-3">
@@ -2149,9 +2190,12 @@ function WxStat({
           </span>
         )}
       </div>
-      <div className="text-xl tabular-nums text-ink">
-        {value}
-        {unit && <span className="ml-1 text-xs text-inkdim">{unit}</span>}
+      <div className="flex items-center gap-2 text-xl tabular-nums text-ink">
+        <span>
+          {value}
+          {unit && <span className="ml-1 text-xs text-inkdim">{unit}</span>}
+        </span>
+        {aside}
       </div>
       {/* min-h reserves the sub-line so the grid rows stay ranked even when
           a reading has nothing extra to say (house rule #1). */}
@@ -2484,15 +2528,26 @@ function WeatherStationView({
                     label="wind"
                     value={wxRound(current?.wind_mph ?? null)}
                     unit="mph"
-                    sub={
-                      <>
-                        {compass(current?.wind_deg ?? null) || "—"}
-                        {current?.wind_gust_mph != null &&
-                          ` · gusts ${Math.round(current.wind_gust_mph)}`}
-                        {current?.wind_max_daily_gust_mph != null &&
-                          ` · max ${Math.round(current.wind_max_daily_gust_mph)}`}
-                      </>
+                    aside={
+                      <span className="flex items-center gap-1.5 text-xs text-inkdim">
+                        <CompassGlyph deg={current?.wind_deg ?? null} />
+                        {/* min-w reserves the widest label ("NW") so a
+                            bearing arriving can't nudge the row */}
+                        <span className="min-w-[2ch]">
+                          {compass(current?.wind_deg ?? null) || "—"}
+                        </span>
+                      </span>
                     }
+                    sub={[
+                      current?.wind_gust_mph != null
+                        ? `gusts ${Math.round(current.wind_gust_mph)}`
+                        : null,
+                      current?.wind_max_daily_gust_mph != null
+                        ? `max ${Math.round(current.wind_max_daily_gust_mph)}`
+                        : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
                   />
                   <WxStat
                     label="barometer"
