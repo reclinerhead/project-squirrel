@@ -6,7 +6,8 @@
 # HTTP API. The MCC (Next.js dashboard) is just a client of this -- it never
 # touches the DB or filesystem directly.
 #
-#   GET  /state        live counts + tracks + fps, run totals, recent events (JSON)
+#   GET  /state        live counts + tracks + fps, run totals, recent events,
+#                      source provenance + tracker churn metrics (JSON)
 #   GET  /stream       the annotated video as MJPEG (an <img src> in the browser)
 #   GET  /snapshot     the latest annotated frame, one JPEG
 #   GET  /history      N-day census + hard-frame trend + training runs (JSON)
@@ -68,11 +69,12 @@ STREAM_WIDTH = 1920      # /stream rides a downscaled copy: the camera's 4K
 # new track id when it loses an animal for more than its buffer and re-acquires
 # it -- same squirrel, new identity. Track-level events turned every one of
 # those into a phantom departure+arrival pair. Species counts don't care which
-# id is which; they only dip briefly during churn, and the debounce absorbs it:
-ARRIVE_AFTER = 2.0       # a count INCREASE must hold this long to be an arrival
-DEPART_AFTER = 12.0      # a DECREASE must hold this long -- longer than any
-                         # realistic churn gap, so lost-and-reminted ids never
-                         # read as leave-and-return
+# id is which; they only dip briefly during churn, and the debounce absorbs it.
+# The machinery (and the canonical defaults) live in perception.SpeciesPresence
+# since issue #74 so the offline fixture runner replays the exact same logic;
+# re-exported here as the names the tests monkeypatch.
+ARRIVE_AFTER = perception.ARRIVE_AFTER_S
+DEPART_AFTER = perception.DEPART_AFTER_S
 
 
 HARD_FRAMES_DIR = "hard_frames"   # live.py's training harvest; the daemon only counts it
@@ -160,6 +162,8 @@ class SharedState:
         self.tracks = []            # live tracks: [{track_id, species, conf, box}]
         self.fps = 0.0
         self.signal = True          # is the source currently delivering frames?
+        self.provenance = {}        # what the source is connected to (issue #74)
+        self.churn = None           # tracker churn metrics, None for trackerless sources
 
 
 class Worker(threading.Thread):
@@ -178,7 +182,14 @@ class Worker(threading.Thread):
         self._last_crowd = 0.0
         self._loop_times = deque(maxlen=30)   # wall-clock interval between loops
         self._prev_loop = None
-        self._species = {}   # species -> presence state, see _species_presence
+        # The species-level event debounce, now shared logic in perception.py
+        # (issue #74 Phase 0.5 -- the offline fixture runner replays the exact
+        # same machine). The constants stay module-level here so tests can
+        # monkeypatch them; they're read at worker construction, which happens
+        # at lifespan startup, after any patching.
+        self.presence = perception.SpeciesPresence(ARRIVE_AFTER, DEPART_AFTER)
+        self._prov_logged = False   # one [provenance] line, once frames flow
+        self._churn_at = 0.0        # last provenance/churn refresh (~1/s is plenty)
         self.writer = None                    # cv2.VideoWriter while recording
         self.clip_path = None
 
@@ -194,43 +205,28 @@ class Worker(threading.Thread):
         self.publisher.publish(bus.EVENTS_TOPIC,
                                {"ts": ts, "kind": kind, "details": details})
 
-    def _species_presence(self, counts, ts, now):
-        """Debounced species-level arrival/departure. A species' observed count
-        must hold at a new value for ARRIVE_AFTER (up) or DEPART_AFTER (down)
-        before the change is announced; any wobble back to the announced count
-        resets the timer. Tracker id churn (same animal re-minted under a new
-        id after a detection gap) dips a count for a few seconds at most, so it
-        produces NO events -- which is the whole point. `duration_s` rides on a
-        departure only when the last one leaves (counts above zero can't know
-        which individual left)."""
-        for sp in set(counts) | set(self._species):
-            observed = counts.get(sp, 0)
-            st = self._species.setdefault(
-                sp, {"count": 0, "candidate": 0, "candidate_since": None,
-                     "present_since": None})
-            if observed == st["count"]:
-                st["candidate_since"] = None   # settled back -- forget the wobble
-                continue
-            if st["candidate_since"] is None or observed != st["candidate"]:
-                st["candidate"] = observed     # new challenger -- start the clock
-                st["candidate_since"] = now
-                continue
-            wait = ARRIVE_AFTER if observed > st["count"] else DEPART_AFTER
-            if now - st["candidate_since"] < wait:
-                continue
-            old = st["count"]
-            st["count"] = observed
-            st["candidate_since"] = None
-            if observed > old:
-                if old == 0:
-                    st["present_since"] = now
-                self._event(ts, "arrival", {"species": sp, "count": observed})
-            else:
-                details = {"species": sp, "count": observed}
-                if observed == 0 and st["present_since"] is not None:
-                    details["duration_s"] = round(now - st["present_since"], 1)
-                    st["present_since"] = None
-                self._event(ts, "departure", details)
+    def _refresh_diagnostics(self, now):
+        """Pull the source's provenance + churn metrics into SharedState about
+        once a second (issue #74, Phase 0), and log the provenance ONCE when
+        the native resolution is first known -- the startup line that settles
+        the which-stream/which-imgsz question for good. getattr-defensive:
+        test fakes are duck-typed with only read()/close()."""
+        if now - self._churn_at < 1.0:
+            return
+        self._churn_at = now
+        prov = getattr(self.source, "provenance", dict)()
+        fps = self.state.fps or TARGET_FPS
+        churn = getattr(self.source, "metrics", lambda fps: None)(fps)
+        with self.state.lock:
+            self.state.provenance = prov
+            self.state.churn = churn
+        if not self._prov_logged and prov.get("resolution"):
+            res = prov["resolution"]
+            print(f"[provenance] source={prov.get('source')} url={prov.get('url')} "
+                  f"native={res[0]}x{res[1]} imgsz={prov.get('imgsz')} "
+                  f"quantize={prov.get('quantize')} model={prov.get('model')} "
+                  f"classes={prov.get('classes')}")
+            self._prov_logged = True
 
     def _record(self, annotated, ts):
         """Drive the clip recorder off control.recording. Records the ANNOTATED
@@ -305,10 +301,11 @@ class Worker(threading.Thread):
             present = [d for d in dets if not d.coasting]
 
             # Arrivals and departures -- the narrator's bread and butter.
-            # Species-level and debounced: see _species_presence.
+            # Species-level and debounced: perception.SpeciesPresence.
             now = time.time()
-            self._species_presence(
-                Counter(d.species for d in present), ts, now)
+            for kind, details in self.presence.observe(
+                    Counter(d.species for d in present), now):
+                self._event(ts, kind, details)
 
             # Crowd moment: enough animals at once, and cooled down since the last.
             if len(present) >= self.control.crowd_threshold and now - self._last_crowd >= CROWD_COOLDOWN:
@@ -316,6 +313,8 @@ class Worker(threading.Thread):
                             {"total": len(present),
                              "counts": dict(Counter(d.species for d in present))})
                 self._last_crowd = now
+
+            self._refresh_diagnostics(now)
 
             annotated = annotate(frame, dets)
             self._record(annotated, ts)
@@ -411,6 +410,8 @@ def create_app(source, conn, publisher=None):
                     "tracks": list(state.tracks),
                     "fps": state.fps,
                     "signal": state.signal}
+            provenance = dict(state.provenance)
+            churn = state.churn
         return {
             "session_id": session_id,
             "running": control.running,
@@ -418,6 +419,12 @@ def create_app(source, conn, publisher=None):
             "crowd_threshold": control.crowd_threshold,
             "species": SPECIES,
             "live": live,
+            # Issue #74, Phase 0: what the source is connected to (stream,
+            # native resolution, imgsz, model, classes) and the tracker churn
+            # metrics all Phase 2 changes are graded against. churn is None
+            # for trackerless sources (synthetic).
+            "provenance": provenance,
+            "churn": churn,
             **_read_db_summary(conn, session_id, db_lock),
         }
 

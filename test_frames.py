@@ -8,7 +8,10 @@
 
 import time
 
-from frames import FreshestFrameReader
+import pytest
+
+import frames
+from frames import FreshestFrameReader, SyntheticFrameSource
 
 
 class FakeCap:
@@ -100,3 +103,35 @@ def test_stop_joins_promptly_and_releases_capture():
     reader.join(timeout=2.0)
     assert not reader.is_alive()
     assert cap.releases >= 1            # run() releases on the way out
+
+
+# --- provenance (issue #74, Phase 0) -------------------------------------------
+
+def test_rtsp_url_builds_and_redacts(monkeypatch):
+    monkeypatch.setenv("MERLE_RTSP_PASS", "sekrit")
+    monkeypatch.setenv("MERLE_RTSP_HOST", "10.0.0.5")
+    monkeypatch.delenv("MERLE_RTSP_USER", raising=False)
+    url, redacted = frames.rtsp_url()
+    assert url == "rtsp://admin:sekrit@10.0.0.5:554/cam/realmonitor?channel=1&subtype=0"
+    # The redacted twin (what logs and /state carry) never leaks the password
+    # -- and pins the MAIN stream (subtype=0) where anyone can read it.
+    assert redacted == "rtsp://admin:***@10.0.0.5:554/cam/realmonitor?channel=1&subtype=0"
+    assert "sekrit" not in redacted
+
+
+def test_rtsp_url_requires_the_password(monkeypatch):
+    monkeypatch.delenv("MERLE_RTSP_PASS", raising=False)
+    with pytest.raises(RuntimeError, match="MERLE_RTSP_PASS"):
+        frames.rtsp_url()
+
+
+def test_synthetic_provenance_is_honest_about_what_it_lacks():
+    prov = SyntheticFrameSource().provenance()
+    assert prov["source"] == "synthetic"
+    assert prov["resolution"] == [1280, 720]
+    assert prov["model"] is None            # no model, no imgsz -- honestly null
+    assert prov["imgsz"] is None
+
+
+def test_sources_without_a_tracker_report_no_churn():
+    assert SyntheticFrameSource().metrics() is None

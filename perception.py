@@ -14,7 +14,8 @@
 # =============================================================================
 
 import os
-from collections import Counter
+import statistics
+from collections import Counter, deque
 
 import cv2
 
@@ -79,6 +80,13 @@ CENSUS_AFTER_FRAMES = 30
 # Hard-example "flicker band": a live track scoring in here is one the model
 # finds genuinely hard -- exactly the frame worth banking for the next round.
 HARD_LO, HARD_HI = 0.15, 0.50
+
+# Churn metrics window (issue #74, Phase 0): ten minutes at the fixed camera's
+# 15fps. The issue's success criteria are per-10-minutes ("<= 2 ids per real
+# animal per 10 min"), so the rolling window every rate below is judged over
+# matches the ruler. Frame-denominated like every other window here (same
+# rover-era caveat as COAST/PRUNE above).
+METRICS_WINDOW_FRAMES = 9000
 
 # Stable per-class box colors (BGR); coasted boxes draw grey.
 PALETTE = [(56, 56, 255), (31, 112, 255), (49, 210, 207), (10, 249, 72),
@@ -160,19 +168,51 @@ class TrackMemory:
     its voted class, for the run-total census."""
 
     def __init__(self, coast_frames=COAST_FRAMES, prune_frames=PRUNE_FRAMES,
-                 census_after=CENSUS_AFTER_FRAMES):
+                 census_after=CENSUS_AFTER_FRAMES,
+                 metrics_window=METRICS_WINDOW_FRAMES, log=None):
         self.coast_frames = coast_frames
         self.prune_frames = prune_frames
         self.census_after = census_after
-        self.tracks = {}       # canonical tid -> {"xyxy", "conf", "last_frame", "frames", "votes"}
+        self.tracks = {}       # canonical tid -> {"xyxy", "conf", "last_frame",
+                               #   "frames", "votes", "born", "conf_min",
+                               #   "conf_max", "conf_sum"}
         self.aliases = {}      # re-minted ByteTrack tid -> canonical tid, forever
         self.seen = {}         # canonical tid -> voted class name (survives pruning)
         self.frame_idx = 0
+        # --- churn instrumentation (issue #74, Phase 0) -----------------------
+        # `log` is the lifecycle narrator: a callable taking one string (the
+        # daemon passes print; tests pass list.append; None = silent, so the
+        # pure default stays pure). Cheap enough to leave on: a line per track
+        # birth/stitch/death, not per frame.
+        self.log = log
+        self.metrics_window = metrics_window
+        self.total_minted = 0    # raw ByteTrack ids ever seen (tracker churn)
+        self.total_births = 0    # canonical tracks created (post-stitch churn)
+        self.total_stitches = 0  # re-minted ids folded back onto a lost track
+        self._known = set()      # every raw ByteTrack id ever seen
+        self._minted = deque()   # frame_idx of each raw-id mint, window-pruned
+        self._deaths = deque()   # (frame_idx, matched_frames, tenured), window-pruned
+        self._live_counts = deque(maxlen=metrics_window)   # matched tracks per frame
 
     def _absorb(self, tid, name, conf, xyxy):
-        t = self.tracks.setdefault(tid, {"votes": Counter(), "frames": 0})
+        t = self.tracks.get(tid)
+        if t is None:
+            t = self.tracks[tid] = {
+                "votes": Counter(), "frames": 0, "born": self.frame_idx,
+                # Per-track confidence min/mean/max over its life -- the
+                # instrument that shows the dips killing stationary feeders.
+                "conf_min": float(conf), "conf_max": float(conf), "conf_sum": 0.0,
+            }
+            self.total_births += 1
+            if self.log:
+                cx = (int(xyxy[0]) + int(xyxy[2])) // 2
+                cy = (int(xyxy[1]) + int(xyxy[3])) // 2
+                self.log(f"[track] born #{tid} {name} conf={conf:.2f} @({cx},{cy})")
         t["xyxy"] = [int(v) for v in xyxy]
         t["conf"] = float(conf)
+        t["conf_min"] = min(t["conf_min"], float(conf))
+        t["conf_max"] = max(t["conf_max"], float(conf))
+        t["conf_sum"] += float(conf)
         t["last_frame"] = self.frame_idx
         t["frames"] += 1
         t["votes"][name] += 1
@@ -180,6 +220,19 @@ class TrackMemory:
         # counted as a visitor. Once tenured, keep adopting the latest vote.
         if t["frames"] >= self.census_after:
             self.seen[tid] = voted(t)
+
+    def _bury(self, tid, t):
+        """Record (and narrate) a pruned track's death. `tenured` separates the
+        real losses (an animal's track died and was probably re-minted) from
+        one-blink junk that never confirmed."""
+        tenured = t["frames"] >= self.census_after
+        self._deaths.append((self.frame_idx, t["frames"], tenured))
+        if self.log:
+            mean = t["conf_sum"] / t["frames"]
+            why = "tenured" if tenured else "never confirmed"
+            self.log(f"[track] died #{tid} {voted(t)} after {t['frames']} matched "
+                     f"frames ({why}), conf min/mean/max "
+                     f"{t['conf_min']:.2f}/{mean:.2f}/{t['conf_max']:.2f}")
 
     def _stitch_target(self, name, xyxy):
         """The lost track a brand-new id should adopt, if any: the best-
@@ -204,6 +257,14 @@ class TrackMemory:
         track matched this frame is on the books before any stitch decision
         is made."""
         self.frame_idx += 1
+        # Mint counting rides the RAW detections, before dedupe: a duplicate
+        # box's fresh id never reaches the bookkeeping below, but ByteTrack
+        # DID mint it -- and tracker churn is what the metric measures.
+        for raw_tid, *_ in detections:
+            if raw_tid not in self._known:
+                self._known.add(raw_tid)
+                self.total_minted += 1
+                self._minted.append(self.frame_idx)
         detections = dedupe_detections(detections)
         fresh = []
         for raw_tid, name, conf, xyxy in detections:
@@ -218,6 +279,9 @@ class TrackMemory:
                 # aliases map to CANONICAL ids, so chains flatten (B->A then
                 # C->A, never C->B->A) and one lookup always lands.
                 self.aliases[raw_tid] = canon
+                self.total_stitches += 1
+                if self.log:
+                    self.log(f"[track] #{raw_tid} stitched onto #{canon} ({name})")
             self._absorb(canon if canon is not None else raw_tid, name, conf, xyxy)
 
         live, coasting = [], []
@@ -228,8 +292,114 @@ class TrackMemory:
             elif age <= self.coast_frames:
                 coasting.append((tid, t))
             elif age > self.prune_frames:
+                self._bury(tid, t)
                 del self.tracks[tid]
+
+        # Roll the metrics window forward (the live-count deque prunes itself
+        # via maxlen).
+        self._live_counts.append(len(live))
+        horizon = self.frame_idx - self.metrics_window
+        while self._minted and self._minted[0] <= horizon:
+            self._minted.popleft()
+        while self._deaths and self._deaths[0][0] <= horizon:
+            self._deaths.popleft()
         return live, coasting
+
+    def metrics(self, fps=15.0):
+        """The churn numbers every Phase 2 change is graded against (issue
+        #74): id-mint rate, lifetime, and the fragmentation ratio (ids minted
+        per smoothed concurrent animal) over the rolling window. `fps` converts
+        the frame-denominated window to wall-clock -- pass the measured loop
+        rate when you have one."""
+        window = min(self.frame_idx, self.metrics_window)
+        minutes = window / fps / 60 if fps > 0 and window else 0.0
+        lifetimes = [frames for _, frames, _ in self._deaths]
+        concurrency = (sum(self._live_counts) / len(self._live_counts)
+                       if self._live_counts else 0.0)
+        minted_w = len(self._minted)
+        return {
+            "ids_minted": self.total_minted,
+            "ids_minted_window": minted_w,
+            "ids_per_minute": round(minted_w / minutes, 2) if minutes else None,
+            "births": self.total_births,
+            "stitches": self.total_stitches,
+            "deaths_window": len(self._deaths),
+            "never_confirmed_window": sum(1 for *_, ten in self._deaths if not ten),
+            "median_lifetime_frames": (statistics.median(lifetimes)
+                                       if lifetimes else None),
+            "mean_concurrency": round(concurrency, 2),
+            # Guarded against an empty pavement: with ~nobody on screen the
+            # ratio would divide by ~zero and read as infinite churn.
+            "fragmentation": (round(minted_w / concurrency, 1)
+                              if concurrency >= 0.05 else None),
+            "window_minutes": round(minutes, 1),
+        }
+
+
+# Arrival/departure debounce defaults (species-level; see SpeciesPresence).
+# Canonical HERE so the daemon and the offline fixture runner can never drift;
+# merle_daemon re-exports them as ARRIVE_AFTER/DEPART_AFTER for its tests.
+ARRIVE_AFTER_S = 2.0     # a count INCREASE must hold this long to be an arrival
+DEPART_AFTER_S = 12.0    # a DECREASE must hold this long -- longer than any
+                         # realistic churn gap, so lost-and-reminted ids never
+                         # read as leave-and-return
+
+
+class SpeciesPresence:
+    """Debounced species-level arrival/departure -- the daemon's event
+    machinery, MOVED here from merle_daemon.Worker (issue #74, Phase 0.5) so
+    the offline fixture runner can replay the exact same debounce the live
+    path runs; the daemon passes its own ARRIVE_AFTER/DEPART_AFTER constants
+    in, so behavior and tunability are unchanged.
+
+    A species' observed count must hold at a new value for `arrive_after`
+    seconds (up) or `depart_after` seconds (down) before the change is
+    announced; any wobble back to the announced count resets the timer.
+    Tracker id churn (same animal re-minted under a new id after a detection
+    gap) dips a count for a few seconds at most, so it produces NO events --
+    which is the whole point. `duration_s` rides a departure only when the
+    last one leaves (counts above zero can't know which individual left).
+
+    observe(counts, now) takes this frame's {species: matched-track count} and
+    the wall clock, and returns the [(kind, details), ...] announced this
+    tick. Pure logic, injected clock -- covered in test_perception.py."""
+
+    def __init__(self, arrive_after=ARRIVE_AFTER_S, depart_after=DEPART_AFTER_S):
+        self.arrive_after = arrive_after
+        self.depart_after = depart_after
+        self._species = {}
+
+    def observe(self, counts, now):
+        events = []
+        for sp in set(counts) | set(self._species):
+            observed = counts.get(sp, 0)
+            st = self._species.setdefault(
+                sp, {"count": 0, "candidate": 0, "candidate_since": None,
+                     "present_since": None})
+            if observed == st["count"]:
+                st["candidate_since"] = None   # settled back -- forget the wobble
+                continue
+            if st["candidate_since"] is None or observed != st["candidate"]:
+                st["candidate"] = observed     # new challenger -- start the clock
+                st["candidate_since"] = now
+                continue
+            wait = self.arrive_after if observed > st["count"] else self.depart_after
+            if now - st["candidate_since"] < wait:
+                continue
+            old = st["count"]
+            st["count"] = observed
+            st["candidate_since"] = None
+            if observed > old:
+                if old == 0:
+                    st["present_since"] = now
+                events.append(("arrival", {"species": sp, "count": observed}))
+            else:
+                details = {"species": sp, "count": observed}
+                if observed == 0 and st["present_since"] is not None:
+                    details["duration_s"] = round(now - st["present_since"], 1)
+                    st["present_since"] = None
+                events.append(("departure", details))
+        return events
 
 
 def draw_tracks(frame, items, colors, scale=1.0):
