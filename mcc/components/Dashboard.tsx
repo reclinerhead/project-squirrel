@@ -17,11 +17,13 @@ import {
 } from "@/lib/daemon";
 import {
   JournalEntry,
-  NARRATION_JOURNAL_TOPIC,
+  NARRATION_JOURNAL_WILDCARD,
   NARRATION_TOPIC,
   NARRATOR_STATUS_WILDCARD,
   NarrationLine,
   busUrl,
+  journalTopicId,
+  mergeJournals,
   parseJournal,
   parseLine,
   pickVoice,
@@ -479,6 +481,10 @@ function FieldJournal() {
   // mirrors the state so the (stable) mqtt message handler reads it live.
   const [speaking, setSpeaking] = useState(false);
   const speakingRef = useRef(false);
+  // Per-narrator journal windows (issue #80), keyed by mqtt_id from the topic.
+  // A ref, not state: only the merged entries render, and the mqtt handler
+  // must read the latest windows synchronously when any one of them arrives.
+  const journalsRef = useRef<Record<string, NarrationLine[]>>({});
 
   useEffect(() => {
     // Straight to the broker over WebSockets -- the /daemon proxy can't
@@ -493,14 +499,15 @@ function FieldJournal() {
       console.debug("[bus] connect", url);
       setBusUp(true);
       setBusError(null);
-      // The retained journal window (issue #58) is the entries' source of
-      // truth -- the broker replays it the moment we subscribe, so a fresh
-      // tab gets the journal back the way the Weather Post gets its state.
-      // The live lines topic stays subscribed for TTS: speaking is a MOMENT
-      // (never re-speak a replayed window), exactly the state-vs-moment split
-      // the bus already draws.
+      // The retained journal windows (issue #58, per-narrator since #80) are
+      // the entries' source of truth -- the broker replays every narrator's
+      // window the moment we subscribe the wildcard, so a fresh tab gets the
+      // whole show back the way the Weather Post gets its state. The live
+      // lines topic stays subscribed for TTS: speaking is a MOMENT (never
+      // re-speak a replayed window), exactly the state-vs-moment split the
+      // bus already draws.
       client.subscribe([
-        NARRATION_JOURNAL_TOPIC,
+        NARRATION_JOURNAL_WILDCARD,
         NARRATION_TOPIC,
         NARRATOR_STATUS_WILDCARD,
       ]);
@@ -527,9 +534,19 @@ function FieldJournal() {
         setPresence((p) => ({ ...p, [narratorId]: payload.toString() }));
         return;
       }
-      if (topic === NARRATION_JOURNAL_TOPIC) {
+      const journalId = journalTopicId(topic);
+      if (journalId) {
+        // One narrator's retained window arrived (or was republished whole).
+        // Replace just that narrator's window and re-merge across the roster
+        // by ts (issue #80) -- either narrator restarting or republishing can
+        // never blank the other's history.
         const lines = parseJournal(payload.toString());
-        if (lines) setEntries(toJournalEntries(lines));
+        if (lines) {
+          journalsRef.current = { ...journalsRef.current, [journalId]: lines };
+          setEntries(
+            toJournalEntries(mergeJournals(journalsRef.current, JOURNAL_LIMIT)),
+          );
+        }
         return;
       }
       const line = parseLine(payload.toString());
@@ -564,7 +581,16 @@ function FieldJournal() {
   const narrators = Object.entries(presence).sort(([a], [b]) =>
     a.localeCompare(b),
   );
-  const anyoneOn = narrators.some(([, status]) => status === "online");
+  // With a roster of two (issue #80), one lamp per narrator crowds the panel
+  // label -- so narrators sharing a status share a lamp and their names join:
+  // "jim, marlin · on the air". Nonstandard statuses ("coffee break") stay
+  // individual; they're rare and worth the room.
+  const onAir = narrators.filter(([, s]) => s === "online").map(([id]) => id);
+  const offAir = narrators.filter(([, s]) => s === "offline").map(([id]) => id);
+  const others = narrators.filter(
+    ([, s]) => s !== "online" && s !== "offline",
+  );
+  const anyoneOn = onAir.length > 0;
 
   return (
     <section className="panel flex flex-col rounded-sm border border-line bg-panel">
@@ -579,30 +605,32 @@ function FieldJournal() {
                 no narrator hired
               </span>
             ) : (
-              narrators.map(([id, status]) => (
-                <span key={id} className="flex items-center gap-1.5 text-xs">
-                  {status === "online" ? (
-                    <>
-                      <span className="lamp inline-block h-2 w-2 rounded-full bg-led text-led" />
-                      <span className="stamp text-led">{id} · on the air</span>
-                    </>
-                  ) : status === "offline" ? (
-                    <>
-                      <span className="inline-block h-2 w-2 rounded-full bg-inkfaint" />
-                      <span className="stamp text-inkfaint">
-                        {id} · off the air
-                      </span>
-                    </>
-                  ) : (
-                    <>
-                      <span className="breathe inline-block h-2 w-2 rounded-full bg-turkey" />
-                      <span className="stamp text-turkey">
-                        {id} · {status}
-                      </span>
-                    </>
-                  )}
-                </span>
-              ))
+              <>
+                {onAir.length > 0 && (
+                  <span className="flex items-center gap-1.5 text-xs">
+                    <span className="lamp inline-block h-2 w-2 rounded-full bg-led text-led" />
+                    <span className="stamp text-led">
+                      {onAir.join(", ")} · on the air
+                    </span>
+                  </span>
+                )}
+                {offAir.length > 0 && (
+                  <span className="flex items-center gap-1.5 text-xs">
+                    <span className="inline-block h-2 w-2 rounded-full bg-inkfaint" />
+                    <span className="stamp text-inkfaint">
+                      {offAir.join(", ")} · off the air
+                    </span>
+                  </span>
+                )}
+                {others.map(([id, status]) => (
+                  <span key={id} className="flex items-center gap-1.5 text-xs">
+                    <span className="breathe inline-block h-2 w-2 rounded-full bg-turkey" />
+                    <span className="stamp text-turkey">
+                      {id} · {status}
+                    </span>
+                  </span>
+                ))}
+              </>
             )}
             <button
               type="button"

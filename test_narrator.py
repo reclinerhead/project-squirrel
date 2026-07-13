@@ -358,6 +358,157 @@ def test_template_reroll_skips_single_template_kinds():
     assert "meteor_strike" in line
 
 
+# --- colleague mentions (issue #80) --------------------------------------------
+# The second-narrator machinery: opt-in answers_to knob, word-boundary mention
+# matching, the synthetic colleague_mention event, and the broadcast-context
+# (heard) prompt block. The MQTT subscription plumbing is I/O, desk-tested.
+
+JIM = {**PERSONA, "name": "Jim", "mqtt_id": "jim",
+       "chattiness": 0.7, "interest_threshold": 0.55,
+       "answers_to": ["Jim"]}
+
+def marlin_line(text, **overrides):
+    return {"ts": "2026-07-13T10:00:00", "narrator": "Marlin",
+            "mqtt_id": "marlin", "voice": "David", "text": text,
+            "event_kind": "arrival", **overrides}
+
+
+def test_mention_matches_case_insensitively():
+    assert narrator.mentions_name("my trusty assistant JIM is down there", ["Jim"])
+    assert narrator.mentions_name("jim, are you seeing this?", ["Jim"])
+
+
+def test_mention_requires_a_word_boundary():
+    # A line about "Jimmy" (or "jimmied") is not a mention of Jim.
+    assert not narrator.mentions_name("Jimmy the squirrel is back", ["Jim"])
+    assert not narrator.mentions_name("something jimmied the seed pile open", ["Jim"])
+
+
+def test_mention_matches_any_of_several_names():
+    names = ["Jim", "James"]
+    assert narrator.mentions_name("over to you, James", names)
+    assert narrator.mentions_name("Jim will handle it", names)
+    assert not narrator.mentions_name("nobody here by that name", names)
+
+
+def test_mention_survives_odd_input():
+    assert not narrator.mentions_name(None, ["Jim"])
+    assert not narrator.mentions_name("", ["Jim"])
+    assert narrator.mentions_name("Jim.", ["Jim"])          # punctuation boundary
+    assert not narrator.mentions_name("Jim", ["J(im"])      # names are escaped
+
+
+def test_colleague_mention_builds_the_synthetic_event():
+    line = marlin_line("My trusty assistant Jim would normally be down there.")
+    event = narrator.colleague_mention(line, JIM)
+    assert event["kind"] == "colleague_mention"
+    assert event["ts"] == line["ts"]
+    assert event["details"] == {"narrator": "Marlin", "mqtt_id": "marlin",
+                                "text": line["text"]}
+
+
+def test_colleague_mention_ignores_own_lines():
+    # Loop safety: a narrator must never trigger on its own broadcast, even
+    # one that names itself.
+    own = marlin_line("Jim here, reporting from the pavement.",
+                      narrator="Jim", mqtt_id="jim")
+    assert narrator.colleague_mention(own, JIM) is None
+
+
+def test_colleague_mention_needs_a_name_hit():
+    assert narrator.colleague_mention(marlin_line("A quiet day out there."), JIM) is None
+
+
+def test_absent_or_empty_knob_disables_mentions_entirely():
+    line = marlin_line("Jim! Jim! Jim!")
+    assert narrator.colleague_mention(line, PERSONA) is None          # knob absent
+    no_knob = {**JIM, "answers_to": []}
+    assert narrator.colleague_mention(line, no_knob) is None          # knob empty
+
+
+def test_load_persona_defaults_answers_to_off(tmp_path):
+    f = tmp_path / "minimal.yaml"
+    f.write_text("name: Ghost\nmqtt_id: ghost\n", encoding="utf-8")
+    assert not narrator.load_persona(str(f))["answers_to"]
+
+
+def test_mention_summary_quotes_the_line_and_names_the_colleague():
+    line = marlin_line("My trusty assistant Jim would normally be down there.")
+    event = narrator.colleague_mention(line, JIM)
+    summary = narrator.event_summary(event, BIBLE)
+    assert "Marlin" in summary
+    assert f"'{line['text']}'" in summary
+    assert "mentioned you" in summary
+
+
+def test_mention_interest_clears_jim_typical_knobs():
+    line = marlin_line("Jim, get a closer look at that turkey.")
+    event = narrator.colleague_mention(line, JIM)
+    # The marquee trigger clears Jim's quieter knobs (0.95 * 0.7 >= 0.55)...
+    assert narrator.worth_speaking(event, JIM, now=100.0, last_spoke_at=0.0)
+    # ...where a routine arrival does not (0.7 * 0.7 < 0.55).
+    assert not narrator.worth_speaking(ARRIVAL, JIM, now=100.0, last_spoke_at=0.0)
+
+
+def test_mention_still_respects_the_cooldown():
+    # The pacing gate applies to mentions like everything else -- no bypass.
+    event = narrator.colleague_mention(marlin_line("Over to you, Jim."), JIM)
+    assert not narrator.worth_speaking(event, JIM, now=100.0, last_spoke_at=90.0)
+    assert narrator.worth_speaking(event, JIM, now=100.0, last_spoke_at=60.0)
+
+
+def test_mention_template_fallback_names_the_colleague():
+    # LLM down -> the Tier-1 acknowledgment still airs and still answers Marlin.
+    event = narrator.colleague_mention(marlin_line("Jim will sort this out."), JIM)
+    rng = random.Random(0)
+    for _ in range(10):
+        assert "Marlin" in narrator.generate(JIM, BIBLE, event, rng)
+
+
+def test_hear_records_colleague_lines_bounded():
+    n = narrator.Narrator(JIM, BIBLE, rng=random.Random(0))
+    for i in range(narrator.HEARD_LINES + 3):
+        n.hear(marlin_line(f"line {i}"), now=float(i))
+    assert len(n.heard) == narrator.HEARD_LINES
+    assert n.heard[0] == (3.0, "Marlin", "line 3")     # oldest three evicted
+    assert n.heard[-1][2] == f"line {narrator.HEARD_LINES + 2}"
+
+
+def test_heard_block_renders_voices_and_ages():
+    heard = ((NOW - 120, "Marlin", "Jim would normally be down there."),)
+    block = narrator.heard_block(heard, now=NOW)
+    assert block.startswith(narrator.HEARD_HEADER)
+    assert "- [about 2 minutes ago] Marlin: Jim would normally be down there." in block
+
+
+def test_prompt_with_heard_lines_carries_the_block():
+    heard = ((NOW - 120, "Marlin", "Over to you, Jim."),)
+    event = narrator.colleague_mention(marlin_line("Over to you, Jim."), JIM)
+    prompt = narrator.build_user_prompt(event, BIBLE, now=NOW, heard=heard)
+    # Other-voices block above the summary, cue still last.
+    assert prompt.index(narrator.HEARD_HEADER) < prompt.index("mentioned you")
+    assert prompt.endswith("Your on-air line:")
+
+
+def test_prompt_with_nothing_heard_is_byte_identical_to_today():
+    # The #26/#28 degradation rule: an empty heard memory (every persona
+    # without answers_to, and Jim before anyone speaks) must not change the
+    # prompt by a single byte.
+    plain = narrator.build_user_prompt(ARRIVAL, BIBLE, now=NOW)
+    assert narrator.build_user_prompt(ARRIVAL, BIBLE, now=NOW, heard=()) == plain
+    assert plain == f"{narrator.event_summary(ARRIVAL, BIBLE)}\n\nYour on-air line:"
+
+
+def test_speak_passes_heard_lines_to_the_llm():
+    stub = StubOllama("On my way, as usual.")
+    n = narrator.Narrator(JIM, BIBLE, rng=random.Random(0), ollama=stub)
+    n.hear(marlin_line("Jim, see about that squirrel."), now=90.0)
+    event = narrator.colleague_mention(
+        marlin_line("Jim, see about that squirrel."), JIM)
+    n.speak(event, now=100.0)
+    assert stub.context["heard"] == ((90.0, "Marlin", "Jim, see about that squirrel."),)
+
+
 # --- human_duration ----------------------------------------------------------
 
 @pytest.mark.parametrize("seconds,expected", [
