@@ -44,6 +44,7 @@ import {
 } from "@/lib/history";
 import {
   CurrentWeather,
+  DayTick,
   FUTURE_S,
   PAST_S,
   REPORT_STALE_S,
@@ -2293,6 +2294,50 @@ function WxStrip({
   );
 }
 
+/** The station chart's calendar axis (#60): weekday labels centered over
+ * their day's slice between midnight gridlines, endpoints and the now stamp
+ * anchoring the window. Narrow partial days at the window's edges and
+ * anything shadowing the now stamp stay quiet -- the hover chip names every
+ * point anyway. Rendered twice since issue #65's follow-up: once above the
+ * chart stack and once below, so neither end of a tall chart leaves the
+ * reader guessing which day they're over. */
+function WxTimeAxis({
+  days,
+  className,
+}: {
+  days: DayTick[];
+  className: string;
+}) {
+  return (
+    <div className={`relative h-4 text-[10px] text-inkfaint ${className}`}>
+      <span className="absolute left-0">−24h</span>
+      {days.map((t, i) => {
+        const end = days[i + 1]?.frac ?? 1;
+        const center = (t.frac + end) / 2;
+        if (end - t.frac < 0.05) return null;
+        if (Math.abs(center - WXL_NOW_FRAC) < 0.04) return null;
+        if (center > 0.96) return null;
+        return (
+          <span
+            key={t.ts}
+            className="stamp absolute -translate-x-1/2"
+            style={{ left: `${center * 100}%` }}
+          >
+            {t.label}
+          </span>
+        );
+      })}
+      <span
+        className="stamp absolute -translate-x-1/2 text-inkdim"
+        style={{ left: `${WXL_NOW_FRAC * 100}%` }}
+      >
+        now
+      </span>
+      <span className="absolute right-0">+5d</span>
+    </div>
+  );
+}
+
 function CloseIcon() {
   return (
     <svg
@@ -2370,12 +2415,21 @@ function WeatherStationView({
   const dayFracs = days.map((d) => d.frac);
 
   // The strips chart the observed trail -- the forecast carries none of
-  // these series, and an honest chart leaves the future blank. The one
-  // exception since issue #56 is rain: forecast points bring a precip rate
-  // of their own, so the rain strip ghosts the future and its scale must
-  // fit forecast peaks too.
+  // these series, and an honest chart leaves the future blank. Two
+  // exceptions: the rain strip's future half charts the CHANCE of
+  // precipitation (issue #65 -- pop is what a viewer plans around; the
+  // forecast's volumes read as slivers on the piezo's scale), and the snow
+  // strip is forecast-only (the piezo is snow-blind, so its observed half
+  // is honestly blank forever). The rain ceiling is observed-only again --
+  // the future half rides its own fixed 0-100% scale.
   const observed = trend.observed;
-  const rainMax = seriesCeil(allPts, (p) => p.rain_rate_inhr, 0.25, 0.25);
+  const rainMax = seriesCeil(observed, (p) => p.rain_rate_inhr, 0.25, 0.25);
+  const snowMax = seriesCeil(
+    trend.coming,
+    (p) => p.snow_3h_in,
+    1,
+    0.5,
+  );
   const solarMax = seriesCeil(observed, (p) => p.solar_wm2, 200, 100);
   const uvMax = seriesCeil(observed, (p) => p.uv_index, 4, 2);
   const presRange = pressureRange(observed);
@@ -2387,11 +2441,16 @@ function WeatherStationView({
   const hoveredFrac = hovered ? (hovered.ts - ts0) / (ts1 - ts0) : 0;
   // The station-series line of the readout: what the hovered point actually
   // measured (observed side), or -- the issue #56 exception -- what the
-  // forecast expects to fall, plus its chance.
+  // forecast expects to fall, plus its chance (and snow, #65).
   const hoveredExtras = hovered
     ? [
-        hovered.rain_rate_inhr !== null && hovered.rain_rate_inhr > 0
+        // >= half a display digit, so a drizzle that rounds to "0.00/hr"
+        // (or "0.0 in") stays quiet instead of printing a zero
+        hovered.rain_rate_inhr !== null && hovered.rain_rate_inhr >= 0.005
           ? `rain ${hovered.rain_rate_inhr.toFixed(2)}/hr`
+          : null,
+        hovered.snow_3h_in !== null && hovered.snow_3h_in >= 0.05
+          ? `snow ${hovered.snow_3h_in.toFixed(1)} in`
           : null,
         now !== null &&
         hovered.ts > now &&
@@ -2611,6 +2670,7 @@ function WeatherStationView({
                   solid, forecast dashed
                 </span>
               </div>
+              <WxTimeAxis days={days} className="mt-1.5" />
               <div
                 className="relative mt-1"
                 style={{ touchAction: "pan-y" }}
@@ -2740,12 +2800,13 @@ function WeatherStationView({
                 </div>
 
                 {/* the station's own instruments, one strip each, sharing
-                    the time axis -- rain falls, the barometer wanders, the
-                    sun arcs, and they all line up under the temperature */}
+                    the time axis -- rain falls, snow waits its season, the
+                    barometer wanders, the sun arcs, and they all line up
+                    under the temperature */}
                 {hasChart && (
                   <>
                     <WxStrip
-                      label="rain · in/hr"
+                      label="rain · fell in/hr · forecast chance %"
                       scale={`${rainMax}`}
                       ticks={dayFracs}
                     >
@@ -2775,18 +2836,59 @@ function WeatherStationView({
                             opacity="0.75"
                           />
                         ))}
-                      {/* the forecast's ghost bars (issue #56): each spans
-                          the 3h window ending at its point, clipped at the
-                          now line (the observed trail owns the past), and
-                          reads as forecast the way the dashed lines do --
-                          same ink, much less of it */}
+                      {/* the forecast half changes units at the now line
+                          (issue #65): ghost bars are the CHANCE of
+                          precipitation, full strip = 100% -- the forecast's
+                          volumes read as slivers on the piezo's in/hr scale,
+                          but a 20% Thursday deserves a 20%-tall bar. Volumes
+                          stay one hover away in the chip. Each bar spans the
+                          3h window ending at its point, clipped at the now
+                          line (the observed trail owns the past). */}
+                      {now !== null &&
+                        trend.coming
+                          .filter(
+                            (p) => p.ts > now && p.pop !== null && p.pop > 0,
+                          )
+                          .map((p) => {
+                            const t0 = Math.max(
+                              p.ts - WX_FORECAST_STEP_S,
+                              now,
+                            );
+                            const w =
+                              ((p.ts - t0) / (ts1 - ts0)) * WXL_W - 1.4;
+                            if (w <= 0) return null;
+                            const h = Math.min(p.pop!, 1) * WXL_STRIP_H;
+                            return (
+                              <rect
+                                key={p.ts}
+                                x={((t0 - ts0) / (ts1 - ts0)) * WXL_W + 0.7}
+                                y={WXL_STRIP_H - h}
+                                width={w}
+                                height={h}
+                                fill="var(--led)"
+                                opacity="0.3"
+                              />
+                            );
+                          })}
+                    </WxStrip>
+                    {/* snow, forecast-only (issue #65): the piezo cannot see
+                        snow, so the observed half is honestly blank forever
+                        -- but a Michigan winter deserves its own ledger, and
+                        the empty July strip reserves the space (house rule
+                        #1) rather than appearing with the first flurry.
+                        Snow-white ink, not the rain's LED green. */}
+                    <WxStrip
+                      label="snow · forecast in per 3h"
+                      scale={`${snowMax}`}
+                      ticks={dayFracs}
+                    >
                       {now !== null &&
                         trend.coming
                           .filter(
                             (p) =>
                               p.ts > now &&
-                              p.rain_rate_inhr !== null &&
-                              p.rain_rate_inhr > 0,
+                              p.snow_3h_in !== null &&
+                              p.snow_3h_in > 0,
                           )
                           .map((p) => {
                             const t0 = Math.max(
@@ -2797,8 +2899,7 @@ function WeatherStationView({
                               ((p.ts - t0) / (ts1 - ts0)) * WXL_W - 1.4;
                             if (w <= 0) return null;
                             const h =
-                              (Math.min(p.rain_rate_inhr!, rainMax) /
-                                rainMax) *
+                              (Math.min(p.snow_3h_in!, snowMax) / snowMax) *
                               WXL_STRIP_H;
                             return (
                               <rect
@@ -2807,8 +2908,8 @@ function WeatherStationView({
                                 y={WXL_STRIP_H - h}
                                 width={w}
                                 height={h}
-                                fill="var(--led)"
-                                opacity="0.3"
+                                fill="var(--ink)"
+                                opacity="0.35"
                               />
                             );
                           })}
@@ -2899,37 +3000,7 @@ function WeatherStationView({
                   </div>
                 )}
               </div>
-              {/* the axis reads as a calendar (#60): each weekday label sits
-                  centered over its day's slice between midnight gridlines.
-                  Narrow partial days at the window's edges and anything
-                  shadowing the now stamp stay quiet -- the hover chip names
-                  every point anyway. */}
-              <div className="relative mt-0.5 h-4 text-[10px] text-inkfaint">
-                <span className="absolute left-0">−24h</span>
-                {days.map((t, i) => {
-                  const end = days[i + 1]?.frac ?? 1;
-                  const center = (t.frac + end) / 2;
-                  if (end - t.frac < 0.05) return null;
-                  if (Math.abs(center - WXL_NOW_FRAC) < 0.04) return null;
-                  if (center > 0.96) return null;
-                  return (
-                    <span
-                      key={t.ts}
-                      className="stamp absolute -translate-x-1/2"
-                      style={{ left: `${center * 100}%` }}
-                    >
-                      {t.label}
-                    </span>
-                  );
-                })}
-                <span
-                  className="stamp absolute -translate-x-1/2 text-inkdim"
-                  style={{ left: `${WXL_NOW_FRAC * 100}%` }}
-                >
-                  now
-                </span>
-                <span className="absolute right-0">+5d</span>
-              </div>
+              <WxTimeAxis days={days} className="mt-0.5" />
             </section>
           </main>
 
