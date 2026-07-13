@@ -105,8 +105,9 @@ def main():
           f"tracker={os.path.basename(perception.TRACKER_YAML)}")
     print("\nchurn metrics (the Phase 2 ruler):")
     for key in ("ids_minted", "ids_minted_window", "ids_per_minute", "births",
-                "stitches", "deaths_window", "never_confirmed_window",
-                "median_lifetime_frames", "mean_concurrency", "fragmentation",
+                "births_window", "stitches", "raised", "deaths_window",
+                "never_confirmed_window", "median_lifetime_frames",
+                "mean_concurrency", "fragmentation", "canonical_fragmentation",
                 "window_minutes"):
         print(f"  {key}: {m[key]}")
     print(f"\ncensus (tenured visitors): {dict(census) or 'nobody'}")

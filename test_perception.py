@@ -251,6 +251,132 @@ def test_stitched_frames_accumulate_toward_tenure():
     assert tm.seen == {1: "squirrel"}                   # 2 + 1 frames = tenured
 
 
+# --- the necromancer pass (issue #74, Phase 2.4) --------------------------------
+# The IoU stitch only resurrects an animal that came back WHERE it vanished.
+# The crowd fixture showed under half of re-mints overlap their corpse -- the
+# animal moved a body length or two while the tracker had lost it. A new id of
+# the same species born within NECRO_REACH body-lengths of a VANISHED track
+# (lost past coast, not yet pruned) is that track come back.
+
+def test_moved_remint_is_raised_onto_its_corpse():
+    # Dead box (100,100,180,180): 80px body, reach 160. The newcomer sits a
+    # full body away -- zero overlap, well inside reach.
+    tm = TrackMemory(census_after=1)
+    tm.ingest([det(1, box=(100, 100, 180, 180))])
+    for _ in range(20):                                # vanished: past coast (15)
+        tm.ingest([])
+    live, coasting = tm.ingest([det(7, box=(240, 100, 320, 180))])
+    assert [tid for tid, _ in live] == [1]             # same squirrel, same identity
+    assert coasting == []
+    assert tm.seen == {1: "squirrel"}                  # census: ONE visitor
+    assert tm.total_raised == 1
+    assert tm.total_births == 1                        # no second birth
+
+
+def test_necromancer_reach_is_bounded():
+    # Same corpse, newcomer centered 240px away: past the 160px reach.
+    tm = TrackMemory(census_after=1)
+    tm.ingest([det(1, box=(100, 100, 180, 180))])
+    for _ in range(20):
+        tm.ingest([])
+    live, _ = tm.ingest([det(7, box=(340, 100, 420, 180))])
+    assert [tid for tid, _ in live] == [7]             # genuinely new animal
+    assert tm.total_raised == 0
+
+
+def test_necromancer_never_crosses_species():
+    tm = TrackMemory(census_after=1)
+    tm.ingest([det(1, "squirrel", box=(100, 100, 180, 180))])
+    for _ in range(20):
+        tm.ingest([])
+    live, _ = tm.ingest([det(7, "turkey", box=(240, 100, 320, 180))])
+    assert [tid for tid, _ in live] == [7]
+
+
+def test_midhop_remint_is_raised_from_a_coasting_corpse():
+    # The crowd fixture's biggest leak: a squirrel hops, ByteTrack fails the
+    # association mid-hop, and the new id births a fraction of a second later
+    # under a body length away -- old track still coasting, zero overlap.
+    # The tight coasting tier catches exactly this.
+    tm = TrackMemory(census_after=1)
+    tm.ingest([det(1, box=(100, 100, 180, 180))])
+    tm.ingest([])                                      # missed one frame: coasting
+    live, coasting = tm.ingest([det(7, box=(160, 100, 240, 180))])   # 60px hop
+    assert [tid for tid, _ in live] == [1]             # same squirrel mid-hop
+    assert coasting == []
+    assert tm.total_raised == 1
+
+
+def test_coasting_reach_is_one_body_length():
+    # Beyond one body length, a newcomer beside a coasting track is more
+    # likely a REAL second animal arriving -- it must not merge. (A vanished
+    # corpse gets the full NECRO_REACH; a coasting one only the tight tier.)
+    tm = TrackMemory(census_after=1)
+    tm.ingest([det(1, box=(100, 100, 180, 180))])
+    tm.ingest([])                                      # missed one frame: coasting
+    live, coasting = tm.ingest([det(7, box=(240, 100, 320, 180))])   # 140px away
+    assert [tid for tid, _ in live] == [7]
+    assert [tid for tid, _ in coasting] == [1]         # both animals accounted for
+    assert tm.total_raised == 0
+
+
+def test_necromancer_window_closes_at_prune():
+    tm = TrackMemory(coast_frames=1, prune_frames=3, census_after=1)
+    tm.ingest([det(1, box=(100, 100, 180, 180))])
+    for _ in range(5):                                 # pruned away entirely
+        tm.ingest([])
+    live, _ = tm.ingest([det(7, box=(240, 100, 320, 180))])
+    assert [tid for tid, _ in live] == [7]
+
+
+def test_nearest_grave_wins():
+    tm = TrackMemory(census_after=1)
+    tm.ingest([det(1, box=(100, 100, 180, 180)),       # grave A
+               det(2, box=(400, 100, 480, 180))])      # grave B
+    for _ in range(20):
+        tm.ingest([])
+    # Newcomer at (330..410): center (370,140) -- 90px from B, 230px from A.
+    live, _ = tm.ingest([det(7, box=(330, 100, 410, 180))])
+    assert [tid for tid, _ in live] == [2]
+
+
+def test_overlapping_corpse_beats_a_nearer_grave():
+    # Stitch (IoU) runs first: an overlapping corpse is the stronger claim
+    # even when some other grave is technically closer by center distance.
+    tm = TrackMemory(census_after=1)
+    tm.ingest([det(1, box=(100, 100, 180, 180)),
+               det(2, box=(150, 100, 230, 180))])
+    for _ in range(20):
+        tm.ingest([])
+    # Newcomer overlaps #1 heavily (IoU >= 0.4) but its center is nearer #2.
+    live, _ = tm.ingest([det(7, box=(110, 100, 190, 180))])
+    assert [tid for tid, _ in live] == [1]
+    assert tm.total_stitches == 1
+    assert tm.total_raised == 0
+
+
+def test_raised_track_keeps_accumulating_tenure():
+    # Same contract as the stitch: a resurrection mid-visit must not reset
+    # the visitor clock.
+    tm = TrackMemory(coast_frames=1, prune_frames=100, census_after=3)
+    tm.ingest([det(1, box=(100, 100, 180, 180))])
+    tm.ingest([det(1, box=(100, 100, 180, 180))])
+    tm.ingest([])
+    tm.ingest([])                                      # past coast: vanished
+    tm.ingest([det(7, box=(240, 100, 320, 180))])      # raised, 3rd matched frame
+    assert tm.seen == {1: "squirrel"}
+
+
+def test_necromancer_logs_the_resurrection():
+    lines = []
+    tm = TrackMemory(census_after=1, log=lines.append)
+    tm.ingest([det(1, box=(100, 100, 180, 180))])
+    for _ in range(20):
+        tm.ingest([])
+    tm.ingest([det(7, box=(240, 100, 320, 180))])
+    assert any("#7 raised onto #1" in line for line in lines)
+
+
 # --- churn instrumentation (issue #74, Phase 0) --------------------------------
 # Measure before building: mint/birth/stitch/death counting, per-track
 # confidence stats, and the rolling metrics every Phase 2 change is graded
@@ -308,6 +434,7 @@ def test_metrics_rates_and_fragmentation():
     assert m["ids_per_minute"] == 30.0              # 2 mints in 1/15 of a minute
     assert m["mean_concurrency"] == 2.0
     assert m["fragmentation"] == 1.0                # one id per animal: no churn
+    assert m["canonical_fragmentation"] == 1.0      # ...and one identity per animal
     assert m["median_lifetime_frames"] is None      # nobody has died
 
 
@@ -327,6 +454,7 @@ def test_metrics_window_forgets_old_mints_and_deaths():
     m = tm.metrics()
     assert m["ids_minted"] == 1                     # the all-time count survives
     assert m["ids_minted_window"] == 0              # the window has moved on
+    assert m["births_window"] == 0
     assert m["deaths_window"] == 0
 
 
