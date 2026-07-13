@@ -2320,7 +2320,10 @@ function WeatherStationView({
           {/* --- The sky: hero conditions + the big chart ------------------ */}
           <main className="min-w-0">
             <section className="panel rounded-sm border border-line bg-panel px-4 pb-4 pt-3">
-              <div className="flex flex-wrap items-end gap-x-8 gap-y-4">
+              {/* Top-aligned like the panel (issue #54): items-end left a
+                  dead void above the temperature once the WxStat grid grew
+                  taller than the headline. */}
+              <div className="flex flex-wrap items-start gap-x-8 gap-y-4">
                 <div>
                   <div className="flex items-baseline gap-3">
                     <span
@@ -2328,11 +2331,15 @@ function WeatherStationView({
                     >
                       {wxRound(current?.temp_f ?? null)}°
                     </span>
-                    <span className="text-sm text-inkdim">
+                    <span className="text-base text-inkdim">
                       feels {wxRound(current?.feels_like_f ?? null)}°
                     </span>
                   </div>
-                  <div className="min-h-[20px] text-sm text-inkdim">
+                  {/* The sky gets headline billing next to the number, the
+                      panel's #54 treatment at station-view scale. */}
+                  <div
+                    className={`mt-0.5 min-h-[28px] text-lg ${reporting ? "text-ink" : "text-inkfaint"}`}
+                  >
                     {current?.description ?? ""}
                   </div>
                   <div className="stamp mt-1 text-[10px] text-inkfaint">
