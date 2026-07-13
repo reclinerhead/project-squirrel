@@ -43,6 +43,7 @@ import {
   stackDay,
 } from "@/lib/history";
 import {
+  ConditionIconKey,
   CurrentWeather,
   DEW_TREND_EPS_F,
   DayTick,
@@ -63,6 +64,7 @@ import {
   WeatherStatus,
   ageText,
   compass,
+  conditionIcon,
   dayTicks,
   linePath,
   nearestPoint,
@@ -1479,6 +1481,211 @@ function TrainingRounds({
   );
 }
 
+/* --- Condition icons (issue #78): the sky at a glance -----------------------
+   Eight hand-drawn glyphs in the house line-work style, sized to ride beside
+   the temperature readout. Structure strokes inherit currentColor so the
+   stale and off-air states dim them along with the text; the subject of each
+   sky (sun disc, rain, lightning) wears its accent only while the report is
+   fresh. Clouds fill with the panel color so an overlap occludes what sits
+   behind it instead of tangling line-work. */
+
+const CONDITION_LABEL: Record<ConditionIconKey, string> = {
+  sunny: "sunny",
+  "mostly-sunny": "mostly sunny",
+  "partly-cloudy": "partly cloudy",
+  cloudy: "cloudy",
+  stormy: "stormy",
+  raining: "raining",
+  snowing: "snowing",
+  windy: "super windy",
+};
+
+// One cumulus, drawn once; every cloudy sky places it by transform.
+const CLOUD_PATH = "M35 38H18a14 14 0 1 1 13.42-18h3.58a9 9 0 1 1 0 18Z";
+
+/** Eight rays around a sun disc -- shared by the three sunny-ish skies. */
+function SunRays({
+  cx,
+  cy,
+  from,
+  to,
+}: {
+  cx: number;
+  cy: number;
+  from: number;
+  to: number;
+}) {
+  return (
+    <g>
+      {[0, 45, 90, 135, 180, 225, 270, 315].map((a) => (
+        <line
+          key={a}
+          x1={cx}
+          y1={cy - to}
+          x2={cx}
+          y2={cy - from}
+          transform={`rotate(${a} ${cx} ${cy})`}
+        />
+      ))}
+    </g>
+  );
+}
+
+function ConditionGlyph({
+  icon,
+  size,
+  live,
+}: {
+  icon: ConditionIconKey;
+  size: number;
+  live: boolean;
+}) {
+  const sun = live ? "var(--turkey)" : "currentColor";
+  const rain = live ? "var(--led)" : "currentColor";
+  const common = {
+    viewBox: "0 0 48 48",
+    width: size,
+    height: size,
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 2.4,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    "aria-hidden": true,
+  };
+  switch (icon) {
+    case "sunny":
+      return (
+        <svg {...common} stroke={sun}>
+          <circle cx="24" cy="24" r="9.5" />
+          <SunRays cx={24} cy={24} from={14.5} to={19} />
+        </svg>
+      );
+    case "mostly-sunny":
+      return (
+        <svg {...common}>
+          <g stroke={sun}>
+            <circle cx="19" cy="19" r="8" />
+            <SunRays cx={19} cy={19} from={11.5} to={15.5} />
+          </g>
+          <g transform="translate(16 20) scale(0.58)">
+            <path d={CLOUD_PATH} fill="var(--panel)" strokeWidth={2.4 / 0.58} />
+          </g>
+        </svg>
+      );
+    case "partly-cloudy":
+      return (
+        <svg {...common}>
+          <g stroke={sun}>
+            <circle cx="17" cy="15" r="7" />
+            <SunRays cx={17} cy={15} from={10} to={13.5} />
+          </g>
+          <g transform="translate(4.5 12) scale(0.76)">
+            <path d={CLOUD_PATH} fill="var(--panel)" strokeWidth={2.4 / 0.76} />
+          </g>
+        </svg>
+      );
+    case "cloudy":
+      return (
+        <svg {...common}>
+          <g transform="translate(17.5 3) scale(0.5)" strokeOpacity={0.55}>
+            <path d={CLOUD_PATH} strokeWidth={2.4 / 0.5} />
+          </g>
+          <g transform="translate(0 5) scale(0.92)">
+            <path d={CLOUD_PATH} fill="var(--panel)" strokeWidth={2.4 / 0.92} />
+          </g>
+        </svg>
+      );
+    case "stormy":
+      return (
+        <svg {...common}>
+          <g transform="translate(3.5 -5) scale(0.85)">
+            <path d={CLOUD_PATH} fill="var(--panel)" strokeWidth={2.4 / 0.85} />
+          </g>
+          <path
+            d="M26 25 L18.5 37 H23.5 L21.5 46 L31.5 33.5 H26 L29 25 Z"
+            fill={sun}
+            stroke="none"
+          />
+        </svg>
+      );
+    case "raining":
+      return (
+        <svg {...common}>
+          <g transform="translate(3.5 -3.5) scale(0.85)">
+            <path d={CLOUD_PATH} fill="var(--panel)" strokeWidth={2.4 / 0.85} />
+          </g>
+          <g stroke={rain}>
+            <line x1="15.5" y1="33" x2="13" y2="41" />
+            <line x1="23.5" y1="35" x2="21" y2="43" />
+            <line x1="31.5" y1="33" x2="29" y2="41" />
+          </g>
+        </svg>
+      );
+    case "snowing":
+      return (
+        <svg {...common}>
+          <g transform="translate(3.5 -3.5) scale(0.85)">
+            <path d={CLOUD_PATH} fill="var(--panel)" strokeWidth={2.4 / 0.85} />
+          </g>
+          {/* three six-armed flakes: three crossing lines each */}
+          <g strokeWidth={1.7}>
+            {(
+              [
+                [15, 37],
+                [24, 41],
+                [33, 37],
+              ] as const
+            ).map(([x, y]) =>
+              [0, 60, 120].map((a) => (
+                <line
+                  key={`${x}-${a}`}
+                  x1={x}
+                  y1={y - 3.4}
+                  x2={x}
+                  y2={y + 3.4}
+                  transform={`rotate(${a} ${x} ${y})`}
+                />
+              )),
+            )}
+          </g>
+        </svg>
+      );
+    case "windy":
+      return (
+        <svg {...common}>
+          <path d="M19.6 8.8A4 4 0 1 1 22 16H4" />
+          <path d="M35 16a5 5 0 1 1 4 8H4" />
+          <path d="M25.6 39.2A4 4 0 1 0 28 32H4" />
+        </svg>
+      );
+  }
+}
+
+/** The icon's slot beside a temperature readout. Fixed-size whether or not a
+ * sky is known (house rule #1): no report means an empty reservation, never
+ * a collapsed one. */
+function ConditionBadge({
+  icon,
+  size,
+  live,
+}: {
+  icon: ConditionIconKey | null;
+  size: number;
+  live: boolean;
+}) {
+  return (
+    <span
+      className={`flex shrink-0 items-center justify-center ${live ? "text-ink" : "text-inkfaint"}`}
+      style={{ width: size, height: size }}
+      role={icon ? "img" : undefined}
+      aria-label={icon ? CONDITION_LABEL[icon] : undefined}
+    >
+      {icon && <ConditionGlyph icon={icon} size={size} live={live} />}
+    </span>
+  );
+}
+
 /* --- Weather Post (issue #25): conditions at the seed pile ------------------ */
 
 // Chart geometry. The viewBox is stretched to the panel width
@@ -1716,25 +1923,34 @@ function WeatherPost() {
             block -- the headline belongs up under the masthead, sized to
             fill the height the telemetry rows set. */}
         <div className="flex min-h-[92px] items-start justify-between gap-3">
-          <div>
-            <div className="flex items-baseline gap-2.5">
-              <span
-                className={`text-5xl font-bold tabular-nums ${reporting ? "text-ink" : "text-inkfaint"}`}
+          {/* The sky's icon (issue #78) rides left of the number, centered on
+              the temperature + description block. */}
+          <div className="flex items-center gap-3">
+            <ConditionBadge
+              icon={conditionIcon(current)}
+              size={44}
+              live={reporting}
+            />
+            <div>
+              <div className="flex items-baseline gap-2.5">
+                <span
+                  className={`text-5xl font-bold tabular-nums ${reporting ? "text-ink" : "text-inkfaint"}`}
+                >
+                  {round(current?.temp_f ?? null)}°
+                </span>
+                <span className="text-base text-inkdim">
+                  feels {round(current?.feels_like_f ?? null)}°
+                </span>
+              </div>
+              {/* Conditions ride with the temperature -- the sky gets headline
+                  billing next to the number (issue #54), not caption type.
+                  min-h reserves the line before the first report, so nothing
+                  shifts when it lands. */}
+              <div
+                className={`mt-0.5 min-h-[24px] text-base ${reporting ? "text-ink" : "text-inkfaint"}`}
               >
-                {round(current?.temp_f ?? null)}°
-              </span>
-              <span className="text-base text-inkdim">
-                feels {round(current?.feels_like_f ?? null)}°
-              </span>
-            </div>
-            {/* Conditions ride with the temperature -- the sky gets headline
-                billing next to the number (issue #54), not caption type.
-                min-h reserves the line before the first report, so nothing
-                shifts when it lands. */}
-            <div
-              className={`mt-0.5 min-h-[24px] text-base ${reporting ? "text-ink" : "text-inkfaint"}`}
-            >
-              {current?.description ?? ""}
+                {current?.description ?? ""}
+              </div>
             </div>
           </div>
           <div className="flex flex-col items-end gap-0.5 text-[11px] text-inkdim">
@@ -2566,34 +2782,46 @@ function WeatherStationView({
                   dead void above the temperature once the WxStat grid grew
                   taller than the headline. */}
               <div className="flex flex-wrap items-start gap-x-8 gap-y-4">
-                <div>
-                  <div className="flex items-baseline gap-3">
-                    <span
-                      className={`text-6xl font-bold tabular-nums ${reporting ? "text-ink" : "text-inkfaint"}`}
+                {/* The sky's icon (issue #78) takes the left column; feels-like
+                    and the tendency stack beside the number to make the room. */}
+                <div className="flex items-center gap-4">
+                  <ConditionBadge
+                    icon={conditionIcon(current)}
+                    size={58}
+                    live={reporting}
+                  />
+                  <div>
+                    <div className="flex items-center gap-3">
+                      <span
+                        className={`text-6xl font-bold tabular-nums ${reporting ? "text-ink" : "text-inkfaint"}`}
+                      >
+                        {wxRound(current?.temp_f ?? null)}°
+                      </span>
+                      <span className="flex flex-col text-base leading-snug text-inkdim">
+                        <span>feels {wxRound(current?.feels_like_f ?? null)}°</span>
+                        {/* the tendency (issue #67) gets its own line under the
+                            feels-like; min-h reserves it before the trail is
+                            long enough to have an opinion */}
+                        <span className="min-h-[24px]">
+                          {tempTrend &&
+                            `${TREND_GLYPH[tempTrend]} ${tempTrend}`}
+                        </span>
+                      </span>
+                    </div>
+                    {/* The sky gets headline billing next to the number, the
+                        panel's #54 treatment at station-view scale. */}
+                    <div
+                      className={`mt-0.5 min-h-[28px] text-lg ${reporting ? "text-ink" : "text-inkfaint"}`}
                     >
-                      {wxRound(current?.temp_f ?? null)}°
-                    </span>
-                    <span className="text-base text-inkdim">
-                      feels {wxRound(current?.feels_like_f ?? null)}°
-                      {/* the hero number has no sub-line, so its tendency
-                          (issue #67) rides the feels-like quietly */}
-                      {tempTrend &&
-                        ` · ${TREND_GLYPH[tempTrend]} ${tempTrend}`}
-                    </span>
-                  </div>
-                  {/* The sky gets headline billing next to the number, the
-                      panel's #54 treatment at station-view scale. */}
-                  <div
-                    className={`mt-0.5 min-h-[28px] text-lg ${reporting ? "text-ink" : "text-inkfaint"}`}
-                  >
-                    {current?.description ?? ""}
-                  </div>
-                  <div className="stamp mt-1 text-[10px] text-inkfaint">
-                    sun {clock(current?.sunrise ?? null)} –{" "}
-                    {clock(current?.sunset ?? null)}
-                    {current !== null && now !== null && (
-                      <> · read {ageText(current.ts, now)}</>
-                    )}
+                      {current?.description ?? ""}
+                    </div>
+                    <div className="stamp mt-1 text-[10px] text-inkfaint">
+                      sun {clock(current?.sunrise ?? null)} –{" "}
+                      {clock(current?.sunset ?? null)}
+                      {current !== null && now !== null && (
+                        <> · read {ageText(current.ts, now)}</>
+                      )}
+                    </div>
                   </div>
                 </div>
                 <div className="grid flex-1 grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3">
