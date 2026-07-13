@@ -2044,8 +2044,12 @@ function WeatherPost() {
 // main chart, so every timestamp lines up vertically across all four.
 const WXL_W = 960;
 const WXL_H = 240;
-const WXL_STRIP_H = 52;
+const WXL_STRIP_H = 72;
 const WX_NOW_FRAC = PAST_S / (PAST_S + FUTURE_S);
+// OpenWeather's forecast step: each point's rain_rate_inhr (issue #56) is the
+// average over the 3 hours ENDING at its ts ("volume for last 3 hours"), so
+// its ghost bar spans that window on the strip.
+const WX_FORECAST_STEP_S = 3 * 3600;
 
 /** One labeled reading in the hero grid: stamped label, instrument-sized
  * value, the unit riding quietly after it. */
@@ -2105,8 +2109,10 @@ function SegMeter({
 /** One instrument strip under the main chart: its own svg sharing the time
  * axis, the now-divider, and faint tick rules for alignment. The series
  * itself comes in as svg children; the label sits in the forecast half,
- * which the station's instruments leave honestly blank -- there are no
- * measurements in the future. */
+ * which the station's instruments mostly leave blank -- there are no
+ * measurements in the future. (The rain strip is the exception since issue
+ * #56: OpenWeather's forecast brings a precip series of its own, drawn as
+ * ghost bars that stay well below the label's corner.) */
 function WxStrip({
   label,
   scale,
@@ -2117,7 +2123,7 @@ function WxStrip({
   children: React.ReactNode;
 }) {
   return (
-    <div className="relative mt-1 h-[52px] w-full border-t border-line/60">
+    <div className="relative mt-1 h-[72px] w-full border-t border-line/60">
       <svg
         viewBox={`0 0 ${WXL_W} ${WXL_STRIP_H}`}
         preserveAspectRatio="none"
@@ -2147,10 +2153,10 @@ function WxStrip({
         />
         {children}
       </svg>
-      <span className="stamp pointer-events-none absolute right-1 top-1 text-[9px] text-inkfaint">
+      <span className="stamp pointer-events-none absolute right-1 top-1 text-[10px] text-inkfaint">
         {label}
       </span>
-      <span className="pointer-events-none absolute left-1 top-0.5 text-[9px] tabular-nums text-inkfaint">
+      <span className="pointer-events-none absolute left-1 top-0.5 text-[10px] tabular-nums text-inkfaint">
         {scale}
       </span>
     </div>
@@ -2228,10 +2234,13 @@ function WeatherStationView({
     ? nightBands(current?.sunrise ?? null, current?.sunset ?? null, ts0, ts1)
     : [];
 
-  // The strips chart the observed trail only -- the forecast carries none of
-  // these series, and an honest chart leaves the future blank.
+  // The strips chart the observed trail -- the forecast carries none of
+  // these series, and an honest chart leaves the future blank. The one
+  // exception since issue #56 is rain: forecast points bring a precip rate
+  // of their own, so the rain strip ghosts the future and its scale must
+  // fit forecast peaks too.
   const observed = trend.observed;
-  const rainMax = seriesCeil(observed, (p) => p.rain_rate_inhr, 0.25, 0.25);
+  const rainMax = seriesCeil(allPts, (p) => p.rain_rate_inhr, 0.25, 0.25);
   const solarMax = seriesCeil(observed, (p) => p.solar_wm2, 200, 100);
   const uvMax = seriesCeil(observed, (p) => p.uv_index, 4, 2);
   const presRange = pressureRange(observed);
@@ -2241,12 +2250,19 @@ function WeatherStationView({
       ? nearestPoint(allPts, ts0 + hoverFrac * (ts1 - ts0))
       : null;
   const hoveredFrac = hovered ? (hovered.ts - ts0) / (ts1 - ts0) : 0;
-  // The station-series line of the readout: only what the hovered point
-  // actually measured (observed side; forecast points have none of it).
+  // The station-series line of the readout: what the hovered point actually
+  // measured (observed side), or -- the issue #56 exception -- what the
+  // forecast expects to fall, plus its chance.
   const hoveredExtras = hovered
     ? [
         hovered.rain_rate_inhr !== null && hovered.rain_rate_inhr > 0
           ? `rain ${hovered.rain_rate_inhr.toFixed(2)}/hr`
+          : null,
+        now !== null &&
+        hovered.ts > now &&
+        hovered.pop !== null &&
+        hovered.pop >= 0.05
+          ? `chance ${Math.round(hovered.pop * 100)}%`
           : null,
         hovered.pressure_rel_inhg !== null
           ? `baro ${hovered.pressure_rel_inhg.toFixed(2)}`
@@ -2441,7 +2457,7 @@ function WeatherStationView({
                 onPointerCancel={() => setHoverFrac(null)}
               >
                 {/* main chart: temperature + wind, the panel chart writ tall */}
-                <div className="relative h-56 w-full sm:h-64">
+                <div className="relative h-72 w-full sm:h-96">
                   {hasChart && (
                     <svg
                       viewBox={`0 0 ${WXL_W} ${WXL_H}`}
@@ -2518,13 +2534,13 @@ function WeatherStationView({
                   )}
                   {hasChart && range !== null && (
                     <>
-                      <span className="pointer-events-none absolute left-1 top-0.5 text-[9px] tabular-nums text-squirrel opacity-60">
+                      <span className="pointer-events-none absolute left-1 top-0.5 text-[10px] tabular-nums text-squirrel opacity-60">
                         {range.max}°
                       </span>
-                      <span className="pointer-events-none absolute bottom-0.5 left-1 text-[9px] tabular-nums text-squirrel opacity-60">
+                      <span className="pointer-events-none absolute bottom-0.5 left-1 text-[10px] tabular-nums text-squirrel opacity-60">
                         {range.min}°
                       </span>
-                      <span className="pointer-events-none absolute right-1 top-0.5 text-[9px] tabular-nums text-inkfaint">
+                      <span className="pointer-events-none absolute right-1 top-0.5 text-[10px] tabular-nums text-inkfaint">
                         {windMax} mph
                       </span>
                     </>
@@ -2584,6 +2600,43 @@ function WeatherStationView({
                             opacity="0.75"
                           />
                         ))}
+                      {/* the forecast's ghost bars (issue #56): each spans
+                          the 3h window ending at its point, clipped at the
+                          now line (the observed trail owns the past), and
+                          reads as forecast the way the dashed lines do --
+                          same ink, much less of it */}
+                      {now !== null &&
+                        trend.coming
+                          .filter(
+                            (p) =>
+                              p.ts > now &&
+                              p.rain_rate_inhr !== null &&
+                              p.rain_rate_inhr > 0,
+                          )
+                          .map((p) => {
+                            const t0 = Math.max(
+                              p.ts - WX_FORECAST_STEP_S,
+                              now,
+                            );
+                            const w =
+                              ((p.ts - t0) / (ts1 - ts0)) * WXL_W - 1.4;
+                            if (w <= 0) return null;
+                            const h =
+                              (Math.min(p.rain_rate_inhr!, rainMax) /
+                                rainMax) *
+                              WXL_STRIP_H;
+                            return (
+                              <rect
+                                key={p.ts}
+                                x={((t0 - ts0) / (ts1 - ts0)) * WXL_W + 0.7}
+                                y={WXL_STRIP_H - h}
+                                width={w}
+                                height={h}
+                                fill="var(--led)"
+                                opacity="0.3"
+                              />
+                            );
+                          })}
                     </WxStrip>
                     <WxStrip
                       label="barometer · in"
@@ -2669,7 +2722,7 @@ function WeatherStationView({
                   </div>
                 )}
               </div>
-              <div className="relative mt-0.5 h-4 text-[9px] text-inkfaint">
+              <div className="relative mt-0.5 h-4 text-[10px] text-inkfaint">
                 <span className="absolute left-0">−24h</span>
                 {WX_TICKS.map((t) => (
                   <span
