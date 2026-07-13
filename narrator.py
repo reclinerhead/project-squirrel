@@ -12,6 +12,15 @@
 # rolling memory of the narrator's own recent lines gives the model variety
 # ("don't repeat yourself") and continuity (running-show callbacks).
 #
+# Issue #74 put an EDITOR between the wire and the talent: tracker id churn on
+# a steady scene can flood driveway/events with phantom departure+arrival
+# pairs, and v1 handed every one of them to the narrator -- nonstop LLM calls.
+# The Editor (below) holds a species-count change until it PERSISTS (a
+# departure immediately undone by an arrival was the same animal), hard-caps
+# how often anything reaches the talent, and collapses whatever piled up
+# during the cooldown into ONE scene_update summary. Dropped moments are fine:
+# SQLite has the record; the bus is live transport.
+#
 #   python narrator.py --persona personas/marlin.yaml
 #
 # Bus contract (topics in bus.py):
@@ -39,6 +48,11 @@
 #   MERLE_NARRATION_JOURNAL  journal file path (default: narration_journal.json,
 #                       which lands in the unit's WorkingDirectory on pearl --
 #                       the MERLE_WEATHER_HISTORY convention)
+#   MERLE_NARRATE_STABLE_S        seconds a species-count change must hold
+#                                 before it is narratable (default 20)
+#   MERLE_NARRATE_MIN_INTERVAL_S  hard floor between narrations -- the LLM-call
+#                                 ceiling, regardless of upstream behavior
+#                                 (default 30 = at most 2 calls/min)
 #
 # The narrator never plays audio itself -- it publishes; a consumer (the MCC
 # dashboard's TTS, someday a speaker on the porch) does the speaking.
@@ -50,6 +64,7 @@
 import argparse
 import json
 import os
+import queue
 import random
 import time
 import urllib.request
@@ -75,6 +90,10 @@ INTEREST = {
     "crowd_snapshot": 0.9,
     "arrival": 0.7,
     "departure": 0.5,
+    # scene_update is the Editor's burst-collapse summary (issue #74) -- it
+    # stands in for several arrivals/departures at once, so it must interest
+    # any narrator an arrival would.
+    "scene_update": 0.7,
     "clip_recorded": 0.2,
 }
 UNKNOWN_INTEREST = 0.3   # future event kinds: mildly interesting, never spam
@@ -102,6 +121,11 @@ TEMPLATES = {
     "clip_recorded": (
         "For the archive: that last stretch is on tape.",
         "Clip's in the can. Posterity will thank us.",
+    ),
+    "scene_update": (
+        "Busy stretch out there. Where things stand now: {scene}.",
+        "Taking stock after the commotion: {scene}. {station} rolls on.",
+        "The dust settles, and the tally reads: {scene}.",
     ),
 }
 FALLBACK_TEMPLATES = (
@@ -148,6 +172,20 @@ def human_duration(seconds):
     return f"about {seconds / 3600:.1f} hours"
 
 
+def scene_phrase(counts):
+    """A spoken inventory of the scene from a {species: count} dict --
+    "4 squirrels and 1 turkey" -- or a quiet-pavement phrase when nothing is
+    out there. Naive plural (+s) is fine for this cast: squirrels, turkeys,
+    chipmunks."""
+    parts = [f"{n} {sp}{'s' if n != 1 else ''}"
+             for sp, n in sorted(counts.items()) if n > 0]
+    if not parts:
+        return "a quiet stretch of pavement"
+    if len(parts) == 1:
+        return parts[0]
+    return ", ".join(parts[:-1]) + " and " + parts[-1]
+
+
 def template_fields(event, bible):
     """Everything a template may reference, from the event + the bible. One
     function so a new template can't invent a field the tests don't check."""
@@ -161,6 +199,7 @@ def template_fields(event, bible):
         "duration": human_duration(duration_s) if duration_s is not None
                     else "a good while",
         "total": details.get("total", "several"),
+        "scene": scene_phrase(details.get("counts") or {}),
         "station": bible.get("station", "the driveway"),
         "seed_pile": bible.get("seed_pile", "the seed pile"),
         "big_chonk": (bible.get("legends") or {}).get("big_chonk", "Big Chonk"),
@@ -171,11 +210,12 @@ def template_fields(event, bible):
 
 OLLAMA_DEFAULT_PORT = 11434
 OLLAMA_DEFAULT_MODEL = "gemma3:12b"
-# Generation blocks the paho network loop (on_message), so the timeout must
-# stay under the MQTT keepalive (60s). Events arriving mid-generation queue up
-# and mostly fall to the cooldown gate afterwards -- which is the pacing we
-# wanted anyway. Desk-tested: ~8s warm, ~15s with a cold model load, so 30s
-# gives cold starts headroom without risking the bus connection.
+# Generation runs on the main pacing loop (issue #74 moved it off paho's
+# network thread -- on_message only enqueues now, so a slow generation can no
+# longer threaten the MQTT keepalive). Events arriving mid-generation wait in
+# the queue and mostly collapse at the Editor afterwards -- which is the
+# pacing we wanted anyway. Desk-tested: ~8s warm, ~15s with a cold model load,
+# so 30s gives cold starts headroom without stalling the show for long.
 OLLAMA_TIMEOUT_S = 30
 
 # Output rules live in code, not the persona file, so every persona gets them
@@ -250,6 +290,17 @@ def event_summary(event, bible):
         summary = f"The {f['species']} has just left after a visit of {f['duration']}."
     elif kind == "crowd_snapshot":
         summary = f"There are now {f['total']} animals out on the pavement at once."
+    elif kind == "scene_update":
+        # The Editor's burst-collapse summary (issue #74): several changes
+        # landed during the narration cooldown, so the story is where the
+        # scene ENDED UP, not the play-by-play that got it there.
+        counts = (event.get("details") or {}).get("counts") or {}
+        if counts:
+            summary = (f"After a busy stretch of comings and goings, the scene "
+                       f"has settled: {scene_phrase(counts)} out on the pavement.")
+        else:
+            summary = ("After a busy stretch of comings and goings, "
+                       "the pavement has gone quiet.")
     elif kind == "clip_recorded":
         summary = "A video clip of the recent activity was just saved to the archive."
     else:
@@ -448,6 +499,122 @@ def roll_journal(window, line, limit=JOURNAL_LINES):
     return (window + [line])[-limit:]
 
 
+# --- The editor's desk (issue #74) --------------------------------------------
+# Tracker id churn on a steady feeding scene floods driveway/events with
+# phantom departure+arrival pairs (a stationary squirrel flickers out of
+# detection, its track dies, a "new" one is born in place). The daemon
+# debounces at its end, but the narrator must survive a noisy bus on its own:
+# every event that reached the talent was a potential LLM call, and a churning
+# scene turned into a nonstop generation storm on the GPU. The Editor is the
+# narrator-side defense, and it is deliberately SCENE-level state (one desk
+# for the whole show), not per-narrator pacing -- personas keep their own
+# cooldown/interest knobs downstream, unchanged.
+
+# A species-count change must hold this long before it is news. Phantom churn
+# reads as departure-then-arrival within a few seconds; a change that survives
+# 20s is an animal that actually came or went.
+STABLE_AFTER_S = 20.0
+# The hard floor between narrations -- the LLM-call ceiling (issue #74's
+# "GPU fan" number: 30s = at most 2 generations/min no matter what the bus
+# does). Independent of the persona cooldown on purpose: personas tune
+# character, this caps cost.
+NARRATE_MIN_INTERVAL_S = 30.0
+# How often main() drains the queue and asks the Editor for news. Coarse is
+# fine -- nothing downstream is latency-sensitive at under a second.
+EDITOR_TICK_S = 1.0
+
+
+def env_float(name, default):
+    """An optional float env knob: unset/blank means the default; a malformed
+    value fails at startup (the bus.py convention -- never run half-configured
+    while looking healthy)."""
+    raw = os.environ.get(name, "").strip()
+    return float(raw) if raw else default
+
+
+class Editor:
+    """Decides what is NEWS. Sits between driveway/events and the talent:
+
+    - HYSTERESIS: an arrival/departure only becomes narratable once the
+      species' reported count has held at its new value for `stable_s`. A
+      departure immediately undone by an arrival of the same species (the id-
+      churn signature) settles back to the old count and cancels -- it was the
+      same animal, and the explicit outcome is SILENCE, not a hedged line.
+    - RATE LIMIT + BURST COLLAPSE: poll() hands out at most one event per
+      `min_interval_s`. Everything that stabilized or happened during the
+      cooldown collapses into ONE scene_update event summarizing where the
+      scene ended up. Dropped play-by-play is fine -- SQLite has the record.
+
+    Pure logic, injected clock (`now` everywhere), no I/O -- covered by
+    test_narrator.py. ingest() takes events as they arrive; poll() is called
+    on a timer and returns the one event worth handing the talent, or None.
+    """
+
+    def __init__(self, stable_s=STABLE_AFTER_S, min_interval_s=NARRATE_MIN_INTERVAL_S):
+        self.stable_s = stable_s
+        self.min_interval_s = min_interval_s
+        # species -> {"stable": count last narrated (or settled), "latest":
+        # count most recently reported, "since": when latest first diverged
+        # from stable (None = no change pending), "event": the event that
+        # last moved latest (kept so a lone ripened change narrates as the
+        # real arrival/departure, duration_s and all)}
+        self.species = {}
+        # Non-presence moments (crowd_snapshot, clip_recorded, future kinds),
+        # keyed by kind so a burst of the same moment keeps only the latest.
+        self.moments = {}
+        self.last_narrated = float("-inf")
+
+    def ingest(self, event, now):
+        details = event.get("details") or {}
+        kind = event.get("kind")
+        presence = kind in ("arrival", "departure") \
+            and "species" in details and "count" in details
+        if not presence:
+            self.moments[kind] = event
+            return
+        st = self.species.setdefault(
+            details["species"], {"stable": 0, "latest": 0, "since": None, "event": None})
+        st["latest"] = details["count"]
+        st["event"] = event
+        if st["latest"] == st["stable"]:
+            st["since"] = None   # wobbled back -- same animal, never news
+        elif st["since"] is None:
+            st["since"] = now    # a fresh divergence starts the clock; a
+                                 # pending one keeps its original clock (the
+                                 # count has differed from stable throughout)
+
+    def _ripe(self, now):
+        return [st for st in self.species.values()
+                if st["since"] is not None and now - st["since"] >= self.stable_s]
+
+    def poll(self, now):
+        """The one event worth narrating right now, or None. Advances the
+        stable counts (and clears the moment shelf) only when a slot is
+        actually spent, so nothing stabilizes into the void."""
+        if now - self.last_narrated < self.min_interval_s:
+            return None
+        ripe = self._ripe(now)
+        moments = list(self.moments.values())
+        if not ripe and not moments:
+            return None
+        self.last_narrated = now
+        for st in ripe:
+            st["stable"] = st["latest"]
+            st["since"] = None
+        self.moments.clear()
+        if len(ripe) == 1 and not moments:
+            return ripe[0]["event"]        # one real change: tell it straight
+        if not ripe and len(moments) == 1:
+            return moments[0]
+        # Burst collapse: several things landed during the cooldown. One
+        # summary of where the scene ended up -- full snapshot, including
+        # species that didn't change, because "the scene" is the story.
+        counts = {sp: st["stable"] for sp, st in self.species.items()
+                  if st["stable"] > 0}
+        return {"ts": datetime.fromtimestamp(now).isoformat(timespec="seconds"),
+                "kind": "scene_update", "details": {"counts": counts}}
+
+
 class Narrator:
     """One voice: a persona, the shared bible, and its own pacing state."""
 
@@ -521,6 +688,12 @@ def main():
         print(f"[{persona['name']}] narration tier: templates (MERLE_OLLAMA not set)")
 
     producer = Producer([Narrator(persona, bible, ollama=ollama)])
+    editor = Editor(
+        stable_s=env_float("MERLE_NARRATE_STABLE_S", STABLE_AFTER_S),
+        min_interval_s=env_float("MERLE_NARRATE_MIN_INTERVAL_S", NARRATE_MIN_INTERVAL_S))
+    print(f"[{persona['name']}] editor's desk: changes must hold "
+          f"{editor.stable_s:g}s; at most one narration per "
+          f"{editor.min_interval_s:g}s")
 
     journal_path = os.environ.get("MERLE_NARRATION_JOURNAL", "").strip() \
         or DEFAULT_JOURNAL_PATH
@@ -549,8 +722,15 @@ def main():
         c.subscribe(bus.WEATHER_CURRENT_TOPIC)
         print(f"[{persona['name']}] on the air, listening to {bus.EVENTS_TOPIC}")
 
+    # on_message runs on paho's network thread and must stay instant (issue
+    # #74): it only parses and enqueues. The pacing loop below -- the main
+    # thread -- owns the Editor, the talent, and the (blocking) LLM call, so a
+    # slow generation can never threaten the MQTT keepalive again. Events are
+    # queued WITH their arrival time: hysteresis judges when a change was
+    # reported, not when the loop got around to reading it.
+    events = queue.Queue()
+
     def on_message(c, userdata, msg):
-        nonlocal journal
         try:
             payload = json.loads(msg.payload)
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -559,34 +739,47 @@ def main():
             for narrator in producer.roster:
                 narrator.latest_weather = payload
             return
-        event = payload
-        now = time.time()
-        for narrator in producer.cast(event, now):
-            line = narrator.speak(event, now)
-            c.publish(bus.NARRATION_TOPIC, json.dumps(line))
-            # The journal keeps exactly what went out on narration/lines --
-            # file first, then the retained window, so a crash between the
-            # two loses a broadcast, never the record.
-            journal = roll_journal(journal, line)
-            save_journal(journal_path, journal)
-            c.publish(bus.NARRATION_JOURNAL_TOPIC,
-                      json.dumps({"lines": journal}), retain=True)
-            print(f"[{line['narrator']}] {line['text']}")
+        events.put((time.time(), payload))
 
     client.on_connect = on_connect
     client.on_message = on_message
 
     host, port = bus.broker_address()
     # connect() (not connect_async): a narrator with no bus has no job, so fail
-    # loudly at launch. Once up, loop_forever() auto-reconnects through broker
-    # restarts (on_connect re-publishes presence and re-subscribes each time).
+    # loudly at launch. Once up, paho's loop thread auto-reconnects through
+    # broker restarts (on_connect re-publishes presence and re-subscribes each
+    # time).
     client.connect(host, port)
+    client.loop_start()
     try:
-        client.loop_forever()
+        while True:
+            time.sleep(EDITOR_TICK_S)
+            while True:
+                try:
+                    arrived, event = events.get_nowait()
+                except queue.Empty:
+                    break
+                editor.ingest(event, arrived)
+            story = editor.poll(time.time())
+            if story is None:
+                continue   # the explicit no-output path: unstable or nothing new
+            now = time.time()
+            for narrator in producer.cast(story, now):
+                line = narrator.speak(story, now)
+                client.publish(bus.NARRATION_TOPIC, json.dumps(line))
+                # The journal keeps exactly what went out on narration/lines --
+                # file first, then the retained window, so a crash between the
+                # two loses a broadcast, never the record.
+                journal = roll_journal(journal, line)
+                save_journal(journal_path, journal)
+                client.publish(bus.NARRATION_JOURNAL_TOPIC,
+                               json.dumps({"lines": journal}), retain=True)
+                print(f"[{line['narrator']}] {line['text']}")
     except KeyboardInterrupt:
         # Graceful sign-off: publish offline ourselves (a clean disconnect
         # suppresses the Last Will -- that's for crashes).
         client.publish(status_topic, "offline", retain=True)
+        client.loop_stop()
         client.disconnect()
         print(f"\n[{persona['name']}] signing off.")
 
