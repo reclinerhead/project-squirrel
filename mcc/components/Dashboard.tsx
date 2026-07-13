@@ -581,16 +581,7 @@ function FieldJournal() {
   const narrators = Object.entries(presence).sort(([a], [b]) =>
     a.localeCompare(b),
   );
-  // With a roster of two (issue #80), one lamp per narrator crowds the panel
-  // label -- so narrators sharing a status share a lamp and their names join:
-  // "jim, marlin · on the air". Nonstandard statuses ("coffee break") stay
-  // individual; they're rare and worth the room.
-  const onAir = narrators.filter(([, s]) => s === "online").map(([id]) => id);
-  const offAir = narrators.filter(([, s]) => s === "offline").map(([id]) => id);
-  const others = narrators.filter(
-    ([, s]) => s !== "online" && s !== "offline",
-  );
-  const anyoneOn = onAir.length > 0;
+  const anyoneOn = narrators.some(([, status]) => status === "online");
 
   return (
     <section className="panel flex flex-col rounded-sm border border-line bg-panel">
@@ -605,32 +596,40 @@ function FieldJournal() {
                 no narrator hired
               </span>
             ) : (
-              <>
-                {onAir.length > 0 && (
-                  <span className="flex items-center gap-1.5 text-xs">
-                    <span className="lamp inline-block h-2 w-2 rounded-full bg-led text-led" />
-                    <span className="stamp text-led">
-                      {onAir.join(", ")} · on the air
-                    </span>
-                  </span>
-                )}
-                {offAir.length > 0 && (
-                  <span className="flex items-center gap-1.5 text-xs">
-                    <span className="inline-block h-2 w-2 rounded-full bg-inkfaint" />
-                    <span className="stamp text-inkfaint">
-                      {offAir.join(", ")} · off the air
-                    </span>
-                  </span>
-                )}
-                {others.map(([id, status]) => (
+              // One dot + name per narrator (issue #84): the pulsing green
+              // lamp reads as "live" on its own, so a roster of two fits the
+              // header without the "· on/off the air" suffix crowding it. A
+              // non-standard retained status (a future "coffee break") still
+              // shows its text -- the name alone can't convey an arbitrary
+              // state.
+              narrators.map(([id, status]) => {
+                const online = status === "online";
+                const offline = status === "offline";
+                return (
                   <span key={id} className="flex items-center gap-1.5 text-xs">
-                    <span className="breathe inline-block h-2 w-2 rounded-full bg-turkey" />
-                    <span className="stamp text-turkey">
-                      {id} · {status}
+                    <span
+                      className={`inline-block h-2 w-2 rounded-full ${
+                        online
+                          ? "lamp bg-led text-led"
+                          : offline
+                            ? "bg-inkfaint"
+                            : "breathe bg-turkey"
+                      }`}
+                    />
+                    <span
+                      className={`stamp ${
+                        online
+                          ? "text-led"
+                          : offline
+                            ? "text-inkfaint"
+                            : "text-turkey"
+                      }`}
+                    >
+                      {online || offline ? id : `${id} · ${status}`}
                     </span>
                   </span>
-                ))}
-              </>
+                );
+              })
             )}
             <button
               type="button"
