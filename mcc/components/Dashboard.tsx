@@ -44,12 +44,15 @@ import {
 } from "@/lib/history";
 import {
   CurrentWeather,
+  DEW_TREND_EPS_F,
   DayTick,
   FUTURE_S,
+  HUMIDITY_TREND_EPS_PCT,
   PAST_S,
   REPORT_STALE_S,
   STALE_AFTER_S,
   STATION_FUTURE_S,
+  TEMP_TREND_EPS_F,
   WEATHER_CURRENT_TOPIC,
   WEATHER_FORECAST_TOPIC,
   WEATHER_HISTORY_TOPIC,
@@ -71,6 +74,7 @@ import {
   pressureRange,
   pressureTrend,
   seriesCeil,
+  seriesTrend,
   tempRange,
   timeTicks,
   trendSeries,
@@ -2414,6 +2418,23 @@ function WeatherStationView({
   const days = now !== null ? dayTicks(now) : [];
   const dayFracs = days.map((d) => d.frac);
 
+  // The barometer's tendency treatment, extended to the rest of the desk
+  // (issue #67). Temperature and humidity mostly ride the sun -- honest,
+  // just diurnal; a moving dew point is the interesting one, it means the
+  // air itself is changing. Null (short trail) renders as reserved blank.
+  const tempTrend =
+    now !== null
+      ? seriesTrend(history, now, (p) => p.temp_f, TEMP_TREND_EPS_F)
+      : null;
+  const dewTrend =
+    now !== null
+      ? seriesTrend(history, now, (p) => p.dew_point_f, DEW_TREND_EPS_F)
+      : null;
+  const humidityTrend =
+    now !== null
+      ? seriesTrend(history, now, (p) => p.humidity_pct, HUMIDITY_TREND_EPS_PCT)
+      : null;
+
   // The strips chart the observed trail -- the forecast carries none of
   // these series, and an honest chart leaves the future blank. Two
   // exceptions: the rain strip's future half charts the CHANCE of
@@ -2545,6 +2566,10 @@ function WeatherStationView({
                     </span>
                     <span className="text-base text-inkdim">
                       feels {wxRound(current?.feels_like_f ?? null)}°
+                      {/* the hero number has no sub-line, so its tendency
+                          (issue #67) rides the feels-like quietly */}
+                      {tempTrend &&
+                        ` · ${TREND_GLYPH[tempTrend]} ${tempTrend}`}
                     </span>
                   </div>
                   {/* The sky gets headline billing next to the number, the
@@ -2567,6 +2592,7 @@ function WeatherStationView({
                     label="dew point"
                     value={wxRound(current?.dew_point_f ?? null)}
                     unit="°F"
+                    sub={dewTrend && `${TREND_GLYPH[dewTrend]} ${dewTrend}`}
                     info="The temperature the air would have to cool to for
                       its moisture to bead out as dew, figured from the
                       station's temperature and humidity. The closer it runs
@@ -2577,6 +2603,10 @@ function WeatherStationView({
                     label="humidity"
                     value={wxRound(current?.humidity_pct ?? null)}
                     unit="%"
+                    sub={
+                      humidityTrend &&
+                      `${TREND_GLYPH[humidityTrend]} ${humidityTrend}`
+                    }
                     info="How much water vapor the air is carrying, as a
                       percentage of all it could hold at this temperature —
                       read by the WH90's hygrometer over the driveway. Warm
