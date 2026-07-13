@@ -2078,22 +2078,77 @@ const WXL_NOW_FRAC = PAST_S / (PAST_S + STATION_FUTURE_S);
 // its ghost bar spans that window on the strip.
 const WX_FORECAST_STEP_S = 3 * 3600;
 
+/** The circled i riding after a WxStat label (issue #63) -- drawn like
+ * CloseIcon, sized to sit inside the stamp line. */
+function InfoIcon() {
+  return (
+    <svg
+      viewBox="0 0 12 12"
+      width="11"
+      height="11"
+      aria-hidden="true"
+      className="shrink-0"
+    >
+      <circle
+        cx="6"
+        cy="6"
+        r="5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1"
+      />
+      <line
+        x1="6"
+        y1="5.3"
+        x2="6"
+        y2="8.6"
+        stroke="currentColor"
+        strokeWidth="1.3"
+      />
+      <circle cx="6" cy="3.3" r="0.8" fill="currentColor" />
+    </svg>
+  );
+}
+
 /** One labeled reading in the hero grid: stamped label, instrument-sized
- * value, the unit riding quietly after it. */
+ * value, the unit riding quietly after it. `info` (issue #63) appends a
+ * quiet circled-i whose hover/focus reveals a field-manual note in the
+ * readout chip's dress -- pure CSS, an absolute overlay (house rule #1:
+ * revealing it can never shift the grid), focusable so keyboards and touch
+ * taps get it too. */
 function WxStat({
   label,
   value,
   unit,
   sub,
+  info,
 }: {
   label: string;
   value: string | number;
   unit?: string;
   sub?: React.ReactNode;
+  info?: string;
 }) {
   return (
     <div className="border-l border-line pl-3">
-      <div className="stamp text-[10px] text-inkfaint">{label}</div>
+      <div className="stamp flex items-center gap-1.5 text-[10px] text-inkfaint">
+        {label}
+        {info && (
+          <span
+            tabIndex={0}
+            aria-label={`about ${label}`}
+            className="group relative -my-1 inline-flex cursor-help rounded-sm py-1 text-inkfaint/70 outline-none transition-colors hover:text-inkdim focus-visible:text-inkdim"
+          >
+            <InfoIcon />
+            <span
+              role="tooltip"
+              className="pointer-events-none invisible absolute left-1/2 top-full z-20 mt-1.5 w-60 -translate-x-1/2 rounded-sm border border-linebright bg-panel2 px-2.5 py-2 text-[11px] font-normal normal-case leading-relaxed tracking-normal text-inkdim opacity-0 transition-opacity duration-150 group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100"
+            >
+              {info}
+            </span>
+          </span>
+        )}
+      </div>
       <div className="text-xl tabular-nums text-ink">
         {value}
         {unit && <span className="ml-1 text-xs text-inkdim">{unit}</span>}
@@ -2409,11 +2464,21 @@ function WeatherStationView({
                     label="dew point"
                     value={wxRound(current?.dew_point_f ?? null)}
                     unit="°F"
+                    info="The temperature the air would have to cool to for
+                      its moisture to bead out as dew, figured from the
+                      station's temperature and humidity. The closer it runs
+                      to the actual temperature, the heavier the air feels —
+                      50s is comfortable, 60s is sticky, 70s is a swamp."
                   />
                   <WxStat
                     label="humidity"
                     value={wxRound(current?.humidity_pct ?? null)}
                     unit="%"
+                    info="How much water vapor the air is carrying, as a
+                      percentage of all it could hold at this temperature —
+                      read by the WH90's hygrometer over the driveway. Warm
+                      air holds more, so the same percentage sits heavier on
+                      a hot afternoon than a cool morning."
                   />
                   <WxStat
                     label="wind"
@@ -2434,6 +2499,11 @@ function WeatherStationView({
                     value={wxFixed(current?.pressure_rel_inhg ?? null, 2)}
                     unit="in"
                     sub={baroTrend && `${TREND_GLYPH[baroTrend]} ${baroTrend}`}
+                    info="The weight of the air, in inches of mercury —
+                      measured at the gateway and corrected to sea level so
+                      it reads like the forecasts do. The arrow matters more
+                      than the number: steadily falling usually means weather
+                      moving in, rising means it's clearing out."
                   />
                   <WxStat
                     label="uv index"
@@ -2442,6 +2512,11 @@ function WeatherStationView({
                       current?.solar_wm2 != null &&
                       `solar ${Math.round(current.solar_wm2)} W/m²`
                     }
+                    info="The strength of the sun's ultraviolet at the
+                      station, on the standard 0–11 scale from the WH90's
+                      light sensor. 0–2 is low, 3–5 moderate, 6–7 high, 8 and
+                      up means even the turkeys should find shade. The solar
+                      wattage below is the same sunshine as raw power."
                   />
                   <WxStat
                     label="rain today"
