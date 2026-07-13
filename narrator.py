@@ -20,6 +20,14 @@
 #                                         context (LLM tier only, never a
 #                                         speaking trigger)
 #   publishes   narration/lines           {ts, narrator, voice, text, event_kind}
+#   publishes   narration/journal         {lines: [...]} -- the field journal
+#                                         window (issue #58): the last
+#                                         JOURNAL_LINES spoken lines, oldest
+#                                         first, RETAINED and republished whole
+#                                         so a fresh dashboard tab rehydrates
+#                                         from the broker (the weather/history
+#                                         pattern). Persisted to a JSON file so
+#                                         a narrator restart doesn't blank it.
 #   presence    narrators/<id>/status     "online"/"offline", retained; "offline"
 #                                         is the MQTT Last Will, so a crash flips
 #                                         the dashboard lamp without any cleanup
@@ -28,6 +36,9 @@
 #   MERLE_OLLAMA        Ollama "host" or "host:port" (port defaults to 11434).
 #                       UNSET = LLM tier off; templates carry the show.
 #   MERLE_OLLAMA_MODEL  model name (default: OLLAMA_DEFAULT_MODEL below)
+#   MERLE_NARRATION_JOURNAL  journal file path (default: narration_journal.json,
+#                       which lands in the unit's WorkingDirectory on pearl --
+#                       the MERLE_WEATHER_HISTORY convention)
 #
 # The narrator never plays audio itself -- it publishes; a consumer (the MCC
 # dashboard's TTS, someday a speaker on the porch) does the speaking.
@@ -267,9 +278,11 @@ def build_system_prompt(persona, bible):
 # every LLM prompt for variety (don't repeat your own phrasing) and continuity
 # (running-show callbacks). 10 lines x ~40 tokens is ~400 extra prompt tokens
 # -- trivial at the current model/timeout, so no config knob. A restart blanks
-# the memory; the show has dead air far longer than a restart, and MQTT
-# retains only one message per topic, so the in-process deque is the honest
-# simple design (no persistence, no bus-history mechanism).
+# the memory; the show has dead air far longer than a restart, so the
+# in-process deque stays the honest simple design. The field journal window
+# below (issue #58) is deliberately NOT this: the journal is the show's
+# record for the dashboard, the deque is prompt seasoning -- seeding one from
+# the other would couple what the audience sees to what the model is told.
 MEMORY_LINES = 10
 
 # The variety/continuity guidance travels WITH the memory block -- not in
@@ -398,6 +411,43 @@ def generate(persona, bible, event, rng, ollama=None,
     return templates[pick].format(**template_fields(event, bible))
 
 
+# --- The field journal window (issue #58) ------------------------------------
+# The last JOURNAL_LINES published lines, oldest first -- the dashboard's Field
+# Journal, made durable the way the weather post made its 48h window durable:
+# a bounded window persisted to a flat JSON file (a restart doesn't blank it)
+# and published RETAINED, republished whole on every new line, so a fresh
+# browser tab gets the journal straight from the broker. 50 matches the
+# dashboard's JOURNAL_LIMIT; ~50 lines x ~200 chars is ~10 KB, trivial to
+# republish whole. Deliberately a flat file, not SQLite -- bounded, rewritten
+# whole, refetchable (the weather_history.json argument).
+
+JOURNAL_LINES = 50
+DEFAULT_JOURNAL_PATH = "narration_journal.json"
+
+
+def load_journal(path):
+    """The persisted journal window, or a fresh one. Missing and corrupt files
+    both mean "start over" -- the journal is the show's recent record, not a
+    record of record (SQLite keeps the events), so failing loudly would cost
+    more than it protects."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = json.load(f)
+        return lines if isinstance(lines, list) else []
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def save_journal(path, window):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(window, f)
+
+
+def roll_journal(window, line, limit=JOURNAL_LINES):
+    """A new window with line appended, oldest lines dropped past the limit."""
+    return (window + [line])[-limit:]
+
+
 class Narrator:
     """One voice: a persona, the shared bible, and its own pacing state."""
 
@@ -472,6 +522,13 @@ def main():
 
     producer = Producer([Narrator(persona, bible, ollama=ollama)])
 
+    journal_path = os.environ.get("MERLE_NARRATION_JOURNAL", "").strip() \
+        or DEFAULT_JOURNAL_PATH
+    journal = load_journal(journal_path)
+    if journal:
+        print(f"[{persona['name']}] journal restored: {len(journal)} lines "
+              f"from {journal_path}")
+
     status_topic = bus.narrator_status_topic(persona["mqtt_id"])
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=persona["mqtt_id"])
     # Last Will: if this process dies without saying goodbye, the broker flips
@@ -480,6 +537,12 @@ def main():
 
     def on_connect(c, userdata, flags, reason_code, properties):
         c.publish(status_topic, "online", retain=True)
+        # The journal file, not the broker, is the window's source of truth:
+        # republishing on every (re)connect heals the retained copy after a
+        # broker restart (Mosquitto only keeps retained state across restarts
+        # when persistence is configured -- don't depend on it).
+        c.publish(bus.NARRATION_JOURNAL_TOPIC,
+                  json.dumps({"lines": journal}), retain=True)
         c.subscribe(bus.EVENTS_TOPIC)
         # Retained, so the latest report arrives immediately on (re)connect.
         # Weather is prompt context only -- never a reason to speak.
@@ -487,6 +550,7 @@ def main():
         print(f"[{persona['name']}] on the air, listening to {bus.EVENTS_TOPIC}")
 
     def on_message(c, userdata, msg):
+        nonlocal journal
         try:
             payload = json.loads(msg.payload)
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -500,6 +564,13 @@ def main():
         for narrator in producer.cast(event, now):
             line = narrator.speak(event, now)
             c.publish(bus.NARRATION_TOPIC, json.dumps(line))
+            # The journal keeps exactly what went out on narration/lines --
+            # file first, then the retained window, so a crash between the
+            # two loses a broadcast, never the record.
+            journal = roll_journal(journal, line)
+            save_journal(journal_path, journal)
+            c.publish(bus.NARRATION_JOURNAL_TOPIC,
+                      json.dumps({"lines": journal}), retain=True)
             print(f"[{line['narrator']}] {line['text']}")
 
     client.on_connect = on_connect
