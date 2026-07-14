@@ -63,6 +63,7 @@ import {
   REPORT_STALE_S,
   STALE_AFTER_S,
   STATION_FUTURE_S,
+  STATION_SPAN_S,
   TEMP_TREND_EPS_F,
   WEATHER_CURRENT_TOPIC,
   WEATHER_FORECAST_TOPIC,
@@ -73,10 +74,13 @@ import {
   WeatherReport,
   WeatherStatus,
   ageText,
+  clampWindow,
   compass,
   conditionIcon,
   dayTicks,
+  fetchArchive,
   linePath,
+  mergePoints,
   nearestPoint,
   nightBands,
   parseCurrent,
@@ -92,6 +96,7 @@ import {
   timeTicks,
   trendSeries,
   windCeil,
+  windowEdgeLabel,
 } from "@/lib/weather";
 
 // Species chip colors = the actual box colors drawn on the stream, so the
@@ -2278,16 +2283,20 @@ function WeatherPost() {
   // The station view (issue #51): a full-screen overlay off the masthead.
   const [stationView, setStationView] = useState(false);
 
+  // The panel's window is FIXED at 24h/48h and deliberately not pannable
+  // (issue #106): six days in ~400px would be a smear, so its legibility
+  // ceiling is a decision, not an oversight. The station view is where you
+  // drag through history.
+  const ts0 = (now ?? 0) - PAST_S;
+  const ts1 = (now ?? 0) + FUTURE_S;
   const trend =
     now !== null
-      ? trendSeries(history, forecast, now)
+      ? trendSeries(history, forecast, now, ts0, ts1)
       : { observed: [], coming: [] };
   const allPts = [...trend.observed, ...trend.coming];
   const range = tempRange(allPts);
   const windMax = windCeil(allPts);
   const hasChart = now !== null && range !== null && allPts.length > 1;
-  const ts0 = (now ?? 0) - PAST_S;
-  const ts1 = (now ?? 0) + FUTURE_S;
 
   // The readout snaps to the nearest real report/forecast point -- the
   // crosshair sits at that point's time, not at the raw pointer.
@@ -2744,7 +2753,15 @@ function WeatherPost() {
 const WXL_W = 960;
 const WXL_H = 240;
 const WXL_STRIP_H = 72;
-const WXL_NOW_FRAC = PAST_S / (PAST_S + STATION_FUTURE_S);
+// How much archive to ask for at a time when panning past what we hold
+// (issue #106). A week of 5-minute rows is ~2000 points -- a chunk big enough
+// that a station outage doesn't read as the end of the record, and small
+// enough to land before the viewer notices. History is immutable, so each
+// chunk is fetched exactly once.
+const ARCHIVE_CHUNK_S = 7 * 86400;
+// A press that travels less than this is a tap, not a drag: the crosshair
+// placement a touchscreen can't express as hover.
+const TAP_SLOP_PX = 4;
 // OpenWeather's forecast step: each point's rain_rate_inhr (issue #56) is the
 // average over the 3 hours ENDING at its ts ("volume for last 3 hours"), so
 // its ghost bar spans that window on the strip.
@@ -2915,6 +2932,7 @@ function WxStrip({
   label,
   scale,
   ticks,
+  nowFrac,
   children,
 }: {
   label: string;
@@ -2922,6 +2940,9 @@ function WxStrip({
   /** gridline positions as window fractions -- the midnights of dayTicks,
    *  computed once by the station view so all four charts agree */
   ticks: number[];
+  /** the seam's position in the window, or null once the viewer has panned
+   *  far enough back that "now" isn't on the chart at all (issue #106) */
+  nowFrac: number | null;
   children: React.ReactNode;
 }) {
   return (
@@ -2944,15 +2965,17 @@ function WxStrip({
             vectorEffect="non-scaling-stroke"
           />
         ))}
-        <line
-          x1={WXL_NOW_FRAC * WXL_W}
-          y1={0}
-          x2={WXL_NOW_FRAC * WXL_W}
-          y2={WXL_STRIP_H}
-          stroke="var(--line-bright)"
-          strokeDasharray="2 4"
-          vectorEffect="non-scaling-stroke"
-        />
+        {nowFrac !== null && (
+          <line
+            x1={nowFrac * WXL_W}
+            y1={0}
+            x2={nowFrac * WXL_W}
+            y2={WXL_STRIP_H}
+            stroke="var(--line-bright)"
+            strokeDasharray="2 4"
+            vectorEffect="non-scaling-stroke"
+          />
+        )}
         {children}
       </svg>
       <span className="stamp pointer-events-none absolute right-1 top-1 text-[10px] text-inkfaint">
@@ -2974,19 +2997,27 @@ function WxStrip({
  * reader guessing which day they're over. */
 function WxTimeAxis({
   days,
+  nowFrac,
+  leftLabel,
+  rightLabel,
   className,
 }: {
   days: DayTick[];
+  /** null once "now" is off the chart -- a window panned into the past has
+   *  no seam to stamp, and the corners say how far back it sits (#106) */
+  nowFrac: number | null;
+  leftLabel: string;
+  rightLabel: string;
   className: string;
 }) {
   return (
     <div className={`relative h-4 text-[10px] text-inkfaint ${className}`}>
-      <span className="absolute left-0">−24h</span>
+      <span className="absolute left-0">{leftLabel}</span>
       {days.map((t, i) => {
         const end = days[i + 1]?.frac ?? 1;
         const center = (t.frac + end) / 2;
         if (end - t.frac < 0.05) return null;
-        if (Math.abs(center - WXL_NOW_FRAC) < 0.04) return null;
+        if (nowFrac !== null && Math.abs(center - nowFrac) < 0.04) return null;
         if (center > 0.96) return null;
         return (
           <span
@@ -2998,13 +3029,15 @@ function WxTimeAxis({
           </span>
         );
       })}
-      <span
-        className="stamp absolute -translate-x-1/2 text-inkdim"
-        style={{ left: `${WXL_NOW_FRAC * 100}%` }}
-      >
-        now
-      </span>
-      <span className="absolute right-0">+5d</span>
+      {nowFrac !== null && (
+        <span
+          className="stamp absolute -translate-x-1/2 text-inkdim"
+          style={{ left: `${nowFrac * 100}%` }}
+        >
+          now
+        </span>
+      )}
+      <span className="absolute right-0">{rightLabel}</span>
     </div>
   );
 }
@@ -3066,24 +3099,147 @@ function WeatherStationView({
   // chart stack's width; the crosshair spans main chart and strips alike.
   const [hoverFrac, setHoverFrac] = useState<number | null>(null);
 
-  // The wide window (issue #60): the panel's 24h trail, but the forecast
-  // side runs the full 5 days the API publishes instead of the panel's 48h.
+  // --- The pannable window (issue #106) -----------------------------------
+  // null means LIVE: the window tracks `now` and sits exactly where it always
+  // has (24h back, 120h ahead, "now" at the 1/6 mark). Once panned it holds
+  // an ABSOLUTE right edge instead -- a window the viewer dragged to last
+  // Tuesday must stay on last Tuesday, not creep rightward as `now` ticks
+  // forward underneath it. It doubles as the snap-back control's state: home
+  // is null, not a timestamp to recompute.
+  const [windowEnd, setWindowEnd] = useState<number | null>(null);
+  // Whatever the archive has handed over so far, additive to the retained bus
+  // window and never a replacement for it (#105 is a second source, not the
+  // trail's source). History is immutable once past, so a range fetched once
+  // is never refetched -- this only ever grows.
+  const [archived, setArchived] = useState<WeatherPoint[]>([]);
+  // The wall: set when the archive says there is nothing older, or when it
+  // can't be reached at all. Both mean the same thing to a viewer -- the
+  // record stops here -- and both must stop us asking, or a drag pinned at
+  // the wall would refetch forever.
+  const [exhausted, setExhausted] = useState(false);
+  const drag = useRef<{ x: number; ts1: number; moved: boolean } | null>(null);
+  const dragging = useRef(false);
+  const inFlight = useRef(0);
+  // The floor we last asked below. A ref, not state, and this is the whole
+  // reason it exists: a chunk resolving does not re-render synchronously, so
+  // a pointermove landing between the fetch settling and React catching up
+  // still sees the previous render's `oldestKnown` and would ask for the same
+  // week a second time. inFlight can't catch that -- it's already back to 0.
+  const askedBelow = useRef<number | null>(null);
+
+  const live = windowEnd === null;
+  const newest = (now ?? 0) + STATION_FUTURE_S;
+  const ts1 = windowEnd ?? newest;
+  const ts0 = ts1 - STATION_SPAN_S;
+
+  // The trail is the bus window plus the archive, deduped: the two overlap by
+  // design (the archive holds the same rows the window does).
+  const trail = mergePoints(history, archived);
+  const oldestKnown = trail.length ? trail[0].ts : ts0;
+
   const trend =
     now !== null
-      ? trendSeries(history, forecast, now, PAST_S, STATION_FUTURE_S)
+      ? trendSeries(trail, forecast, now, ts0, ts1)
       : { observed: [], coming: [] };
   const allPts = [...trend.observed, ...trend.coming];
-  const range = tempRange(allPts);
-  const windMax = windCeil(allPts);
-  const hasChart = now !== null && range !== null && allPts.length > 1;
-  const ts0 = (now ?? 0) - PAST_S;
-  const ts1 = (now ?? 0) + STATION_FUTURE_S;
-  const nights = hasChart
-    ? nightBands(current?.sunrise ?? null, current?.sunset ?? null, ts0, ts1)
-    : [];
-  // Local midnights, the window's gridlines and axis labels alike (#60).
-  const days = now !== null ? dayTicks(now) : [];
+  const nights = nightBands(
+    current?.sunrise ?? null,
+    current?.sunset ?? null,
+    ts0,
+    ts1,
+  );
+  // Local midnights, the window's gridlines and axis labels alike (#60),
+  // now over whatever window the viewer dragged to rather than `now`'s.
+  const days = now !== null ? dayTicks(ts0, ts1) : [];
   const dayFracs = days.map((d) => d.frac);
+  // Where "now" falls in the window -- the 1/6 mark while live, off the left
+  // edge entirely once panned back a few days. Null means the seam isn't in
+  // view and nothing should draw it.
+  const nowFrac =
+    now !== null && now >= ts0 && now <= ts1 ? (now - ts0) / (ts1 - ts0) : null;
+
+  // --- The axes settle when the gesture does (issue #106) -----------------
+  // Every scale here is computed from the points in view, so a drag would
+  // rescale them on every frame and the chart would breathe -- the
+  // no-layout-shift rule violated inside the chart's own frame. They freeze
+  // at whatever is on screen when a drag starts and settle once when the
+  // gesture is over AND any fetch it kicked off has landed: one controlled
+  // rescale when the viewer is done moving, never a jitter under the finger
+  // and never a jump the moment a fetch returns.
+  const liveAxes = {
+    range: tempRange(allPts),
+    windMax: windCeil(allPts),
+    rainMax: seriesCeil(trend.observed, (p) => p.rain_rate_inhr, 0.25, 0.25),
+    snowMax: seriesCeil(trend.coming, (p) => p.snow_3h_in, 1, 0.5),
+    solarMax: seriesCeil(trend.observed, (p) => p.solar_wm2, 200, 100),
+    uvMax: seriesCeil(trend.observed, (p) => p.uv_index, 4, 2),
+    presRange: pressureRange(trend.observed),
+  };
+  const [frozenAxes, setFrozenAxes] = useState<typeof liveAxes | null>(null);
+  const { range, windMax, rainMax, snowMax, solarMax, uvMax, presRange } =
+    frozenAxes ?? liveAxes;
+  const hasChart = now !== null && range !== null && allPts.length > 1;
+
+  // --- Panning ------------------------------------------------------------
+  // The first drag interaction in the codebase, so it sets the pattern:
+  // pointer events throughout (one path for mouse and touch, as the hover
+  // scrub already does), setPointerCapture so a drag that leaves the chart
+  // doesn't strand mid-gesture, and touch-action: pan-y on the surface so a
+  // horizontal drag pans while a vertical one still scrolls the overlay.
+  const settleAxes = () => {
+    if (inFlight.current === 0 && !dragging.current) setFrozenAxes(null);
+  };
+
+  /** Ask the archive for the chunk older than everything we hold. Keyed off
+   * what the viewer ASKED for, never the clamped result: the clamp pins ts0
+   * at the wall, so waiting for the clamped window to cross it would mean the
+   * request never fires at all. Nothing here fetches while the window sits
+   * inside the retained trail -- the first day of panning is already on the
+   * wire and costs no network. */
+  const askArchive = (wantTs0: number) => {
+    if (exhausted || inFlight.current > 0) return;
+    if (!trail.length || wantTs0 >= oldestKnown) return;
+    // Already asked below this floor: the answer is in flight or already
+    // merged, and history doesn't change once past. A range is fetched once.
+    if (askedBelow.current !== null && oldestKnown >= askedBelow.current) return;
+    askedBelow.current = oldestKnown;
+    inFlight.current += 1;
+    fetchArchive(oldestKnown - ARCHIVE_CHUNK_S, oldestKnown - 1)
+      .then((pts) => {
+        // Nothing older exists: this is the archive's first reading, the end
+        // of the record rather than a gap in it. Stop here and stop asking.
+        if (pts.length === 0) setExhausted(true);
+        else setArchived((a) => mergePoints(a, pts));
+      })
+      // Route unreachable or unset MERLE_WEATHER_DB: the chart is exactly the
+      // chart it was before the archive existed, and panning stops at the
+      // retained window's edge. Never a thrown error at a viewer.
+      .catch(() => setExhausted(true))
+      .finally(() => {
+        inFlight.current -= 1;
+        settleAxes();
+      });
+  };
+
+  const panTo = (wantTs1: number) => {
+    const c = clampWindow(
+      wantTs1 - STATION_SPAN_S,
+      wantTs1,
+      oldestKnown,
+      newest,
+    );
+    // Dragged back to the right edge: return to LIVE rather than freezing an
+    // absolute end that `now` would immediately outrun.
+    setWindowEnd(c.ts1 >= newest ? null : c.ts1);
+    askArchive(wantTs1 - STATION_SPAN_S);
+  };
+
+  const fracAt = (e: React.PointerEvent<HTMLDivElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    return r.width > 0
+      ? Math.min(1, Math.max(0, (e.clientX - r.left) / r.width))
+      : null;
+  };
 
   // The barometer's tendency treatment, extended to the rest of the desk
   // (issue #67). Temperature and humidity mostly ride the sun -- honest,
@@ -3109,15 +3265,9 @@ function WeatherStationView({
   // forecast's volumes read as slivers on the piezo's scale), and the snow
   // strip is forecast-only (the piezo is snow-blind, so its observed half
   // is honestly blank forever). The rain ceiling is observed-only again --
-  // the future half rides its own fixed 0-100% scale.
+  // the future half rides its own fixed 0-100% scale. Their ceilings ride
+  // the settling rule with every other axis (issue #106).
   const observed = trend.observed;
-  const rainMax = seriesCeil(observed, (p) => p.rain_rate_inhr, 0.25, 0.25);
-  const snowMax = seriesCeil(
-    trend.coming,
-    (p) => p.snow_3h_in,
-    1,
-    0.5,
-  );
   // The snow strip goes seasonal (issue #69, owner's call): hidden April
   // through October rather than sitting dead for seven months -- but a
   // forecast actually carrying snow shows it in any month. The valve only
@@ -3126,9 +3276,6 @@ function WeatherStationView({
     now !== null &&
     (snowSeason(now) ||
       trend.coming.some((p) => (p.snow_3h_in ?? 0) > 0));
-  const solarMax = seriesCeil(observed, (p) => p.solar_wm2, 200, 100);
-  const uvMax = seriesCeil(observed, (p) => p.uv_index, 4, 2);
-  const presRange = pressureRange(observed);
 
   const hovered =
     hasChart && hoverFrac !== null
@@ -3391,26 +3538,89 @@ function WeatherStationView({
 
             {/* --- The trend, four instruments tall ------------------------ */}
             <section className="panel mt-4 rounded-sm border border-line bg-panel px-4 pb-4 pt-3">
-              <div className="text-[10px] text-inkfaint">
+              <div className="flex items-center justify-between gap-3 text-[10px] text-inkfaint">
                 <span>
                   <span className="text-squirrel">—</span> temp °F ·{" "}
                   <span className="text-inkdim">—</span> wind mph · observed
                   solid, forecast dashed
                 </span>
+                {/* Home. Always rendered and merely disabled while the window
+                    is live, never appearing on pan -- a control that pops into
+                    existence would shove this line's legend sideways (house
+                    rule #1). The masthead's chrome, the stepper's disabled
+                    idiom: no new vocabulary for an old job. */}
+                <button
+                  type="button"
+                  onClick={() => setWindowEnd(null)}
+                  disabled={live}
+                  aria-label="Return the chart to now"
+                  className="stamp shrink-0 rounded-sm border border-line px-2 py-0.5 text-inkdim transition-colors hover:border-linebright hover:text-squirrel disabled:pointer-events-none disabled:opacity-40"
+                >
+                  now
+                </button>
               </div>
-              <WxTimeAxis days={days} className="mt-1.5" />
+              <WxTimeAxis
+                days={days}
+                nowFrac={nowFrac}
+                leftLabel={windowEdgeLabel(ts0 - (now ?? 0))}
+                rightLabel={windowEdgeLabel(ts1 - (now ?? 0))}
+                className="mt-1.5"
+              />
               <div
-                className="relative mt-1"
+                className={`relative mt-1 ${hasChart ? "cursor-grab active:cursor-grabbing" : ""}`}
+                // pan-y: a horizontal drag is ours, a vertical one still
+                // scrolls the overlay underneath (the browser fires
+                // pointercancel when it claims the gesture, which ends the
+                // drag cleanly).
                 style={{ touchAction: "pan-y" }}
-                onPointerMove={(e) => {
-                  const r = e.currentTarget.getBoundingClientRect();
-                  if (r.width > 0)
-                    setHoverFrac(
-                      Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)),
-                    );
+                onPointerDown={(e) => {
+                  if (!hasChart || now === null) return;
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                  drag.current = { x: e.clientX, ts1, moved: false };
+                  dragging.current = true;
+                  setFrozenAxes(frozenAxes ?? liveAxes);
+                  // A finger on the glass isn't hovering; the crosshair waits
+                  // to see whether this becomes a tap or a drag.
+                  if (e.pointerType !== "mouse") setHoverFrac(null);
                 }}
-                onPointerLeave={() => setHoverFrac(null)}
-                onPointerCancel={() => setHoverFrac(null)}
+                onPointerMove={(e) => {
+                  const d = drag.current;
+                  if (d) {
+                    const r = e.currentTarget.getBoundingClientRect();
+                    if (r.width <= 0) return;
+                    const dx = e.clientX - d.x;
+                    if (!d.moved && Math.abs(dx) > TAP_SLOP_PX) d.moved = true;
+                    if (d.moved) {
+                      setHoverFrac(null);
+                      // Drag right and the chart follows your hand, which
+                      // means walking backwards in time.
+                      panTo(d.ts1 - (dx / r.width) * STATION_SPAN_S);
+                    }
+                    return;
+                  }
+                  // Only a mouse can hover. Touch scrubbing is the tap below.
+                  if (e.pointerType === "mouse") setHoverFrac(fracAt(e));
+                }}
+                onPointerUp={(e) => {
+                  const d = drag.current;
+                  drag.current = null;
+                  dragging.current = false;
+                  settleAxes();
+                  if (!d) return;
+                  // A press that never travelled is a tap: place the
+                  // crosshair. A mouse release just restores the hover it had.
+                  if (!d.moved || e.pointerType === "mouse")
+                    setHoverFrac(fracAt(e));
+                }}
+                onPointerLeave={() => {
+                  if (!drag.current) setHoverFrac(null);
+                }}
+                onPointerCancel={() => {
+                  drag.current = null;
+                  dragging.current = false;
+                  settleAxes();
+                  setHoverFrac(null);
+                }}
               >
                 {/* main chart: temperature + wind, the panel chart writ tall */}
                 <div className="relative h-72 w-full sm:h-96">
@@ -3444,15 +3654,17 @@ function WeatherStationView({
                           vectorEffect="non-scaling-stroke"
                         />
                       ))}
-                      <line
-                        x1={WXL_NOW_FRAC * WXL_W}
-                        y1={0}
-                        x2={WXL_NOW_FRAC * WXL_W}
-                        y2={WXL_H}
-                        stroke="var(--line-bright)"
-                        strokeDasharray="2 4"
-                        vectorEffect="non-scaling-stroke"
-                      />
+                      {nowFrac !== null && (
+                        <line
+                          x1={nowFrac * WXL_W}
+                          y1={0}
+                          x2={nowFrac * WXL_W}
+                          y2={WXL_H}
+                          stroke="var(--line-bright)"
+                          strokeDasharray="2 4"
+                          vectorEffect="non-scaling-stroke"
+                        />
+                      )}
                       <path
                         d={linePath(trend.observed, (p) => p.wind_mph, ts0, ts1, 0, windMax, WXL_W, WXL_H)}
                         fill="none"
@@ -3537,6 +3749,7 @@ function WeatherStationView({
                       label="rain · fell in/hr · forecast chance %"
                       scale={`${rainMax}`}
                       ticks={dayFracs}
+                      nowFrac={nowFrac}
                     >
                       {/* bar width follows the window: 5-min points sit 0.56
                           viewBox units apart across 144h, so wider bars would
@@ -3611,6 +3824,7 @@ function WeatherStationView({
                       label="snow · forecast in per 3h"
                       scale={`${snowMax}`}
                       ticks={dayFracs}
+                      nowFrac={nowFrac}
                     >
                       {now !== null &&
                         trend.coming
@@ -3651,6 +3865,7 @@ function WeatherStationView({
                         presRange ? `${presRange.max}–${presRange.min}` : ""
                       }
                       ticks={dayFracs}
+                      nowFrac={nowFrac}
                     >
                       {presRange && (
                         <path
@@ -3667,6 +3882,7 @@ function WeatherStationView({
                       label="solar w/m² · uv dashed"
                       scale={`${solarMax}`}
                       ticks={dayFracs}
+                      nowFrac={nowFrac}
                     >
                       <path
                         d={linePath(observed, (p) => p.solar_wm2, ts0, ts1, 0, solarMax, WXL_W, WXL_STRIP_H)}
@@ -3731,7 +3947,13 @@ function WeatherStationView({
                   </div>
                 )}
               </div>
-              <WxTimeAxis days={days} className="mt-0.5" />
+              <WxTimeAxis
+                days={days}
+                nowFrac={nowFrac}
+                leftLabel={windowEdgeLabel(ts0 - (now ?? 0))}
+                rightLabel={windowEdgeLabel(ts1 - (now ?? 0))}
+                className="mt-0.5"
+              />
             </section>
           </main>
 
