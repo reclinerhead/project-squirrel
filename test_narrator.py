@@ -278,6 +278,39 @@ def test_speak_records_exactly_what_it_publishes():
     assert list(n.memory) == [(100.0, line["event_kind"], line["text"])]
 
 
+# --- the still shot's frame_id pass-through (issue #90) ------------------------
+
+def test_speak_carries_the_events_frame_id():
+    # A line caused by a frame_id-carrying event copies the id onto the bus
+    # payload -- and thus into the journal window the dashboard renders.
+    stamped = {**ARRIVAL, "details": {**ARRIVAL["details"],
+                                      "frame_id": "20260714_x_arrival_0001"}}
+    n = narrator.Narrator(PERSONA, BIBLE, rng=random.Random(0))
+    line = n.speak(stamped, now=100.0)
+    assert line["frame_id"] == "20260714_x_arrival_0001"
+
+
+def test_speak_without_frame_id_is_byte_identical_to_today():
+    # The #26/#28 degradation convention: an event without a frame_id (old
+    # daemon, template tier, whatever) yields a payload with NO frame_id key
+    # -- old journal files and stale retained windows keep parsing.
+    n = narrator.Narrator(PERSONA, BIBLE, rng=random.Random(0))
+    line = n.speak(ARRIVAL, now=100.0)
+    assert set(line) == {"ts", "narrator", "mqtt_id", "voice", "event_kind", "text"}
+
+
+def test_mention_line_carries_no_frame_id():
+    # colleague_mention details are the colleague's line, not a moment on the
+    # pavement -- even when that colleague's own line carried a frame_id.
+    persona = {**PERSONA, "answers_to": ["Test"]}
+    heard = {"narrator": "Jim", "mqtt_id": "jim", "text": "over to Test",
+             "frame_id": "20260714_x_arrival_0001"}
+    mention = narrator.colleague_mention(heard, persona)
+    assert mention["kind"] == "colleague_mention"
+    n = narrator.Narrator(persona, BIBLE, rng=random.Random(0))
+    assert "frame_id" not in n.speak(mention, now=100.0)
+
+
 def test_prompt_with_memory_carries_lines_and_ages():
     memory = [(NOW - 1200, "arrival", "Here in the dappled light..."),
               (NOW - 120, "arrival", "Ah, if these grey squirrels could speak...")]
@@ -765,6 +798,32 @@ def test_scene_update_snapshots_the_whole_scene():
     story = e.poll(90.0)
     assert story["kind"] == "scene_update"
     assert story["details"]["counts"] == {"squirrel": 4, "turkey": 1}
+
+
+def test_scene_update_carries_the_newest_ripened_frame_id():
+    # Issue #90: the collapsed summary wears the newest ripened change's
+    # still shot -- the freshest picture of where the scene ended up.
+    e = desk()
+    older = presence("arrival", "squirrel", 2, frame_id="fid_older")
+    older["ts"] = "2026-07-13T10:00:00"
+    newer = presence("arrival", "turkey", 1, frame_id="fid_newer")
+    newer["ts"] = "2026-07-13T10:00:05"
+    e.ingest(older, now=0.0)
+    e.ingest(newer, now=1.0)
+    story = e.poll(30.0)
+    assert story["kind"] == "scene_update"
+    assert story["details"]["frame_id"] == "fid_newer"
+
+
+def test_scene_update_without_frame_ids_is_unchanged():
+    # Pre-#90 events (or a moments-only collapse) leave the summary exactly
+    # as it was: counts, no frame_id key.
+    e = desk()
+    e.ingest(presence("arrival", "squirrel", 2), now=0.0)
+    e.ingest(presence("arrival", "turkey", 1), now=1.0)
+    story = e.poll(30.0)
+    assert story["kind"] == "scene_update"
+    assert set(story["details"]) == {"counts"}
 
 
 def test_editor_drifting_change_keeps_the_original_clock():

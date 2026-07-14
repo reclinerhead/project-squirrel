@@ -19,6 +19,7 @@ outage brings her back without anyone going downstairs.
 | Mosquitto | `mosquitto`       | 1883 (MQTT), 9001 (WebSockets) | The Merle event bus                                            |
 | Marlin    | `narrator-marlin` | —                              | Scene narrator, subscribes to events, publishes narration      |
 | Willard   | `willard-weather` | —                              | Weather post: polls the Ecowitt gateway (+ OpenWeather forecast), publishes retained `weather/*` |
+| Frames    | `frame-archiver`  | —                              | Still-shot archive (issue #90): files the daemon's event frames to disk for the Field Journal |
 | MCC       | `mcc-dashboard`   | 3000 (HTTP)                    | The Merle dashboard, production build (`next start`)           |
 | Pi-hole   | `pihole-FTL`      | 53, 67 (DHCP), 80, 443         | Household DNS + DHCP                                           |
 
@@ -40,6 +41,7 @@ Green dot = running. That's it. Everything below is elaboration.
 systemctl status mosquitto
 systemctl status narrator-marlin
 systemctl status willard-weather
+systemctl status frame-archiver
 systemctl status mcc-dashboard
 systemctl status pihole-FTL
 ```
@@ -75,7 +77,7 @@ sudo systemctl stop willard-weather
 sudo systemctl start willard-weather
 ```
 
-`enable` / `disable` control whether it comes back after a reboot. All five
+`enable` / `disable` control whether it comes back after a reboot. All six
 services are enabled. To check:
 
 ```
@@ -83,12 +85,12 @@ systemctl is-enabled willard-weather
 ```
 
 Deploying new Merle code (all units run out of the same checkout). For the
-**Python services** (narrator, weather), pull + restart is the whole deploy —
-they run from source:
+**Python services** (narrator, weather, frame archiver), pull + restart is
+the whole deploy — they run from source:
 
 ```
 cd ~/project-squirrel && git pull
-sudo systemctl restart narrator-marlin willard-weather
+sudo systemctl restart narrator-marlin willard-weather frame-archiver
 ```
 
 The **MCC is different** — see The MCC dashboard below. Pull + restart is
@@ -107,8 +109,8 @@ sudo ss -tlnp
 ```
 
 Expected: 22 (ssh), 53 (pihole), 80/443 (pihole web), 1883 + 9001 (mosquitto),
-3000 (mcc-dashboard). Anything else deserves a question. (Marlin and Willard
-listen on nothing — they only talk to the broker.)
+3000 (mcc-dashboard). Anything else deserves a question. (Marlin, Willard,
+and the frame archiver listen on nothing — they only talk to the broker.)
 
 ---
 
@@ -131,6 +133,11 @@ If the message appears in the subscriber, the bus works across the LAN.
 Topics:
 
 - `driveway/events` — daemon → world, one JSON event each
+- `driveway/frames/<frame_id>/{full,thumb}` — daemon → world (issue #90):
+  each arrival/departure/crowd_snapshot's still shot, **raw JPEG bytes, not
+  JSON** (don't `mosquitto_sub -v` the wildcard into a terminal you like).
+  Non-retained, fire-and-forget; `frame-archiver` here subscribes and files
+  them to disk
 - `narration/lines` — narrator → world (both of them: Marlin here, Jim on
   merle). Both also *subscribe* to it (issues #80/#88): a line naming a
   colleague is that colleague's cue, and a follow-up never triggers a
@@ -172,10 +179,11 @@ mosquitto treats duplicates as fatal, not last-write-wins)
 
 ## The Merle units, one pattern
 
-Both `narrator-marlin` and `willard-weather` follow the same shape: run as
-the login user, `WorkingDirectory=/home/todd/project-squirrel` (the repo
-checkout), `ExecStart=` the repo venv's python (`venv/bin/python`, never
-system python), and `Environment=` lines carrying the process's env.
+`narrator-marlin`, `willard-weather`, and `frame-archiver` all follow the
+same shape: run as the login user,
+`WorkingDirectory=/home/todd/project-squirrel` (the repo checkout),
+`ExecStart=` the repo venv's python (`venv/bin/python`, never system
+python), and `Environment=` lines carrying the process's env.
 
 Two lines are load-bearing in every Merle unit:
 
@@ -300,6 +308,54 @@ mosquitto_sub -h 192.168.1.64 -t 'weather/status' -C 1 -v
 
 ---
 
+## The frame archive (frame-archiver)
+
+Unit: `/etc/systemd/system/frame-archiver.service`
+Code: `frame_archiver.py` in the same checkout + venv as the narrator.
+
+The still-shot filing clerk (issue #90): subscribes to
+`driveway/frames/#` and writes each event's JPEGs (full + thumb) to disk,
+where the MCC's `/frames` route serves them to the Field Journal. It lives
+here — not behind the daemon's HTTP surface on bluejay — because daemon-down
+is the dashboard's steady state, and journal thumbnails must survive
+bluejay's nap the way the journal itself does (retained topics).
+
+Env in the unit (plus the two standard lines every Merle unit carries):
+
+- `MERLE_FRAMES_DIR` — optional; where the JPEGs land. Default is `frames/`
+  under `WorkingDirectory` (i.e. `~/project-squirrel/frames/`, gitignored).
+  **The `mcc-dashboard` unit must carry the same value** — the route reads
+  the folder the archiver writes. When the USB NAS arrives, migration is
+  repointing this var (in both units) at the mount; nothing else changes.
+- `MERLE_FRAMES_KEEP_DAYS` — optional; retention window in days (default
+  14). Files older than this are pruned hourly; the journal shows a quiet
+  "faded" placeholder for anything pruned.
+
+State: the `frames/` folder itself. Safe to delete files (or the folder)
+any time — the journal degrades to placeholders for those entries; new
+frames keep filing. Rough budget at stream scale: a busy day is a few MB,
+so a 14-day window stays well under a GB.
+
+A dropped frame (broker restart, missed message) is a moment nobody
+archived — the event row in SQLite on bluejay still has the `frame_id` —
+never a lost record. Look for `[frames]` lines in the journal.
+
+To run it by hand (stop the service first):
+
+```
+sudo systemctl stop frame-archiver
+cd ~/project-squirrel && source venv/bin/activate
+MERLE_MQTT=localhost:1883 python frame_archiver.py
+```
+
+Quick health check — count today's filings:
+
+```
+ls ~/project-squirrel/frames | wc -l
+```
+
+---
+
 ## The MCC dashboard
 
 Unit: `/etc/systemd/system/mcc-dashboard.service`
@@ -323,6 +379,12 @@ waits on connections that browser tabs hold open (HTTP keep-alive), and
 systemd's default stop timeout is 90s — so `systemctl stop` used to sit the
 full 90s before SIGKILL. The MCC is stateless, so waiting buys nothing;
 stops now take ≤5s.
+
+**Serving the journal's still shots** (issue #90): the unit carries
+`MERLE_FRAMES_DIR` matching the `frame-archiver` unit's value (default
+`/home/todd/project-squirrel/frames`) — the `/frames/[id]` route reads the
+folder the archiver writes. Unset, the route just 404s and the journal
+shows placeholders; nothing else cares.
 
 **Reaching the daemon**: the dashboard proxies to the perception daemon on
 bluejay (`MERLE_DAEMON_URL` in the unit). For that to work the daemon on

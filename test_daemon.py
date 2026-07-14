@@ -3,6 +3,7 @@
 # surface the MCC talks to, verified end to end. Entering the TestClient context
 # manager runs the app's lifespan, which starts the worker thread.
 
+import re
 import time
 
 import cv2
@@ -23,9 +24,13 @@ class _FakePublisher:
 
     def __init__(self):
         self.messages = []   # [(topic, payload_dict), ...]
+        self.raw = []        # [(topic, bytes), ...] -- the frame topics (#90)
 
     def publish(self, topic, payload):
         self.messages.append((topic, payload))
+
+    def publish_bytes(self, topic, payload):
+        self.raw.append((topic, payload))
 
 
 def _app(source, publisher=None):
@@ -302,6 +307,51 @@ def test_arrival_and_departure_events(monkeypatch):
     # The bus payload carries the same shape the archive does.
     bus_departure = next(e for e in bus_events if e["kind"] == "departure")
     assert bus_departure["details"]["species"] == "chipmunk"
+
+    # Issue #90: every arrival/departure carries a frame_id, in SQLite and on
+    # the bus alike, and the still-shot bytes went out on the frame topics --
+    # full (the stream-downscaled annotated JPEG) and thumb, both real JPEGs.
+    for e in arrivals + departures + bus_events:
+        if e["kind"] in ("arrival", "departure"):
+            assert e["details"]["frame_id"]
+    frame_id = bus_departure["details"]["frame_id"]
+    published = dict(fake.raw)
+    for variant in ("full", "thumb"):
+        jpeg = published[bus.frame_topic(frame_id, variant)]
+        assert jpeg[:2] == b"\xff\xd8", f"{variant} is not a JPEG"
+    # frame_ids are unique across the run's events.
+    ids = [e["details"]["frame_id"] for e in bus_events
+           if e["kind"] in ("arrival", "departure")]
+    assert len(ids) == len(set(ids))
+
+
+def test_mint_frame_id_is_filesystem_safe_and_disambiguated():
+    # Derived from session + timestamp + kind (issue #90), filesystem-safe by
+    # construction: the ISO timestamp's separators are stripped, and a counter
+    # disambiguates events fired on the same frame (a squirrel and a turkey
+    # arriving together yield two ids).
+    fid = merle_daemon.mint_frame_id(
+        "20260714_081500", "2026-07-14T08:15:30", "arrival", 7)
+    assert fid == "20260714_081500_20260714T081530_arrival_0007"
+    assert re.fullmatch(r"[A-Za-z0-9_]+", fid)
+    other = merle_daemon.mint_frame_id(
+        "20260714_081500", "2026-07-14T08:15:30", "arrival", 8)
+    assert other != fid
+
+
+def test_encode_thumb_jpeg_downscales_to_thumb_width():
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    thumb = merle_daemon.encode_thumb_jpeg(frame)
+    decoded = cv2.imdecode(np.frombuffer(thumb, np.uint8), cv2.IMREAD_COLOR)
+    assert decoded.shape[1] == merle_daemon.THUMB_WIDTH
+    # Aspect preserved: 1280x720 -> 320x180.
+    assert decoded.shape[0] == 180
+    # A frame already narrower than the thumb width is left alone, not blown up.
+    small = np.zeros((90, 160, 3), dtype=np.uint8)
+    decoded_small = cv2.imdecode(
+        np.frombuffer(merle_daemon.encode_thumb_jpeg(small), np.uint8),
+        cv2.IMREAD_COLOR)
+    assert decoded_small.shape[:2] == (90, 160)
 
 
 class _ChurnSource:

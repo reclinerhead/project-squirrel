@@ -17,7 +17,10 @@
 # Events also go out live on the MQTT bus (bus.py, topic driveway/events) for
 # decoupled subscribers -- narrators, dashboards, future rover processes. SQLite
 # stays the durable archive; the bus is the live transport, and the daemon runs
-# fine (just unnarrated) when no broker is up.
+# fine (just unnarrated) when no broker is up. Each arrival/departure/
+# crowd_snapshot also ships its still shot -- the annotated frame the event
+# fired on -- to driveway/frames/<frame_id>/{full,thumb} (issue #90), where
+# frame_archiver on pearl files it for the Field Journal.
 #
 # The frame source is selected by MERLE_SOURCE: 'camera' (default, the real
 # RTSP + YOLO + ByteTrack feed) or 'synthetic' (camera-free, used by tests/CI
@@ -64,6 +67,9 @@ STREAM_WIDTH = 1920      # /stream rides a downscaled copy: the camera's 4K
                          # JPEGs are ~1.7MB each, which at 15fps is ~26MB/s
                          # through the MCC proxy on pearl PER TAB (issue #49).
                          # 1080p is a quarter of that; /snapshot stays full-res.
+THUMB_WIDTH = 320        # the event still shot's thumbnail (issue #90): the
+                         # daemon encodes it because it owns cv2 -- consumers
+                         # (archiver, MCC) stay image-dep-free.
 
 # Arrival/departure debounce (SPECIES-level, not track-level). ByteTrack mints a
 # new track id when it loses an animal for more than its buffer and re-acquires
@@ -114,6 +120,31 @@ def encode_stream_jpeg(annotated):
             interpolation=cv2.INTER_AREA)
     ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
     return buf.tobytes() if ok else None
+
+
+def encode_thumb_jpeg(annotated):
+    """The event still shot's thumbnail (issue #90): the annotated frame at
+    ~THUMB_WIDTH, JPEG-encoded. Returns bytes, or None if the encode fails."""
+    h, w = annotated.shape[:2]
+    if w > THUMB_WIDTH:
+        annotated = cv2.resize(
+            annotated, (THUMB_WIDTH, round(h * THUMB_WIDTH / w)),
+            interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    return buf.tobytes() if ok else None
+
+
+def mint_frame_id(session_id, ts, kind, n):
+    """The id tying an event to its still shot (issue #90): session + compact
+    timestamp + kind + a per-session counter (two events can fire on the same
+    frame -- a squirrel and a turkey arriving together -- and "same second,
+    same kind" isn't impossible either). Filesystem-safe BY CONSTRUCTION:
+    session ids are %Y%m%d_%H%M%S, kinds are lowercase identifiers, and the
+    ISO timestamp's separators reduce to [T:-] -- stripped here. The archiver
+    still sanitizes independently (never trust the wire), but nothing this
+    mints should ever trip it."""
+    stamp = ts.replace("-", "").replace(":", "")
+    return f"{session_id}_{stamp}_{kind}_{n:04d}"
 
 
 def next_stream_part(jpeg, seq, last_seq):
@@ -180,6 +211,7 @@ class Worker(threading.Thread):
         self.publisher = publisher   # bus.EventPublisher (or a test fake)
         self._stop = threading.Event()
         self._last_crowd = 0.0
+        self._frame_seq = 0      # per-session counter baked into frame_ids
         self._loop_times = deque(maxlen=30)   # wall-clock interval between loops
         self._prev_loop = None
         # The species-level event debounce, now shared logic in perception.py
@@ -204,6 +236,36 @@ class Worker(threading.Thread):
             storage.record_event(self.conn, ts, kind, details)
         self.publisher.publish(bus.EVENTS_TOPIC,
                                {"ts": ts, "kind": kind, "details": details})
+
+    def _frame_event(self, ts, kind, details):
+        """An event that gets a still shot (issue #90): mint the frame_id and
+        ride it in `details` -- so SQLite archives the id (per the no-blobs
+        rule) and the bus event carries it to the narrator -- then record and
+        publish as usual. The JPEG bytes go out later in the same loop pass,
+        once the stream copy is encoded (the caller collects the returned id):
+        the event fires before the frame is encoded, and the still must be the
+        frame the event fired on, not the previous loop's."""
+        self._frame_seq += 1
+        frame_id = mint_frame_id(self.state.session_id, ts, kind, self._frame_seq)
+        self._event(ts, kind, {**details, "frame_id": frame_id})
+        return frame_id
+
+    def _publish_frames(self, frame_ids, annotated, stream_jpeg):
+        """The still-shot bytes for every event this loop fired: the annotated
+        stream-downscaled JPEG (already encoded for /stream -- near-zero extra
+        cost) as `full`, plus a ~THUMB_WIDTH thumbnail. Fire-and-forget, same
+        ethos as events: a dropped frame (broker down, encode failure) is a
+        moment nobody archived -- the event row still exists, frame_id and
+        all -- never a lost record."""
+        if not frame_ids or stream_jpeg is None:
+            return
+        thumb = encode_thumb_jpeg(annotated)
+        for frame_id in frame_ids:
+            self.publisher.publish_bytes(bus.frame_topic(frame_id, "full"),
+                                         stream_jpeg)
+            if thumb is not None:
+                self.publisher.publish_bytes(bus.frame_topic(frame_id, "thumb"),
+                                             thumb)
 
     def _refresh_diagnostics(self, now):
         """Pull the source's provenance + churn metrics into SharedState about
@@ -302,16 +364,20 @@ class Worker(threading.Thread):
 
             # Arrivals and departures -- the narrator's bread and butter.
             # Species-level and debounced: perception.SpeciesPresence.
+            # Each carries a frame_id (issue #90); the still-shot bytes
+            # publish below, once this frame's stream copy is encoded.
             now = time.time()
+            frame_ids = []
             for kind, details in self.presence.observe(
                     Counter(d.species for d in present), now):
-                self._event(ts, kind, details)
+                frame_ids.append(self._frame_event(ts, kind, details))
 
             # Crowd moment: enough animals at once, and cooled down since the last.
             if len(present) >= self.control.crowd_threshold and now - self._last_crowd >= CROWD_COOLDOWN:
-                self._event(ts, "crowd_snapshot",
-                            {"total": len(present),
-                             "counts": dict(Counter(d.species for d in present))})
+                frame_ids.append(self._frame_event(
+                    ts, "crowd_snapshot",
+                    {"total": len(present),
+                     "counts": dict(Counter(d.species for d in present))}))
                 self._last_crowd = now
 
             self._refresh_diagnostics(now)
@@ -320,6 +386,7 @@ class Worker(threading.Thread):
             self._record(annotated, ts)
             ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
             stream_jpeg = encode_stream_jpeg(annotated)
+            self._publish_frames(frame_ids, annotated, stream_jpeg)
 
             counts = dict(Counter(d.species for d in present))
             tracks = [{"track_id": d.track_id, "species": d.species,
