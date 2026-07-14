@@ -491,25 +491,27 @@ const JOURNAL_LIMIT = 50;
  * and opens the full-size frame in the journal lightbox; a faded print is
  * inert -- the archive prunes both sizes together, so there is nothing to
  * open. Both states share one geometry so fading can't shift the layout.
+ * It floats LEFT (issue #107): the column of text runs down its right side,
+ * the way a magazine sets a picture into a story.
  *
  * Two sizes (issue #102), differing only in geometry and which archived
  * variant they pull. "panel" is the rail's 144x81 thumb. "broadcast" is the
- * reading room's print: ~40% of the max-w-3xl column (the float drops on
- * narrow screens -- a 40% float in a phone-width column leaves a two-words-
- * per-line ribbon beside a postage stamp), and it pulls the FULL-SIZE
- * variant, because the archived thumb is only ~320px wide and would land
- * ~1:1 at that size -- soft on any HiDPI screen. Lazy loading means only the
- * prints in view fetch, and those bytes are the ones the lightbox wants
- * next, so opening one from there is warm-cache instant. Both sizes hold a
- * fixed 16:9 box: reserving it is what keeps the broadcast view's pinned
- * scroll honest (an image growing after the pin strands it mid-thread), not
- * just the no-layout-shift rule. */
+ * reading room's print: ~40% of the column (the float drops on narrow
+ * screens -- a 40% float in a phone-width column leaves a two-words-per-line
+ * ribbon beside a postage stamp), which since #107's full-width room is
+ * ~580px, and it pulls the FULL-SIZE variant, because the archived thumb is
+ * only ~320px wide and would land far under its display size -- soft on any
+ * screen, let alone HiDPI. Lazy loading means only the prints in view fetch,
+ * and those bytes are the ones the lightbox wants next, so opening one from
+ * there is warm-cache instant. Both sizes hold a fixed 16:9 box: reserving
+ * it is what keeps the broadcast view's pinned scroll honest (an image
+ * growing after the pin strands it mid-thread), not just no-layout-shift. */
 const FRAME_BOX_BASE =
   "overflow-hidden rounded-sm border border-line bg-panel2";
 const FRAME_BOX: Record<"panel" | "broadcast", string> = {
-  panel: "float-right mb-1 ml-3 h-[81px] w-36",
+  panel: "float-left mb-1 mr-3 h-[81px] w-36",
   broadcast:
-    "mb-3 aspect-video w-full sm:float-right sm:mb-2 sm:ml-5 sm:w-2/5",
+    "mb-3 aspect-video w-full sm:float-left sm:mb-2 sm:mr-5 sm:w-2/5",
 };
 function FrameThumb({
   frameId,
@@ -952,6 +954,24 @@ function FieldJournalView({
     };
   }, []);
 
+  // What was already on the wire when the room opened (issue #107). The
+  // flash means "a fresh dispatch just landed", so it must never replay for
+  // history. The panel gets that free -- its list stays mounted, so only a
+  // genuinely new entry mounts and animates -- but this view unmounts on
+  // close and remounts on open, re-running EVERY entry's mount animation, so
+  // reopening lit the whole thread up as new. These keys render with plain
+  // `journal-in` (slide in, stay quiet); only lines arriving while the room
+  // is open get the full `journal-filed` flare. Republished windows carry
+  // stable content-derived keys, so they don't remount and can't re-flash;
+  // reopening re-snapshots, which is what makes read history stay quiet.
+  //
+  // State with a lazy initializer, not a ref: the snapshot is READ during
+  // render to pick each entry's class, and refs are off-limits there (the
+  // React Compiler is in this build -- `react-hooks/refs` fails the lint).
+  // The initializer runs once at mount, which is exactly "what was on the
+  // wire when the room opened"; the setter is deliberately unused.
+  const [openedWith] = useState(() => new Set(entries.map((e) => e.key)));
+
   // Chat order: the panel stays newest-first, but a conversation reads top
   // to bottom -- so the thread reverses and stays pinned to the newest line
   // at the bottom. Scrolling up to reread unpins; returning to the bottom
@@ -977,10 +997,12 @@ function FieldJournalView({
       aria-label="Field journal broadcast view"
       className="fixed inset-0 z-50 flex flex-col bg-bg"
     >
-      {/* A reading column, not an instrument wall: max-w-3xl is a book-ish
-          measure for the display face. The masthead stays put; the thread
+      {/* Full width (issue #107): max-w-[1500px] is the station view's
+          measure, itself the main dashboard's wrapper (#60) -- the app's two
+          full-screen overlays now agree on how wide the page is, and the
+          room it buys goes to the prints. The masthead stays put; the thread
           scrolls inside. */}
-      <div className="mx-auto flex h-full w-full max-w-3xl flex-col px-4 sm:px-6">
+      <div className="mx-auto flex h-full w-full max-w-[1500px] flex-col px-4 sm:px-6">
         <div className="flex items-center justify-between gap-3 border-b border-line pb-3 pt-5">
           <h2
             className="text-2xl text-ink"
@@ -1043,16 +1065,18 @@ function FieldJournalView({
                 return (
                   <li
                     key={e.key}
-                    className={`journal-filed border-l-2 pl-4 ${
-                      reply ? "ml-8 sm:ml-16" : ""
-                    }`}
+                    // History slides in quietly; only what landed while the
+                    // room was open flares (issue #107 -- see openedWith).
+                    className={`${
+                      openedWith.has(e.key) ? "journal-in" : "journal-filed"
+                    } border-l-2 pl-4 ${reply ? "ml-8 sm:ml-16" : ""}`}
                     style={{
                       borderLeftColor: newest
                         ? voice
                         : `color-mix(in srgb, ${voice} 45%, transparent)`,
                     }}
                   >
-                    <div className="flex items-baseline gap-2 text-xs">
+                    <div className="flex items-baseline gap-2 text-sm">
                       {reply && (
                         <span aria-hidden className="text-inkfaint">
                           ↳
@@ -1063,7 +1087,7 @@ function FieldJournalView({
                       </span>
                       <span className="text-inkfaint">{eventClock(e.ts)}</span>
                       {reply && (
-                        <span className="stamp text-[10px] text-inkfaint">
+                        <span className="stamp text-[11px] text-inkfaint">
                           follow-up
                         </span>
                       )}
@@ -1083,7 +1107,7 @@ function FieldJournalView({
                         />
                       )}
                       <p
-                        className="text-lg leading-relaxed text-ink"
+                        className="text-xl leading-relaxed text-ink"
                         style={{ fontFamily: "var(--font-display)" }}
                       >
                         {e.text}
