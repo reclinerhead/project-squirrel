@@ -151,7 +151,8 @@ sudo systemctl enable --now merle-autodeploy
 ```
 
 No `User=` — it runs as root on purpose (its job is restarting units without
-a sudo password), demoting git to `todd` via `runuser`. No `MERLE_DEPLOY_MCC`
+a sudo password), demoting git to `todd` via `setpriv` (PAM-silent — see
+Pearl.md for why not `runuser`). No `MERLE_DEPLOY_MCC`
 — the dashboard lives on pearl. The full story (pause/resume, `--once`
 desk-ticks, the failed-build and dirty-tree rules) is in `Servers/Pearl.md`
 under The deploy watcher; the script is one and the same.

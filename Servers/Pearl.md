@@ -388,8 +388,10 @@ every minute are the #35 journal-spam disease), so the journal reads as a
 deploy history: quiet polls log nothing, deploys log what restarted.
 
 It runs as **root** — that's the point: restarts without a sudo password —
-but every git/pnpm step is demoted to `todd` via `runuser`, so the checkout
+but every git/pnpm step is demoted to `todd` via `setpriv`, so the checkout
 and `.next/` never grow root-owned files that would break a manual deploy.
+(`setpriv`, not `runuser`/`sudo`: those open a PAM session per call, which
+was ~7k "session opened/closed" journal lines a day — the #35 disease.)
 
 ```ini
 [Unit]
