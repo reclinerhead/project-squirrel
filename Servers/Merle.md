@@ -17,9 +17,10 @@ copy on merle in sync when it changes.*
 
 ## What runs here
 
-| Service | Unit           | Ports | Purpose                                                     |
-| ------- | -------------- | ----- | ----------------------------------------------------------- |
-| Jim     | `narrator-jim` | —     | Second narrator: field correspondent, mention-triggered follow-ups |
+| Service | Unit               | Ports | Purpose                                                     |
+| ------- | ------------------ | ----- | ----------------------------------------------------------- |
+| Jim     | `narrator-jim`     | —     | Second narrator: field correspondent, mention-triggered follow-ups |
+| Deploys | `merle-autodeploy` | —     | Deploy watcher (issue #95): polls origin/main, pulls + restarts Jim on merge |
 
 Everything else lives elsewhere: the broker, Marlin, Willard, and the
 production MCC are on pearl (`192.168.1.64` — see `Servers/Pearl.md`); the
@@ -125,6 +126,36 @@ systemctl status narrator-jim
 Green dot = Jim is on the air. Done — the Pi can now be power-cycled and
 Jim comes back on his own.
 
+**7. The deploy watcher** (issue #95) — after this, merges to main reach the
+Pi on their own. Write `/etc/systemd/system/merle-autodeploy.service`:
+
+```ini
+[Unit]
+Description=Merle deploy watcher -- merges to main deploy themselves
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/home/todd/project-squirrel/Servers/autodeploy.sh
+Restart=on-failure
+RestartSec=10
+Environment=MERLE_DEPLOY_UNITS=narrator-jim
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```
+sudo systemctl daemon-reload
+sudo systemctl enable --now merle-autodeploy
+```
+
+No `User=` — it runs as root on purpose (its job is restarting units without
+a sudo password), demoting git to `todd` via `runuser`. No `MERLE_DEPLOY_MCC`
+— the dashboard lives on pearl. The full story (pause/resume, `--once`
+desk-ticks, the failed-build and dirty-tree rules) is in `Servers/Pearl.md`
+under The deploy watcher; the script is one and the same.
+
 ---
 
 ## Day-to-day
@@ -136,8 +167,10 @@ journalctl -u narrator-jim -n 50          # last 50 lines
 sudo systemctl restart narrator-jim       # after a git pull
 ```
 
-Deploying new code — pull + restart is the whole deploy (Jim runs from
-source):
+Deploying new code — **merging the PR is the deploy** (issue #95):
+`merle-autodeploy` polls origin/main every 60s and pulls + restarts Jim on
+its own. Watch one land with `journalctl -u merle-autodeploy -f`. The manual
+way still works whenever the watcher is stopped (Jim runs from source):
 
 ```
 cd ~/project-squirrel && git pull

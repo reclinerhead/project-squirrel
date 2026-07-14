@@ -21,6 +21,7 @@ outage brings her back without anyone going downstairs.
 | Willard   | `willard-weather` | —                              | Weather post: polls the Ecowitt gateway (+ OpenWeather forecast), publishes retained `weather/*` |
 | Frames    | `frame-archiver`  | —                              | Still-shot archive (issue #90): files the daemon's event frames to disk for the Field Journal |
 | MCC       | `mcc-dashboard`   | 3000 (HTTP)                    | The Merle dashboard, production build (`next start`)           |
+| Deploys   | `merle-autodeploy`| —                              | Deploy watcher (issue #95): polls origin/main, pulls + restarts the Merle units on merge |
 | Pi-hole   | `pihole-FTL`      | 53, 67 (DHCP), 80, 443         | Household DNS + DHCP                                           |
 
 Not here: the perception daemon and camera (those live on bluejay,
@@ -43,6 +44,7 @@ systemctl status narrator-marlin
 systemctl status willard-weather
 systemctl status frame-archiver
 systemctl status mcc-dashboard
+systemctl status merle-autodeploy
 systemctl status pihole-FTL
 ```
 
@@ -77,16 +79,25 @@ sudo systemctl stop willard-weather
 sudo systemctl start willard-weather
 ```
 
-`enable` / `disable` control whether it comes back after a reboot. All six
+`enable` / `disable` control whether it comes back after a reboot. All seven
 services are enabled. To check:
 
 ```
 systemctl is-enabled willard-weather
 ```
 
-Deploying new Merle code (all units run out of the same checkout). For the
-**Python services** (narrator, weather, frame archiver), pull + restart is
-the whole deploy — they run from source:
+**Deploying new Merle code: merging the PR is the deploy** (issue #95).
+`merle-autodeploy` polls origin/main every 60s and brings the box current on
+its own — pull, restart the three Python services, and rebuild + restart the
+MCC when the merge touched `mcc/`. Watch one land:
+
+```
+journalctl -u merle-autodeploy -f
+```
+
+The manual path still works whenever the watcher is stopped (or you're
+impatient). Python services (narrator, weather, frame archiver) run from
+source, so pull + restart is their whole deploy:
 
 ```
 cd ~/project-squirrel && git pull
@@ -184,6 +195,9 @@ same shape: run as the login user,
 `WorkingDirectory=/home/todd/project-squirrel` (the repo checkout),
 `ExecStart=` the repo venv's python (`venv/bin/python`, never system
 python), and `Environment=` lines carrying the process's env.
+(`merle-autodeploy` is the one deliberate exception — it runs as root
+because its whole job is restarting the others; see The deploy watcher
+below.)
 
 Two lines are load-bearing in every Merle unit:
 
@@ -356,6 +370,68 @@ ls ~/project-squirrel/frames | wc -l
 
 ---
 
+## The deploy watcher (merle-autodeploy)
+
+Unit: `/etc/systemd/system/merle-autodeploy.service`
+Code: `Servers/autodeploy.sh` in the checkout it deploys.
+
+Merging a PR is the deploy (issue #95): the watcher polls origin/main every
+60s, and on a change pulls (`--ff-only`, never force), restarts the three
+Python services, and — only when the merge touched `mcc/` — runs the
+install → build → restart order from `deploy-mcc.sh`. A failed MCC build is
+a loud journal line and **no restart**: the old build keeps serving until a
+good merge lands. A dirty checkout is skipped loudly, never clobbered —
+clean it and the next tick deploys.
+
+It's a **loop service, not a systemd timer** (a timer's start/finish lines
+every minute are the #35 journal-spam disease), so the journal reads as a
+deploy history: quiet polls log nothing, deploys log what restarted.
+
+It runs as **root** — that's the point: restarts without a sudo password —
+but every git/pnpm step is demoted to `todd` via `runuser`, so the checkout
+and `.next/` never grow root-owned files that would break a manual deploy.
+
+```ini
+[Unit]
+Description=Merle deploy watcher -- merges to main deploy themselves
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/home/todd/project-squirrel/Servers/autodeploy.sh
+Restart=on-failure
+RestartSec=10
+Environment="MERLE_DEPLOY_UNITS=narrator-marlin willard-weather frame-archiver"
+Environment=MERLE_DEPLOY_MCC=1
+
+[Install]
+WantedBy=multi-user.target
+```
+
+(The quotes on the `MERLE_DEPLOY_UNITS` line matter — the value has spaces.
+No `User=`: root on purpose. Optional knobs: `MERLE_DEPLOY_INTERVAL_S`,
+`MERLE_DEPLOY_USER`, `MERLE_REPO`.)
+
+To pause auto-deploys (manual pulls and `deploy-mcc.sh` work as before):
+
+```
+sudo systemctl stop merle-autodeploy      # start again to resume
+```
+
+One tick by hand, no loop (desk-testing):
+
+```
+sudo MERLE_DEPLOY_UNITS="narrator-marlin willard-weather frame-archiver" \
+     MERLE_DEPLOY_MCC=1 ~/project-squirrel/Servers/autodeploy.sh --once
+```
+
+The script self-updates: a merge that changes `autodeploy.sh` deploys like
+anything else (the running loop exec's the new copy). Merle runs the same
+unit with `MERLE_DEPLOY_UNITS=narrator-jim` and no MCC — see
+`Servers/Merle.md`.
+
+---
+
 ## The MCC dashboard
 
 Unit: `/etc/systemd/system/mcc-dashboard.service`
@@ -366,13 +442,16 @@ The production Next.js build, served by `next start`. It's a stateless proxy
 in front of the daemon on bluejay — the dashboard's state lives in the
 browser tab and the daemon; nothing on pearl is worth waiting for.
 
-**Deploying: `~/project-squirrel/Servers/deploy-mcc.sh` is *the* way.**
-Pull + restart is not a deploy — `next start` serves the compiled `.next/`,
-not source, so a restart without a build re-serves the old code, and a build
-run after the restart rewrites `.next/` under the live server (`Failed to
-load static file` errors). The script enforces the one valid order — pull →
-install → build → restart — and fails loudly at each step, so a broken build
-never restarts the service.
+**Deploying: normally automatic** — `merle-autodeploy` (issue #95, above)
+rebuilds and restarts on any merge that touches `mcc/`. When deploying by
+hand (watcher stopped), **`~/project-squirrel/Servers/deploy-mcc.sh` is
+*the* way.** Pull + restart is not a deploy — `next start` serves the
+compiled `.next/`, not source, so a restart without a build re-serves the
+old code, and a build run after the restart rewrites `.next/` under the live
+server (`Failed to load static file` errors). The script enforces the one
+valid order — pull → install → build → restart — and fails loudly at each
+step, so a broken build never restarts the service. The watcher mirrors the
+same order.
 
 **The fast-stop drop-in** sets `TimeoutStopSec=5`. Next's graceful shutdown
 waits on connections that browser tabs hold open (HTTP keep-alive), and
