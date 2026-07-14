@@ -287,11 +287,35 @@ Extra env in the unit:
   An unreachable Ollama is a skipped broadcast retried on the next 10-minute
   pass — look for `[ollama]` lines in the journal. `MERLE_OLLAMA_MODEL`
   optionally picks the model (defaults to the code default in `narrator.py`).
+- `MERLE_WEATHER_DB=/home/todd/project-squirrel/weather.db` — optional; the
+  seasonal archive (issue #105), the permanent 5-minute record behind the
+  dashboard's deep-history charts. Default is `weather.db` under
+  `WorkingDirectory`, which is that same path. **The `mcc-dashboard` unit must
+  carry the same value** — the `/weather/history` route reads the file this
+  service writes. Give it as an ABSOLUTE path in both units: the two have
+  different `WorkingDirectory` values (this one the repo root, the MCC's the
+  `mcc/` subdirectory), so the same *relative* value would name two different
+  files and the route would serve an empty archive forever. Same coupling and
+  same NAS-migration story as `MERLE_FRAMES_DIR` below: repoint the var in
+  both units, nothing else changes. A path that can't be opened fails at
+  startup, on purpose — better a dead service than a week of weather published
+  but never recorded.
 
-State: `weather_history.json` in the repo dir (that's `WorkingDirectory` +
-the default relative path) — the 48h rolling window (5-minute resolution)
-behind the dashboard's observed trail, persisted so a restart doesn't blank
-the chart. Safe to delete if it ever goes weird; it refills within 48h.
+State: two files in the repo dir (`WorkingDirectory` + the default relative
+paths), and they have **opposite** disaster stories:
+
+- `weather_history.json` — the 48h rolling window (5-minute resolution) behind
+  the dashboard's observed trail, persisted so a restart doesn't blank the
+  chart. Safe to delete if it ever goes weird; it refills within 48h.
+- `weather.db` — the seasonal archive (issue #105). **NOT safe to delete. It
+  never refills.** This is the one irreplaceable file the whole stack owns:
+  every other piece of state is a cache of something re-fetchable, but a
+  deleted observation is a moment of driveway weather that no API sells back.
+  Deleting it throws away every reading since the archive started, and the
+  most it could ever rebuild is the 48h sitting in the JSON window. Back it up
+  before anything clever; it is append-only, so a copy is only ever stale,
+  never wrong. (`weather.db-wal` and `weather.db-shm` beside it are SQLite's
+  WAL companions — copy the whole set, or `sqlite3 weather.db ".backup ..."`.)
 
 A gateway or OpenWeather hiccup is a skipped report, never a dead service —
 the next poll retries. Look for `[weather] fetch failed` lines in the
@@ -466,6 +490,22 @@ stops now take ≤5s.
 `/home/todd/project-squirrel/frames`) — the `/frames/[id]` route reads the
 folder the archiver writes. Unset, the route just 404s and the journal
 shows placeholders; nothing else cares.
+
+**Serving the weather archive** (issue #105): the same pattern one file over.
+The unit carries `MERLE_WEATHER_DB` matching the `willard-weather` unit's
+value — the `/weather/history` route reads the SQLite file that service
+writes. **Give it as an absolute path** (`/home/todd/project-squirrel/weather.db`):
+this unit's `WorkingDirectory` is the `mcc/` subdirectory, not the repo root,
+so a relative `weather.db` would resolve to `mcc/weather.db` — a file nothing
+writes — and the route would serve an empty archive with no error anywhere.
+The route has no default for exactly that reason. Unset, it quietly answers
+`{"points": []}` and the deep-history charts draw blank; nothing else cares.
+It opens the file **read-only, per request** — the MCC never writes to the
+archive, and both units run as `todd`, so WAL reads need no ceremony.
+The route reads it with **`node:sqlite`** (the stdlib module — no dependency,
+no native build on pearl). It needs Node ≥ 23.4 to be unflagged; pearl runs
+24.x, so it just works. If pearl's Node is ever downgraded below that, this
+route is the thing that breaks.
 
 **Reaching the daemon**: the dashboard proxies to the perception daemon on
 bluejay (`MERLE_DAEMON_URL` in the unit). For that to work the daemon on
