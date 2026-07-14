@@ -796,8 +796,18 @@ class Editor:
         # species that didn't change, because "the scene" is the story.
         counts = {sp: st["stable"] for sp, st in self.species.items()
                   if st["stable"] > 0}
+        details = {"counts": counts}
+        # Best-effort still shot (issue #90): the collapsed summary wears the
+        # NEWEST ripened change's frame_id -- the freshest picture of where
+        # the scene ended up. Absent (old daemon, moments-only collapse) is
+        # fine: the key stays absent and nothing downstream notices.
+        stamped = [st["event"] for st in ripe
+                   if (st["event"].get("details") or {}).get("frame_id")]
+        if stamped:
+            newest = max(stamped, key=lambda e: e.get("ts") or "")
+            details["frame_id"] = newest["details"]["frame_id"]
         return {"ts": datetime.fromtimestamp(now).isoformat(timespec="seconds"),
-                "kind": "scene_update", "details": {"counts": counts}}
+                "kind": "scene_update", "details": details}
 
 
 class Narrator:
@@ -850,6 +860,16 @@ class Narrator:
             "event_kind": event.get("kind"),
             "text": text,
         }
+        # The event's still shot rides along (issue #90): a line caused by a
+        # frame_id-carrying event copies the id onto the payload -- and thus
+        # into the journal window -- so the Field Journal can show what he
+        # was narrating. Absent means the key is absent: the payload stays
+        # byte-identical to today (the #26/#28 degradation convention), and
+        # colleague_mention lines never carry one (their details are the
+        # colleague's line, not a moment on the pavement).
+        frame_id = (event.get("details") or {}).get("frame_id")
+        if frame_id:
+            line["frame_id"] = frame_id
         # Memory records exactly what goes on the bus -- captured here, where
         # the payload is built, so the two can never disagree. A template
         # fallback line counts (it went on air); a failed LLM call leaves no

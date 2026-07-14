@@ -31,6 +31,7 @@ import {
   toJournalEntries,
   voiceColor,
 } from "@/lib/bus";
+import { frameUrl } from "@/lib/frames";
 import {
   DayCensus,
   DayHours,
@@ -472,6 +473,36 @@ function speakLine(line: NarrationLine) {
 // (content-derived stable keys) lives in lib/bus.ts with the parsers.
 const JOURNAL_LIMIT = 50;
 
+/** The still shot filed with a journal entry (issue #90): the annotated frame
+ * the daemon captured at event time, archived on pearl, served by /frames --
+ * so thumbnails survive bluejay's nap the way the journal itself does. The
+ * slot is FIXED-SIZE and rendered from first paint (an entry's image presence
+ * is known on arrival), so neither the image loading nor the image being
+ * pruned can shift the layout: a lost print fills the same frame with a quiet
+ * stamp, never a broken-image icon. Component-local error state rides the
+ * entry's stable content-derived key, so a window republish keeps it. */
+function FrameThumb({ frameId, narrator }: { frameId: string; narrator: string }) {
+  const [lost, setLost] = useState(false);
+  return (
+    <span className="relative block h-[54px] w-24 shrink-0 self-start overflow-hidden rounded-sm border border-line bg-panel2">
+      {lost ? (
+        <span className="stamp absolute inset-0 flex items-center justify-center text-[9px] text-inkfaint">
+          faded
+        </span>
+      ) : (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={frameUrl(frameId, true)}
+          alt={`still shot filed with ${narrator}'s entry`}
+          loading="lazy"
+          className="h-full w-full object-cover"
+          onError={() => setLost(true)}
+        />
+      )}
+    </span>
+  );
+}
+
 function FieldJournal() {
   const [entries, setEntries] = useState<JournalEntry[]>([]);
   const [presence, setPresence] = useState<Record<string, string>>({});
@@ -659,12 +690,20 @@ function FieldJournal() {
                       {e.narrator}
                     </span>
                   </div>
-                  <p
-                    className="mt-0.5 text-[15px] leading-snug text-ink"
-                    style={{ fontFamily: "var(--font-display)" }}
-                  >
-                    {e.text}
-                  </p>
+                  {/* Entries with a still shot (issue #90) reserve its slot
+                      from first paint; entries without never gain one -- the
+                      no-layout-shift rule. */}
+                  <div className="mt-0.5 flex items-start gap-3">
+                    <p
+                      className="flex-1 text-[15px] leading-snug text-ink"
+                      style={{ fontFamily: "var(--font-display)" }}
+                    >
+                      {e.text}
+                    </p>
+                    {e.frame_id && (
+                      <FrameThumb frameId={e.frame_id} narrator={e.narrator} />
+                    )}
+                  </div>
                 </li>
               );
             })}
