@@ -32,6 +32,12 @@ import {
   voiceColor,
 } from "@/lib/bus";
 import { frameUrl } from "@/lib/frames";
+// The journal lightbox (issue #96): full-size stills on thumbnail click.
+// Styles are themed to the station in globals.css (.yarl__root overrides).
+import Lightbox from "yet-another-react-lightbox";
+import Captions from "yet-another-react-lightbox/plugins/captions";
+import "yet-another-react-lightbox/styles.css";
+import "yet-another-react-lightbox/plugins/captions.css";
 import {
   DayCensus,
   DayHours,
@@ -480,26 +486,45 @@ const JOURNAL_LIMIT = 50;
  * is known on arrival), so neither the image loading nor the image being
  * pruned can shift the layout: a lost print fills the same frame with a quiet
  * stamp, never a broken-image icon. Component-local error state rides the
- * entry's stable content-derived key, so a window republish keeps it. */
-function FrameThumb({ frameId, narrator }: { frameId: string; narrator: string }) {
+ * entry's stable content-derived key, so a window republish keeps it.
+ * Since issue #96 the print floats in the entry's text flow (magazine wrap)
+ * and opens the full-size frame in the journal lightbox; a faded print is
+ * inert -- the archive prunes both sizes together, so there is nothing to
+ * open. Both states share one geometry so fading can't shift the layout. */
+const FRAME_THUMB_BOX = "float-right mb-1 ml-3 h-[81px] w-36 overflow-hidden rounded-sm border border-line bg-panel2";
+function FrameThumb({
+  frameId,
+  narrator,
+  onOpen,
+}: {
+  frameId: string;
+  narrator: string;
+  onOpen: () => void;
+}) {
   const [lost, setLost] = useState(false);
+  if (lost) {
+    return (
+      <span className={`${FRAME_THUMB_BOX} flex items-center justify-center`}>
+        <span className="stamp text-[9px] text-inkfaint">faded</span>
+      </span>
+    );
+  }
   return (
-    <span className="relative block h-[54px] w-24 shrink-0 self-start overflow-hidden rounded-sm border border-line bg-panel2">
-      {lost ? (
-        <span className="stamp absolute inset-0 flex items-center justify-center text-[9px] text-inkfaint">
-          faded
-        </span>
-      ) : (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={frameUrl(frameId, true)}
-          alt={`still shot filed with ${narrator}'s entry`}
-          loading="lazy"
-          className="h-full w-full object-cover"
-          onError={() => setLost(true)}
-        />
-      )}
-    </span>
+    <button
+      type="button"
+      onClick={onOpen}
+      aria-label={`open the still shot filed with ${narrator}'s entry`}
+      className={`${FRAME_THUMB_BOX} block cursor-zoom-in transition-colors duration-200 hover:border-linebright focus-visible:border-linebright focus-visible:outline-none`}
+    >
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={frameUrl(frameId, true)}
+        alt={`still shot filed with ${narrator}'s entry`}
+        loading="lazy"
+        className="h-full w-full object-cover"
+        onError={() => setLost(true)}
+      />
+    </button>
   );
 }
 
@@ -516,6 +541,12 @@ function FieldJournal() {
   // The broadcast view (issue #89): the station-view treatment for the
   // narrators' back-and-forth -- same entries state, real reading room.
   const [broadcastView, setBroadcastView] = useState(false);
+  // The journal lightbox (issue #96): which entry's still is open, by the
+  // entry's stable content-derived key -- NOT an index. Entries prepend and
+  // windows republish while the lightbox is up, so an index would drift to a
+  // different photo mid-view; the key pins the slide, and the index is
+  // re-derived each render. An entry aging out of the window closes it.
+  const [lightboxKey, setLightboxKey] = useState<string | null>(null);
   // Per-narrator journal windows (issue #80), keyed by mqtt_id from the topic.
   // A ref, not state: only the merged entries render, and the mqtt handler
   // must read the latest windows synchronously when any one of them arrives.
@@ -618,6 +649,16 @@ function FieldJournal() {
   );
   const anyoneOn = narrators.some(([, status]) => status === "online");
 
+  // The lightbox pages the whole window's stills (issue #96), in journal
+  // order (newest first, matching the list the viewer just clicked in). The
+  // open slide is re-derived from its key every render, so entries arriving
+  // or windows republishing mid-view can't swap the photo under the viewer.
+  const stills = entries.filter(
+    (e): e is JournalEntry & { frame_id: string } => Boolean(e.frame_id),
+  );
+  const lightboxIndex =
+    lightboxKey === null ? -1 : stills.findIndex((e) => e.key === lightboxKey);
+
   return (
     <>
     <section className="panel flex flex-col rounded-sm border border-line bg-panel">
@@ -692,17 +733,24 @@ function FieldJournal() {
                   </div>
                   {/* Entries with a still shot (issue #90) reserve its slot
                       from first paint; entries without never gain one -- the
-                      no-layout-shift rule. */}
-                  <div className="mt-0.5 flex items-start gap-3">
+                      no-layout-shift rule. The thumb floats ahead of the text
+                      (issue #96) so prose wraps around it magazine-style;
+                      flow-root contains the float, so a short line still
+                      holds the entry open to the print's full height. */}
+                  <div className="mt-0.5 flow-root">
+                    {e.frame_id && (
+                      <FrameThumb
+                        frameId={e.frame_id}
+                        narrator={e.narrator}
+                        onOpen={() => setLightboxKey(e.key)}
+                      />
+                    )}
                     <p
-                      className="flex-1 text-[15px] leading-snug text-ink"
+                      className="text-[15px] leading-snug text-ink"
                       style={{ fontFamily: "var(--font-display)" }}
                     >
                       {e.text}
                     </p>
-                    {e.frame_id && (
-                      <FrameThumb frameId={e.frame_id} narrator={e.narrator} />
-                    )}
                   </div>
                 </li>
               );
@@ -738,6 +786,31 @@ function FieldJournal() {
         )}
       </div>
     </section>
+    {/* The journal lightbox (issue #96): the full-size /frames/<id> variant
+        that lib/frames.ts always reserved for this view. Finite carousel --
+        the window has real ends, and a disabled arrow says so honestly.
+        closeOnBackdropClick + Escape are the exits; the slide title wears
+        the entry's byline in the stamp treatment (globals.css themes all
+        the chrome to the station). */}
+    <Lightbox
+      open={lightboxIndex >= 0}
+      close={() => setLightboxKey(null)}
+      index={Math.max(lightboxIndex, 0)}
+      slides={stills.map((e) => ({
+        src: frameUrl(e.frame_id),
+        alt: `still shot filed with ${e.narrator}'s entry`,
+        title: `${e.narrator} · ${eventClock(e.ts)}`,
+      }))}
+      plugins={[Captions]}
+      carousel={{ finite: true }}
+      controller={{ closeOnBackdropClick: true }}
+      on={{
+        view: ({ index }) => {
+          const key = stills[index]?.key;
+          if (key) setLightboxKey(key);
+        },
+      }}
+    />
     {broadcastView && (
       <FieldJournalView
         entries={entries}
