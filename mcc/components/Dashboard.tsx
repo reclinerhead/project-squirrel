@@ -3109,7 +3109,18 @@ function WeatherStationView({
                       sun {clock(current?.sunrise ?? null)} –{" "}
                       {clock(current?.sunset ?? null)}
                       {current !== null && now !== null && (
-                        <> · read {ageText(current.ts, now)}</>
+                        <>
+                          {" "}
+                          · read{" "}
+                          {/* min-w reserves "just now" (8ch at this size and
+                              tracking) -- this stamp is the left column's
+                              widest line, so the age flipping to "1m ago" and
+                              back would walk the whole stat grid sideways
+                              (house rule #1) */}
+                          <span className="inline-block min-w-[6.3em]">
+                            {ageText(current.ts, now)}
+                          </span>
+                        </>
                       )}
                     </div>
                   </div>
