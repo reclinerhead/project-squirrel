@@ -73,6 +73,9 @@ import {
   WeatherPoint,
   WeatherReport,
   WeatherStatus,
+  FORECAST_SHADE_CEIL,
+  RAIN_SHADE_FLOOR,
+  SNOW_SHADE_FLOOR,
   ageText,
   clampWindow,
   compass,
@@ -81,6 +84,9 @@ import {
   fetchArchive,
   linePath,
   mergePoints,
+  precipFill,
+  precipShade,
+  tempMarks,
   nearestPoint,
   nightBands,
   parseCurrent,
@@ -1996,7 +2002,10 @@ function ConditionGlyph({
   live: boolean;
 }) {
   const sun = live ? "var(--turkey)" : "currentColor";
-  const rain = live ? "var(--led)" : "currentColor";
+  // Rain draws in the weather ink (issue #113), not the live-lamp green it
+  // used to borrow. Snow keeps currentColor -- it is already the ink the
+  // glyph's structure wears, and white IS snow's colour.
+  const rain = live ? "var(--rain)" : "currentColor";
   const common = {
     viewBox: "0 0 48 48",
     width: size,
@@ -2922,12 +2931,16 @@ function SegMeter({
 }
 
 /** One instrument strip under the main chart: its own svg sharing the time
- * axis, the now-divider, and faint tick rules for alignment. The series
- * itself comes in as svg children; the label sits in the forecast half,
- * which the station's instruments mostly leave blank -- there are no
- * measurements in the future. (The rain strip is the exception since issue
- * #56: OpenWeather's forecast brings a precip series of its own, drawn as
- * ghost bars that stay well below the label's corner.) */
+ * axis, the now-divider, and faint tick rules for alignment. The series itself
+ * comes in as svg children.
+ *
+ * The label sits in the forecast half because the station's instruments mostly
+ * leave the future blank -- but that is no longer a reason to expect an EMPTY
+ * corner, and it was the reason for a long time. Issue #56 noted the rain strip
+ * as the one exception whose ghosts "stay well below the label's corner"; #65
+ * then rescaled those ghosts to CHANCE on a fixed 0-100% strip, where a
+ * confident Friday is a full-height bar growing straight into it. The label
+ * stops relying on an empty corner and brings its own scrim instead (#113). */
 function WxStrip({
   label,
   scale,
@@ -2978,10 +2991,19 @@ function WxStrip({
         )}
         {children}
       </svg>
-      <span className="stamp pointer-events-none absolute right-1 top-1 text-[10px] text-inkfaint">
+      {/* The heading and the scale whisper both sit OVER the data now, not
+          beside it (issue #113). The corner used to be reliably empty -- #56
+          put the label there precisely because the station leaves the future
+          blank -- but #65 rescaled the forecast ghosts to chance on a fixed
+          0-100% strip, so a confident Friday is a full-height bar growing
+          straight into this corner. The premise is gone, so the label stops
+          relying on it: it wears the panel as a scrim and reads at station-view
+          size instead of whispering at 10px in the palest ink on the board.
+          Both stay absolute overlays, so none of this can shift the chart. */}
+      <span className="stamp pointer-events-none absolute right-1 top-1 rounded-sm bg-panel/80 px-1 py-px text-[11px] text-inkdim">
         {label}
       </span>
-      <span className="pointer-events-none absolute left-1 top-0.5 text-[10px] tabular-nums text-inkfaint">
+      <span className="pointer-events-none absolute left-1 top-0.5 rounded-sm bg-panel/80 px-1 py-px text-[11px] tabular-nums text-inkdim">
         {scale}
       </span>
     </div>
@@ -3179,6 +3201,13 @@ function WeatherStationView({
   const { range, windMax, rainMax, snowMax, solarMax, uvMax, presRange } =
     frozenAxes ?? liveAxes;
   const hasChart = now !== null && range !== null && allPts.length > 1;
+
+  // The forecast's peaks and valleys (issue #113): what a viewer actually wants
+  // to know -- how hot Friday gets, how cold tonight -- without hovering point
+  // to point. Turning points, not per-calendar-day min/max, so a valley that
+  // spans midnight gets ONE label; see tempMarks. Forecast only: the observed
+  // trail is 5-minute data where every passing cloud is a turning point.
+  const marks = hasChart ? tempMarks(trend.coming) : [];
 
   // --- Panning ------------------------------------------------------------
   // The first drag interaction in the codebase, so it sets the pattern:
@@ -3713,6 +3742,39 @@ function WeatherStationView({
                       </span>
                     </>
                   )}
+                  {/* Each forecast peak and valley wears its temperature
+                      (issue #113), positioned where it actually happens. HTML
+                      overlays for the same reason as the snapped dots below:
+                      the viewBox is stretched, so svg text would squash. They
+                      read the BLENDED temps (#71 -- trend.coming is already
+                      calibrated), or a label would disagree with the line it
+                      sits on. Ambient, not the readout: the hover chip stays
+                      the detailed answer, so these dim out of its way. */}
+                  {hasChart && range !== null &&
+                    marks.map((m) => {
+                      const frac = (m.ts - ts0) / (ts1 - ts0);
+                      if (frac < 0.02 || frac > 0.98) return null;
+                      const y =
+                        (1 - (m.temp_f - range.min) / (range.max - range.min)) *
+                        100;
+                      return (
+                        <span
+                          key={`${m.kind}-${m.ts}`}
+                          className={`stamp pointer-events-none absolute -translate-x-1/2 text-[10px] tabular-nums text-squirrel transition-opacity ${
+                            hovered ? "opacity-40" : "opacity-80"
+                          }`}
+                          style={{
+                            left: `${frac * 100}%`,
+                            top: `${y}%`,
+                            // above a peak, below a valley -- the label sits
+                            // off the line, never on it
+                            marginTop: m.kind === "high" ? "-1.15rem" : "0.3rem",
+                          }}
+                        >
+                          {wxRound(m.temp_f)}°
+                        </span>
+                      );
+                    })}
                   {/* snapped dots, the panel chart's HTML-overlay trick (the
                       viewBox is stretched; svg circles would squash). */}
                   {hovered && range !== null && (
@@ -3773,8 +3835,16 @@ function WeatherStationView({
                               (Math.min(p.rain_rate_inhr!, rainMax) / rainMax) *
                               WXL_STRIP_H
                             }
-                            fill="var(--led)"
-                            opacity="0.75"
+                            style={{
+                              fill: precipFill(
+                                "var(--rain)",
+                                precipShade(
+                                  p.rain_rate_inhr!,
+                                  rainMax,
+                                  RAIN_SHADE_FLOOR,
+                                ),
+                              ),
+                            }}
                           />
                         ))}
                       {/* the forecast half changes units at the now line
@@ -3806,8 +3876,23 @@ function WeatherStationView({
                                 y={WXL_STRIP_H - h}
                                 width={w}
                                 height={h}
-                                fill="var(--led)"
-                                opacity="0.3"
+                                // Shade = the chance, same as the height (#113):
+                                // a 90% Friday is a tall VIVID slab, a 20%
+                                // Tuesday a short ghost. Ceilinged below the
+                                // observed trail's full voice -- a forecast,
+                                // however certain, never shouts as loud as a
+                                // measurement.
+                                style={{
+                                  fill: precipFill(
+                                    "var(--rain)",
+                                    precipShade(
+                                      p.pop!,
+                                      1,
+                                      RAIN_SHADE_FLOOR,
+                                      FORECAST_SHADE_CEIL,
+                                    ),
+                                  ),
+                                }}
                               />
                             );
                           })}
@@ -3817,8 +3902,12 @@ function WeatherStationView({
                         is honestly blank forever, and April through October
                         the whole row stands down -- unless the forecast
                         actually carries snow, which overrides the calendar
-                        in any month. Snow-white ink, not the rain's LED
-                        green. */}
+                        in any month. Snow-white ink, never the rain's blue.
+                        Its ramp reaches FULL white (issue #113) where rain's
+                        forecast is ceilinged: rain's ghosts share a strip with
+                        a measured trail they mustn't out-shout, and snow's
+                        observed half is blank forever, so there is nothing
+                        here to shout over -- heavy snow gets the whole voice. */}
                     {showSnow && (
                     <WxStrip
                       label="snow · forecast in per 3h"
@@ -3852,8 +3941,16 @@ function WeatherStationView({
                                 y={WXL_STRIP_H - h}
                                 width={w}
                                 height={h}
-                                fill="var(--ink)"
-                                opacity="0.35"
+                                style={{
+                                  fill: precipFill(
+                                    "var(--ink)",
+                                    precipShade(
+                                      p.snow_3h_in!,
+                                      snowMax,
+                                      SNOW_SHADE_FLOOR,
+                                    ),
+                                  ),
+                                }}
                               />
                             );
                           })}
