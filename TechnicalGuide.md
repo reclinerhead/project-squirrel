@@ -32,23 +32,25 @@ Rehearsal without live animals — republish archived events onto the bus with o
 
 ### Services on pearl (systemd)
 
-The pearl-resident processes run as systemd units at `/etc/systemd/system/` — the narrator (Marlin), `willard-weather.service` (Willard), and `frame-archiver` (the still-shot filing clerk) — enabled so they survive reboots. Mosquitto is its own stock `mosquitto.service`. All Merle units follow one pattern: run as the login user, `WorkingDirectory=` the repo checkout (`/home/todd/project-squirrel`), `ExecStart=` the repo venv's python (`venv/bin/python` on pearl — never system python), `Restart=on-failure`, and `Environment=` lines carrying the process's env (each service sets `MERLE_MQTT=localhost:1883` — the broker is local; the narrator adds `MERLE_OLLAMA`, the weather post adds `MERLE_OWM_KEY`). **Every unit needs `Environment=PYTHONUNBUFFERED=1`**: the scripts log with bare `print()`, and under systemd stdout is a pipe, so Python block-buffers — `journalctl` shows nothing for hours and a TERM on stop discards the buffer. `WorkingDirectory` doubles as data placement: the weather post's `weather_history.json` lands in the repo dir because its default path is relative.
+The pearl-resident processes run as systemd units at `/etc/systemd/system/` — the narrator (Marlin), `willard-weather.service` (Willard), `frame-archiver` (the still-shot filing clerk), and `merle-autodeploy` (the deploy watcher, issue #95) — enabled so they survive reboots. Mosquitto is its own stock `mosquitto.service`. All Merle units follow one pattern: run as the login user, `WorkingDirectory=` the repo checkout (`/home/todd/project-squirrel`), `ExecStart=` the repo venv's python (`venv/bin/python` on pearl — never system python), `Restart=on-failure`, and `Environment=` lines carrying the process's env (each service sets `MERLE_MQTT=localhost:1883` — the broker is local; the narrator adds `MERLE_OLLAMA`, the weather post adds `MERLE_OWM_KEY`). **Every unit needs `Environment=PYTHONUNBUFFERED=1`**: the scripts log with bare `print()`, and under systemd stdout is a pipe, so Python block-buffers — `journalctl` shows nothing for hours and a TERM on stop discards the buffer. `WorkingDirectory` doubles as data placement: the weather post's `weather_history.json` lands in the repo dir because its default path is relative.
 
 Pearl also serves the production MCC as `mcc-dashboard.service` (port 3000,
 `next start` + a `fast-stop.conf` drop-in — see The MCC dashboard below and
 `Servers/Pearl.md` for the ops detail).
 
-Deploying new code to pearl — for the Python services, pull + restart is the
-whole deploy (they run from source):
-
-```bash
-cd ~/project-squirrel && git pull
-sudo systemctl restart willard-weather    # and/or the narrator's unit
-```
-
-The MCC deploys via `Servers/deploy-mcc.sh` instead (pull → install → build →
-restart, failing loudly at each step) — `next start` serves the compiled
-`.next/`, so pull + restart is *not* a deploy for it.
+Deploying new code — **merging the PR is the deploy** (issue #95):
+`merle-autodeploy` (`Servers/autodeploy.sh`, a root loop-service that demotes
+git/pnpm to todd) polls origin/main every 60s on pearl *and* merle, pulls
+`--ff-only`, restarts that box's Merle units, and rebuilds + restarts the MCC
+only when the merge touched `mcc/`. A failed MCC build never restarts the
+dashboard (old code keeps serving); a dirty checkout is skipped loudly, never
+clobbered; quiet polls log nothing, so `journalctl -u merle-autodeploy` reads
+as a deploy history. Manual fallback with the watcher stopped: pull + restart
+for the Python services (they run from source); the MCC via
+`Servers/deploy-mcc.sh` (pull → install → build → restart, failing loudly at
+each step) — `next start` serves the compiled `.next/`, so pull + restart is
+*not* a deploy for it. Runbooks: `Servers/Pearl.md` (The deploy watcher) and
+`Servers/Merle.md`.
 
 Everything else: `systemctl status <unit>` for health, `journalctl -u <unit> -f` for live logs, `systemctl cat <unit>` to see (and crib from) an existing unit when adding the next service — new unit file, then `sudo systemctl daemon-reload && sudo systemctl enable --now <unit>`.
 
