@@ -490,21 +490,43 @@ const JOURNAL_LIMIT = 50;
  * Since issue #96 the print floats in the entry's text flow (magazine wrap)
  * and opens the full-size frame in the journal lightbox; a faded print is
  * inert -- the archive prunes both sizes together, so there is nothing to
- * open. Both states share one geometry so fading can't shift the layout. */
-const FRAME_THUMB_BOX = "float-right mb-1 ml-3 h-[81px] w-36 overflow-hidden rounded-sm border border-line bg-panel2";
+ * open. Both states share one geometry so fading can't shift the layout.
+ *
+ * Two sizes (issue #102), differing only in geometry and which archived
+ * variant they pull. "panel" is the rail's 144x81 thumb. "broadcast" is the
+ * reading room's print: ~40% of the max-w-3xl column (the float drops on
+ * narrow screens -- a 40% float in a phone-width column leaves a two-words-
+ * per-line ribbon beside a postage stamp), and it pulls the FULL-SIZE
+ * variant, because the archived thumb is only ~320px wide and would land
+ * ~1:1 at that size -- soft on any HiDPI screen. Lazy loading means only the
+ * prints in view fetch, and those bytes are the ones the lightbox wants
+ * next, so opening one from there is warm-cache instant. Both sizes hold a
+ * fixed 16:9 box: reserving it is what keeps the broadcast view's pinned
+ * scroll honest (an image growing after the pin strands it mid-thread), not
+ * just the no-layout-shift rule. */
+const FRAME_BOX_BASE =
+  "overflow-hidden rounded-sm border border-line bg-panel2";
+const FRAME_BOX: Record<"panel" | "broadcast", string> = {
+  panel: "float-right mb-1 ml-3 h-[81px] w-36",
+  broadcast:
+    "mb-3 aspect-video w-full sm:float-right sm:mb-2 sm:ml-5 sm:w-2/5",
+};
 function FrameThumb({
   frameId,
   narrator,
   onOpen,
+  size = "panel",
 }: {
   frameId: string;
   narrator: string;
   onOpen: () => void;
+  size?: "panel" | "broadcast";
 }) {
   const [lost, setLost] = useState(false);
+  const box = `${FRAME_BOX[size]} ${FRAME_BOX_BASE}`;
   if (lost) {
     return (
-      <span className={`${FRAME_THUMB_BOX} flex items-center justify-center`}>
+      <span className={`${box} flex items-center justify-center`}>
         <span className="stamp text-[9px] text-inkfaint">faded</span>
       </span>
     );
@@ -514,11 +536,11 @@ function FrameThumb({
       type="button"
       onClick={onOpen}
       aria-label={`open the still shot filed with ${narrator}'s entry`}
-      className={`${FRAME_THUMB_BOX} block cursor-zoom-in transition-colors duration-200 hover:border-linebright focus-visible:border-linebright focus-visible:outline-none`}
+      className={`${box} block cursor-zoom-in transition-colors duration-200 hover:border-linebright focus-visible:border-linebright focus-visible:outline-none`}
     >
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
-        src={frameUrl(frameId, true)}
+        src={frameUrl(frameId, size !== "broadcast")}
         alt={`still shot filed with ${narrator}'s entry`}
         loading="lazy"
         className="h-full w-full object-cover"
@@ -649,13 +671,19 @@ function FieldJournal() {
   );
   const anyoneOn = narrators.some(([, status]) => status === "online");
 
-  // The lightbox pages the whole window's stills (issue #96), in journal
-  // order (newest first, matching the list the viewer just clicked in). The
-  // open slide is re-derived from its key every render, so entries arriving
-  // or windows republishing mid-view can't swap the photo under the viewer.
+  // The lightbox pages the whole window's stills (issue #96), and its slide
+  // order follows the READING ORDER of the surface that opened it (#102):
+  // the panel runs newest-first, the broadcast view oldest-first, so a fixed
+  // order would send the arrows backwards through the column the viewer just
+  // clicked in. Only one of the two is ever clickable (the view covers the
+  // panel), so `broadcastView` names the live surface. Reordering is free
+  // because the open slide is re-derived from its stable content-derived KEY
+  // every render, never an index -- so neither this flip nor entries arriving
+  // nor a window republish can swap the photo under the viewer.
   const stills = entries.filter(
     (e): e is JournalEntry & { frame_id: string } => Boolean(e.frame_id),
   );
+  if (broadcastView) stills.reverse();
   const lightboxIndex =
     lightboxKey === null ? -1 : stills.findIndex((e) => e.key === lightboxKey);
 
@@ -820,6 +848,8 @@ function FieldJournal() {
         speaking={speaking}
         onToggleSpeaking={toggleSpeaking}
         onClose={() => setBroadcastView(false)}
+        onOpenStill={setLightboxKey}
+        stillOpen={lightboxIndex >= 0}
       />
     )}
     </>
@@ -883,6 +913,8 @@ function FieldJournalView({
   speaking,
   onToggleSpeaking,
   onClose,
+  onOpenStill,
+  stillOpen,
 }: {
   entries: JournalEntry[];
   narrators: [string, string][];
@@ -891,18 +923,34 @@ function FieldJournalView({
   speaking: boolean;
   onToggleSpeaking: () => void;
   onClose: () => void;
+  onOpenStill: (key: string) => void;
+  stillOpen: boolean;
 }) {
   // The Live Watch CSS-overlay contract (the WeatherStationView mechanics):
   // Escape closes, body scroll locks while the view is up.
+  //
+  // The guard (issue #102): this listener is on WINDOW, and the lightbox's
+  // own Escape bubbles up to it -- so with a still open, one keypress would
+  // close the photo AND the reading room underneath it. Escape belongs to
+  // the topmost layer, so the view stands down while a still is up; the
+  // lightbox closes, this listener re-arms, and a second Escape exits.
   useEffect(() => {
+    if (stillOpen) return;
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, stillOpen]);
+
+  // Scroll lock is its own effect, deliberately NOT sharing the Escape
+  // guard's deps: the lightbox writes body.overflow too, and if this
+  // unlocked/relocked around a still opening, the lightbox's own restore on
+  // close would race it and could strand the reading room scrollable.
+  useEffect(() => {
     document.body.style.overflow = "hidden";
     return () => {
-      window.removeEventListener("keydown", onKey);
       document.body.style.overflow = "";
     };
-  }, [onClose]);
+  }, []);
 
   // Chat order: the panel stays newest-first, but a conversation reads top
   // to bottom -- so the thread reverses and stays pinned to the newest line
@@ -1020,12 +1068,27 @@ function FieldJournalView({
                         </span>
                       )}
                     </div>
-                    <p
-                      className="mt-1 text-lg leading-relaxed text-ink"
-                      style={{ fontFamily: "var(--font-display)" }}
-                    >
-                      {e.text}
-                    </p>
+                    {/* The reading room's print (issue #102): the panel's
+                        magazine wrap writ large -- flow-root contains the
+                        float, so a short line still holds the print's full
+                        height. Reserving the box is also what keeps the
+                        pinned scroll above honest. */}
+                    <div className="mt-1 flow-root">
+                      {e.frame_id && (
+                        <FrameThumb
+                          frameId={e.frame_id}
+                          narrator={e.narrator}
+                          size="broadcast"
+                          onOpen={() => onOpenStill(e.key)}
+                        />
+                      )}
+                      <p
+                        className="text-lg leading-relaxed text-ink"
+                        style={{ fontFamily: "var(--font-display)" }}
+                      >
+                        {e.text}
+                      </p>
+                    </div>
                   </li>
                 );
               })}
