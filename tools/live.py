@@ -22,8 +22,8 @@ import numpy as np
 from datetime import datetime
 from collections import deque, Counter
 from ultralytics import YOLO
-from label_utils import dedupe_boxes
-import perception
+from vision.label_utils import dedupe_boxes
+from vision import perception
 
 # --- Single-instance guard ------------------------------------------------
 # A second copy of this script -- or a crashed/zombie one that never let go --

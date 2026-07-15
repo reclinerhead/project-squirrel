@@ -37,7 +37,7 @@ if ($Role) {
             # exists because that dashboard runs 24/7 and always holds an MJPEG
             # /stream connection, which never completes -- without the timeout,
             # Ctrl+C waits on it forever (and a second Ctrl+C is ignored).
-            & .\.venv\Scripts\python.exe -m uvicorn merle_daemon:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 3
+            & .\.venv\Scripts\python.exe -m uvicorn vision.merle_daemon:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 3
         }
         'mcc' {
             #pnpm --dir mcc dev

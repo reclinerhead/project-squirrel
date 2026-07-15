@@ -231,7 +231,7 @@ serves the LLM; if it's unreachable the narrator silently degrades to
 template lines — check the log's "narration tier" line when prose sounds
 suspiciously Mad-Libs).
 
-`Restart=always` in the unit is load-bearing: `narrator.py` calls `connect()`,
+`Restart=always` in the unit is load-bearing: `narration/narrator.py` calls `connect()`,
 not `connect_async()`, so it exits if the broker isn't up yet. On a cold boot
 it can lose that race. Restarting after 5s turns a fatal race into a shrug.
 
@@ -247,7 +247,7 @@ To run it by hand (stop the service first):
 ```
 sudo systemctl stop narrator-marlin
 cd ~/project-squirrel && source venv/bin/activate
-MERLE_MQTT=localhost:1883 python narrator.py --persona personas/marlin.yaml
+MERLE_MQTT=localhost:1883 python -m narration.narrator --persona narration/personas/marlin.yaml
 ```
 
 ---
@@ -255,7 +255,7 @@ MERLE_MQTT=localhost:1883 python narrator.py --persona personas/marlin.yaml
 ## The weather post (Willard)
 
 Unit: `/etc/systemd/system/willard-weather.service`
-Code: `weather.py` in the same checkout + venv as the narrator.
+Code: `weatherpost/weather.py` in the same checkout + venv as the narrator.
 
 Reads the driveway's own weather station (issue #51) — the Ecowitt GW2000B
 gateway at `192.168.1.210`, polled every 60 s over its local HTTP JSON API —
@@ -286,7 +286,7 @@ Extra env in the unit:
   narrator unit; unset means no segment and everything else runs as before.
   An unreachable Ollama is a skipped broadcast retried on the next 10-minute
   pass — look for `[ollama]` lines in the journal. `MERLE_OLLAMA_MODEL`
-  optionally picks the model (defaults to the code default in `narrator.py`).
+  optionally picks the model (defaults to the code default in `narration/narrator.py`).
 - `MERLE_WEATHER_DB=/home/todd/project-squirrel/weather.db` — optional; the
   seasonal archive (issue #105), the permanent 5-minute record behind the
   dashboard's deep-history charts. Default is `weather.db` under
@@ -326,7 +326,7 @@ To run it by hand (stop the service first):
 ```
 sudo systemctl stop willard-weather
 cd ~/project-squirrel && source venv/bin/activate
-MERLE_MQTT=localhost:1883 MERLE_ECOWITT=192.168.1.210 MERLE_OWM_KEY=<key> python weather.py
+MERLE_MQTT=localhost:1883 MERLE_ECOWITT=192.168.1.210 MERLE_OWM_KEY=<key> python -m weatherpost.weather
 ```
 
 The gateway itself answers on the LAN with no auth — a quick sanity check
@@ -349,7 +349,9 @@ mosquitto_sub -h 192.168.1.64 -t 'weather/status' -C 1 -v
 ## The frame archive (frame-archiver)
 
 Unit: `/etc/systemd/system/frame-archiver.service`
-Code: `frame_archiver.py` in the same checkout + venv as the narrator.
+Code: `frame_archiver.py` in the same checkout + venv as the narrator. It
+stays a ROOT module (it needs no vision deps and belongs to no package), so
+unlike the others its unit needed no change in #123.
 
 The still-shot filing clerk (issue #90): subscribes to
 `driveway/frames/#` and writes each event's JPEGs (full + thumb) to disk,
@@ -383,7 +385,7 @@ To run it by hand (stop the service first):
 ```
 sudo systemctl stop frame-archiver
 cd ~/project-squirrel && source venv/bin/activate
-MERLE_MQTT=localhost:1883 python frame_archiver.py
+MERLE_MQTT=localhost:1883 python -m frame_archiver
 ```
 
 Quick health check — count today's filings:
@@ -509,7 +511,7 @@ route is the thing that breaks.
 
 **Reaching the daemon**: the dashboard proxies to the perception daemon on
 bluejay (`MERLE_DAEMON_URL` in the unit). For that to work the daemon on
-bluejay must bind the LAN, not loopback — `python -m uvicorn merle_daemon:app
+bluejay must bind the LAN, not loopback — `python -m uvicorn vision.merle_daemon:app
 --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 3` — and Windows
 Firewall on bluejay needs a one-time inbound allow on TCP 8000. The shutdown
 timeout is this dashboard's fault, same disease as the fast-stop drop-in
@@ -545,7 +547,7 @@ Running it:
 
 ```
 cd ~/project-squirrel
-MERLE_MUSIC_DB=/home/todd/project-squirrel/music.db python3 music_index.py
+MERLE_MUSIC_DB=/home/todd/project-squirrel/music.db python3 -m jukebox.music_index
 ```
 
 | Flag | What it does |
@@ -660,6 +662,56 @@ sudo tar czf ~/pearl-config-$(date +%F).tar.gz \
 
 Copy it off the box. Monthly is plenty. The Merle unit files carry the
 OpenWeather API key, so treat the tarball accordingly.
+
+### The databases — and why `cp` is the wrong tool
+
+The tarball above is **config only**. It does not cover `weather.db`, which
+this runbook elsewhere calls *the one irreplaceable file the whole stack owns*
+— it is append-only, it never refills, and no API sells the readings back.
+`music.db`'s catalog rebuilds from the NAS in ~3 hours, but its `ratings` and
+`play_history` do not rebuild at all. Those are the two files worth a copy.
+
+**`cp weather.db` gives you an empty file. This is not a warning, it is what
+happens.** Measured on 2026-07-15 with 2.9 days of history in the archive:
+
+```
+weather.db          4096 bytes     <-- the whole file
+weather.db-wal    997072 bytes     <-- all 721 observations are in HERE
+```
+
+Willard holds its connection open around the clock, so the WAL has **never
+checkpointed** back into the main file. `cp weather.db ~/` produces 4 KB in
+which the `observations` table does not even exist (`sqlite3.OperationalError:
+no such table: observations`) — and it fails **silently**, so you find out on
+the day you need it.
+
+Copying all three (`weather.db`, `-wal`, `-shm`) would work but is racy against
+a live writer. Use the backup API, which reads *through* the WAL and writes one
+consolidated file:
+
+```
+python3 -c "import sqlite3,sys; s=sqlite3.connect(sys.argv[1]); d=sqlite3.connect(sys.argv[2]); s.backup(d); d.close(); s.close()" \
+    ~/project-squirrel/weather.db ~/weather-backup-$(date +%F).db
+```
+
+Same for `music.db`. Verify rather than trust — a backup nobody has read is a
+hope:
+
+```
+python3 -c "
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+print('rows:', c.execute('SELECT COUNT(*), MIN(ts), MAX(ts) FROM observations').fetchone())
+" ~/weather-backup-$(date +%F).db
+```
+
+(There is no `sqlite3` CLI on this box; Python's stdlib has the same API and is
+always here.)
+
+**Restoring is almost never the right move.** Willard appends continuously, so
+copying an old snapshot back discards every observation recorded since it was
+taken. A restore is for a lost or corrupt file, not for "I changed something
+and want to be safe" — for that, take the backup and expect never to open it.
 
 ---
 

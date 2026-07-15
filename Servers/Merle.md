@@ -62,7 +62,7 @@ imports. Don't install the vision stack on the Pi.
 ```
 cd ~/project-squirrel
 MERLE_MQTT=192.168.1.64:1883 MERLE_OLLAMA=192.168.1.79:11434 \
-    venv/bin/python narrator.py --persona personas/jim.yaml
+    venv/bin/python -m narration.narrator --persona narration/personas/jim.yaml
 ```
 
 You should see Jim announce his narration tier, his `answering to: Jim`
@@ -81,7 +81,7 @@ Wants=network-online.target
 [Service]
 User=todd
 WorkingDirectory=/home/todd/project-squirrel
-ExecStart=/home/todd/project-squirrel/venv/bin/python narrator.py --persona personas/jim.yaml
+ExecStart=/home/todd/project-squirrel/venv/bin/python -m narration.narrator --persona narration/personas/jim.yaml
 Environment=PYTHONUNBUFFERED=1
 Environment=MERLE_MQTT=192.168.1.64:1883
 Environment=MERLE_OLLAMA=192.168.1.79:11434
@@ -109,7 +109,7 @@ And two more explain themselves once:
   degrades to template lines exactly like Marlin does — check the startup
   "narration tier" line in the journal when his prose sounds suspiciously
   Mad-Libs.
-- `Restart=always` — `narrator.py` calls `connect()`, not `connect_async()`,
+- `Restart=always` — `narration/narrator.py` calls `connect()`, not `connect_async()`,
   so it exits if the broker isn't reachable yet. On a cold boot (or a pearl
   reboot) it can lose that race; restarting after 5s turns a fatal race into
   a shrug.
@@ -184,15 +184,16 @@ To run him by hand (stop the service first):
 sudo systemctl stop narrator-jim
 cd ~/project-squirrel
 MERLE_MQTT=192.168.1.64:1883 MERLE_OLLAMA=192.168.1.79:11434 \
-    venv/bin/python narrator.py --persona personas/jim.yaml
+    venv/bin/python -m narration.narrator --persona narration/personas/jim.yaml
 ```
 
 ---
 
 ## What Jim is
 
-Same script as Marlin (`narrator.py`), different persona
-(`personas/jim.yaml`), same shared world canon (`character_bible.yaml` —
+Same module as Marlin (`narration/narrator.py`), different persona
+(`narration/personas/jim.yaml`), same shared world canon
+(`narration/character_bible.yaml` —
 written for exactly this day). What makes Jim Jim:
 
 - **The announcer** (issue #88): Jim is the field man and the first voice on

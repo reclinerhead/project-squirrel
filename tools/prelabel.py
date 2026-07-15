@@ -19,7 +19,7 @@ import argparse
 import os
 from pathlib import Path
 from ultralytics import YOLO
-from label_utils import dedupe_boxes
+from vision.label_utils import dedupe_boxes
 
 parser = argparse.ArgumentParser(description="Pre-label stills with our own model.")
 parser.add_argument("--dir", default="hard_frames", help="folder of .jpg files")

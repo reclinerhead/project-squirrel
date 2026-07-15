@@ -660,6 +660,17 @@ def generate(persona, bible, event, rng, ollama=None,
 JOURNAL_LINES = 50
 DEFAULT_JOURNAL_PATH = "narration_journal.json"
 
+# The bible ships WITH this module, so its default resolves against the module's
+# own directory -- not the CWD (issue #123). A bare "character_bible.yaml" was
+# the old default and worked only because narrator.py sat in the repo root next
+# to it; once the module moved under narration/, that default pointed at a file
+# that isn't there, and the failure would have been a narrator that started fine
+# and then had no world facts. The journal above is deliberately NOT given this
+# treatment: it's runtime state the units place per-box via MERLE_JOURNAL, and
+# it belongs beside the checkout, not inside the package.
+DEFAULT_BIBLE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "character_bible.yaml")
+
 
 def load_journal(path):
     """The persisted journal window, or a fresh one. Missing and corrupt files
@@ -895,9 +906,10 @@ class Producer:
 
 def main():
     ap = argparse.ArgumentParser(description="Merle scene narrator v1")
-    ap.add_argument("--persona", required=True, help="persona YAML, e.g. personas/marlin.yaml")
-    ap.add_argument("--bible", default="character_bible.yaml",
-                    help="shared world-facts YAML (default: character_bible.yaml)")
+    ap.add_argument("--persona", required=True,
+                    help="persona YAML, e.g. narration/personas/marlin.yaml")
+    ap.add_argument("--bible", default=DEFAULT_BIBLE_PATH,
+                    help="shared world-facts YAML (default: the one beside this module)")
     args = ap.parse_args()
 
     persona = load_persona(args.persona)

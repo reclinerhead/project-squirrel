@@ -16,7 +16,7 @@
 
 import pytest
 
-import music_catalog as mc
+from jukebox import music_catalog as mc
 
 
 @pytest.fixture

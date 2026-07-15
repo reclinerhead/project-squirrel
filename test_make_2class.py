@@ -4,7 +4,7 @@
 
 import pytest
 
-import make_2class
+from tools import make_2class
 
 # The real mapping for ['chipmunk', 'squirrel', 'turkey'] -> ['squirrel', 'turkey']
 DROP_ID = 0

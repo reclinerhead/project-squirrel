@@ -45,9 +45,9 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 import bus
-import perception
-import storage
-from frames import SyntheticFrameSource
+from vision import perception
+from vision import storage
+from vision.frames import SyntheticFrameSource
 
 # Per-class colors from the shared palette so the daemon stream reads the same
 # as the desktop window. Colors are keyed by name in perception.SPECIES_COLORS,
@@ -579,7 +579,7 @@ def make_source():
     at import, so importing this module never opens the camera or loads the model."""
     if os.environ.get("MERLE_SOURCE", "camera") == "synthetic":
         return SyntheticFrameSource()
-    from frames import RTSPFrameSource   # lazy: heavy + camera-only
+    from vision.frames import RTSPFrameSource   # lazy: heavy + camera-only
     return RTSPFrameSource()
 
 

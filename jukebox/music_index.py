@@ -80,7 +80,7 @@ import struct
 import sys
 import time
 
-import music_catalog
+from jukebox import music_catalog
 
 DEFAULT_ROOT = "/mnt/music"
 

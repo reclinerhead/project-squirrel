@@ -1,7 +1,7 @@
 # Tests for storage.py -- the daemon's SQLite layer. Pure logic, stdlib only,
 # so these run fast in CI without ultralytics/opencv. Every DB is in-memory.
 
-import storage
+from vision import storage
 
 
 def fresh():

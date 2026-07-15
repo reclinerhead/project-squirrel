@@ -10,8 +10,8 @@ import time
 
 import pytest
 
-import frames
-from frames import FreshestFrameReader, SyntheticFrameSource
+from vision import frames
+from vision.frames import FreshestFrameReader, SyntheticFrameSource
 
 
 class FakeCap:

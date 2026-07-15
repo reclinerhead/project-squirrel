@@ -5,8 +5,8 @@
 
 import numpy as np
 
-import perception
-from perception import TrackMemory
+from vision import perception
+from vision.perception import TrackMemory
 
 
 def det(tid, name="squirrel", conf=0.6, box=(10, 10, 50, 50)):

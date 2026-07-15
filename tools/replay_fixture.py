@@ -25,7 +25,7 @@ from collections import Counter
 
 import cv2
 
-import perception
+from vision import perception
 
 
 def sidecar_fps(path, fallback=15.0):
