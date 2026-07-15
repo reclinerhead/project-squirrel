@@ -1,21 +1,21 @@
 <#
-Launch the Merle processes that live on bluejay: one Windows Terminal window,
-one tab per process (daemon, mcc). Same commands as the Quick start in
+Launch the Merle process that lives on bluejay -- the perception daemon -- in
+its own Windows Terminal tab. Same command as the Quick start in
 TechnicalGuide.md.
 
-The broker (Mosquitto) and the narrator (Marlin) run on pearl (192.168.1.64,
-always-on Ubuntu) and are not started from here.
+The broker (Mosquitto), the narrator (Marlin), and the dashboard (MCC, :3000)
+all run on pearl (192.168.1.64, always-on Ubuntu) and are not started from here.
 
 Usage:
   .\start-merle.ps1              # live camera
   .\start-merle.ps1 -Synthetic   # camera-free world (MERLE_SOURCE=synthetic)
 
-Ctrl+C in a tab stops that process; closing the window stops everything.
+Ctrl+C in the tab stops the daemon; closing the window stops it too.
 #>
 param(
     [switch]$Synthetic,
-    # Internal: run a single process inside a tab (set by the launcher, not by hand)
-    [ValidateSet('daemon', 'mcc')]
+    # Internal: run the daemon inside the tab (set by the launcher, not by hand)
+    [ValidateSet('daemon')]
     [string]$Role
 )
 
@@ -37,24 +37,20 @@ if ($Role) {
             # exists because that dashboard runs 24/7 and always holds an MJPEG
             # /stream connection, which never completes -- without the timeout,
             # Ctrl+C waits on it forever (and a second Ctrl+C is ignored).
-            & .\.venv\Scripts\python.exe -m uvicorn vision.merle_daemon:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 3
-        }
-        'mcc' {
-            #pnpm --dir mcc dev
+            # --no-access-log: that same 24/7 dashboard polls /state about twice
+            # a second, and each poll printed a line, burying the event prints
+            # this console exists to show. Startup/error lines are unaffected.
+            & .\.venv\Scripts\python.exe -m uvicorn vision.merle_daemon:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 3 --no-access-log
         }
     }
     return
 }
 
 $self = Join-Path $root 'start-merle.ps1'
-$wtArgs = @('-w', 'merle')
-foreach ($tab in 'daemon', 'mcc') {
-    $wtArgs += @('nt', '--title', $tab, '-d', $root,
-                 'powershell', '-NoExit', '-File', $self, '-Role', $tab)
-    if ($Synthetic -and $tab -eq 'daemon') { $wtArgs += '-Synthetic' }
-    $wtArgs += ';'
-}
+$wtArgs = @('-w', 'merle', 'nt', '--title', 'daemon', '-d', $root,
+            'powershell', '-NoExit', '-File', $self, '-Role', 'daemon')
+if ($Synthetic) { $wtArgs += '-Synthetic' }
 & wt @wtArgs
 
-Write-Host 'Merle station launching: daemon, mcc. (Broker + narrator run on pearl.)'
+Write-Host 'Merle daemon launching. (Broker, narrator + dashboard run on pearl.)'
 Write-Host 'Dashboard: http://pearl:3000'
