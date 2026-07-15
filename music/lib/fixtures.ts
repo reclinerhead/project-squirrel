@@ -35,6 +35,7 @@ function album(
   id: string,
   title: string,
   year: number,
+  genre: string,
   spec: FormatSpec,
   tracks: [title: string, mss: string][],
 ): Album {
@@ -44,6 +45,7 @@ function album(
     artistId,
     artist,
     year,
+    genre,
     tracks: tracks.map(([t, d], i): Track => ({
       id: `${id}-t${i + 1}`,
       title: t,
@@ -58,16 +60,16 @@ function album(
   };
 }
 
-// --- the library ---
+// --- the handcrafted shelf: ten bands with real personality ---
 
-export const ARTISTS: Artist[] = [
+const HANDCRAFTED: Artist[] = [
   {
     id: "driveway-ghosts",
     name: "Driveway Ghosts",
     bio:
       "Driveway Ghosts formed in a detached garage outside Traverse City, where the only audience for their first two winters was whatever the motion light caught crossing the gravel. Their sound splits the difference between heartland rock and something colder and more patient -- brushed drums, baritone guitar, harmonies that arrive a half-beat late like they walked over from the neighbor's place. The band self-recorded both of their albums to a salvaged 8-track console, and it shows in the best way: everything sounds one room away. Critics keep reaching for the word 'nocturnal', and the band keeps not correcting them. They tour rarely, in fall, and are rumored to soundcheck with the house lights off.",
     albums: [
-      album("driveway-ghosts", "Driveway Ghosts", "gravel-static", "Gravel Static", 2023, alac2448, [
+      album("driveway-ghosts", "Driveway Ghosts", "gravel-static", "Gravel Static", 2023, "Rock", alac2448, [
         ["Motion Light", "4:12"],
         ["Second Winter", "3:48"],
         ["Salt on the Steps", "5:02"],
@@ -78,7 +80,7 @@ export const ARTISTS: Artist[] = [
         ["Porchlight Economy", "4:26"],
         ["Gravel Static", "5:38"],
       ]),
-      album("driveway-ghosts", "Driveway Ghosts", "north-of-the-thaw", "North of the Thaw", 2025, alac2448, [
+      album("driveway-ghosts", "Driveway Ghosts", "north-of-the-thaw", "North of the Thaw", 2025, "Rock", alac2448, [
         ["Thaw Line", "4:05"],
         ["Bare Argument", "3:57"],
         ["Wool and Wire", "4:40"],
@@ -96,7 +98,7 @@ export const ARTISTS: Artist[] = [
     bio:
       "Signal Creek is the solo vehicle of producer Ana Reyes, who records synthesizers through spring reverbs in a cabin with famously bad cell coverage -- the project's name is the spot at the end of the drive where one bar appears. Her tracks build like weather systems: a pulse, then layers, then all of it at once.",
     albums: [
-      album("signal-creek", "Signal Creek", "one-bar", "One Bar", 2024, alac2496, [
+      album("signal-creek", "Signal Creek", "one-bar", "One Bar", 2024, "Electronic", alac2496, [
         ["Coverage Map", "5:21"],
         ["Dropped Call", "4:14"],
         ["Repeater", "6:03"],
@@ -105,7 +107,7 @@ export const ARTISTS: Artist[] = [
         ["Spring Reverb", "3:58"],
         ["One Bar", "5:44"],
       ]),
-      album("signal-creek", "Signal Creek", "night-air", "Night Air", 2022, alac1644, [
+      album("signal-creek", "Signal Creek", "night-air", "Night Air", 2022, "Electronic", alac1644, [
         ["Antenna Farm", "4:31"],
         ["AM Ghost", "5:09"],
         ["Skywave", "6:18"],
@@ -122,7 +124,7 @@ export const ARTISTS: Artist[] = [
     bio:
       "Instrumental post-rock quartet from Duluth. The Cold Frame write ten-minute pieces the way gardeners overwinter seedlings -- slowly, under glass, with total confidence the sun is coming. Two guitars, a cello, and a drummer who plays like he's paid by the silence.",
     albums: [
-      album("the-cold-frame", "The Cold Frame", "under-glass", "Under Glass", 2021, flac1644, [
+      album("the-cold-frame", "The Cold Frame", "under-glass", "Under Glass", 2021, "Post-Rock", flac1644, [
         ["Germination", "8:44"],
         ["Hardening Off", "6:32"],
         ["First True Leaves", "9:17"],
@@ -137,7 +139,7 @@ export const ARTISTS: Artist[] = [
     bio:
       "Maple & Vine are a folk duo -- one voice like cedar, one like smoke -- who met trading verses at a farmers-market open mic and never quite stopped. Their songs are short, sturdy, and built to be hummed while doing something else with your hands.",
     albums: [
-      album("maple-and-vine", "Maple & Vine", "handmade-weather", "Handmade Weather", 2020, mp3320, [
+      album("maple-and-vine", "Maple & Vine", "handmade-weather", "Handmade Weather", 2020, "Folk", mp3320, [
         ["Jar by the Door", "2:58"],
         ["Cedar and Smoke", "3:24"],
         ["Market Day", "2:41"],
@@ -147,7 +149,7 @@ export const ARTISTS: Artist[] = [
         ["Clothesline Semaphore", "3:11"],
         ["Last Stall on the Left", "3:37"],
       ]),
-      album("maple-and-vine", "Maple & Vine", "the-long-table", "The Long Table", 2023, mp3320, [
+      album("maple-and-vine", "Maple & Vine", "the-long-table", "The Long Table", 2023, "Folk", mp3320, [
         ["Set an Extra Place", "3:19"],
         ["Bread and Argument", "2:54"],
         ["The Long Table", "4:21"],
@@ -164,7 +166,7 @@ export const ARTISTS: Artist[] = [
     bio:
       "Slowcore three-piece from the Upper Peninsula. Low Antler play at the speed of snowfall and mix their records so quiet passages make you lean in -- then reward the lean. Their lone album took four winters to finish and sounds like all of them.",
     albums: [
-      album("low-antler", "Low Antler", "four-winters", "Four Winters", 2024, flac2448, [
+      album("low-antler", "Low Antler", "four-winters", "Four Winters", 2024, "Indie", flac2448, [
         ["Shed Season", "6:41"],
         ["Browse Line", "7:28"],
         ["Yarding Up", "5:56"],
@@ -180,7 +182,7 @@ export const ARTISTS: Artist[] = [
     bio:
       "A jazz quartet that only books the late set. The Night Shift Owls swing hard but talk soft -- brushed kit, upright bass, a trumpet with a practice mute, and a pianist who quotes lullabies when she thinks no one's listening.",
     albums: [
-      album("night-shift-owls", "The Night Shift Owls", "last-set", "Last Set", 2019, alac1644, [
+      album("night-shift-owls", "The Night Shift Owls", "last-set", "Last Set", 2019, "Jazz", alac1644, [
         ["Doors at Eleven", "5:47"],
         ["Brushes Only", "4:29"],
         ["Mute Point", "6:15"],
@@ -189,7 +191,7 @@ export const ARTISTS: Artist[] = [
         ["Tip Jar Blues", "4:44"],
         ["Last Set", "8:09"],
       ]),
-      album("night-shift-owls", "The Night Shift Owls", "early-birds", "Early Birds", 2022, alac1644, [
+      album("night-shift-owls", "The Night Shift Owls", "early-birds", "Early Birds", 2022, "Jazz", alac1644, [
         ["First Light Fake", "5:12"],
         ["Alarm Snooze", "4:37"],
         ["Percolator", "3:58"],
@@ -205,7 +207,7 @@ export const ARTISTS: Artist[] = [
     bio:
       "Greasy two-man blues from an iron town -- one resonator guitar, one kit assembled partly from actual mining equipment. Carbide Lamp songs are about water in the shaft, money owed, and headlamps that never quite die.",
     albums: [
-      album("carbide-lamp", "Carbide Lamp", "seam-and-vein", "Seam and Vein", 2018, mp3256, [
+      album("carbide-lamp", "Carbide Lamp", "seam-and-vein", "Seam and Vein", 2018, "Blues", mp3256, [
         ["Down the Ladder Road", "3:44"],
         ["Water in the Shaft", "4:17"],
         ["Company Scrip", "3:29"],
@@ -222,7 +224,7 @@ export const ARTISTS: Artist[] = [
     bio:
       "Dream pop with field recordings stitched through it -- every Painted Bunting track hides at least one real bird, and the liner notes credit them by species. The band swears the title track's rhythm section is two woodpeckers and a screen door.",
     albums: [
-      album("painted-bunting", "Painted Bunting", "plumage", "Plumage", 2025, alac2448, [
+      album("painted-bunting", "Painted Bunting", "plumage", "Plumage", 2025, "Indie", alac2448, [
         ["Molt", "4:18"],
         ["Seven Colors", "3:52"],
         ["Feeder Politics", "4:41"],
@@ -239,7 +241,7 @@ export const ARTISTS: Artist[] = [
     bio:
       "Instrumental beats made in an actual freight elevator, which the producer insists has the best natural compression in the building. Dusty loops, thick bass, doors that open exactly on the one.",
     albums: [
-      album("freight-elevator", "Freight Elevator", "service-entrance", "Service Entrance", 2021, mp3320, [
+      album("freight-elevator", "Freight Elevator", "service-entrance", "Service Entrance", 2021, "Hip-Hop", mp3320, [
         ["Hold the Door", "2:47"],
         ["Manifest", "3:12"],
         ["Between Floors", "2:58"],
@@ -257,7 +259,7 @@ export const ARTISTS: Artist[] = [
     bio:
       "Chamber pop collective -- strings, woodwinds, and a rotating cast of singers who all sound like they're apologizing for waking you. The Society records live to two microphones in a decommissioned grange hall.",
     albums: [
-      album("quiet-meadow-society", "Quiet Meadow Society", "grange-hall", "Grange Hall", 2023, flac1644, [
+      album("quiet-meadow-society", "Quiet Meadow Society", "grange-hall", "Grange Hall", 2023, "Chamber Pop", flac1644, [
         ["Meeting Called to Order", "3:36"],
         ["Minutes of the Last Meadow", "4:22"],
         ["Motion to Adjourn", "3:14"],
@@ -268,6 +270,132 @@ export const ARTISTS: Artist[] = [
       ]),
     ],
   },
+];
+
+// --- the bulk shelf: a generated library at realistic cardinality ---
+// Issue #118's whole point: prove the browse pages, pagination, A-Z rail, and
+// shelf caps against hundreds of albums BEFORE the real catalog arrives.
+// Everything is driven by a seeded PRNG (mulberry32) so module load is
+// deterministic -- same library every render, every test, every machine.
+// Math.random would break that (and hydration with it).
+
+export const GENRES = [
+  "Blues",
+  "Chamber Pop",
+  "Country",
+  "Electronic",
+  "Folk",
+  "Hip-Hop",
+  "Indie",
+  "Jazz",
+  "Post-Rock",
+  "Rock",
+] as const;
+
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const ADJ = ["Silver", "Hollow", "Northern", "Paper", "Wild", "Quiet", "Broken", "Golden", "Midnight", "Cedar", "Iron", "Lucky", "Distant", "Humble", "Electric", "Sleepy", "Copper", "Restless", "Minor", "Patient"];
+const NOUN = ["Harbor", "Compass", "Lantern", "Meadow", "Signal", "Timber", "Sparrow", "Engine", "Orchard", "Canyon", "Ember", "Prairie", "Anchor", "Willow", "Circuit", "Sawmill", "Comet", "Fern", "Quarry", "Beacon"];
+
+function slug(s: string): string {
+  return s.toLowerCase().replace(/&/g, "and").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+
+function buildBulkLibrary(count: number): Artist[] {
+  const rng = mulberry32(0x5eed);
+  const pick = <T,>(arr: readonly T[]): T => arr[Math.floor(rng() * arr.length)];
+  const int = (lo: number, hi: number) => lo + Math.floor(rng() * (hi - lo + 1));
+  const usedNames = new Set<string>(HANDCRAFTED.map((a) => a.name));
+  const usedAlbumIds = new Set<string>(HANDCRAFTED.flatMap((a) => a.albums.map((al) => al.id)));
+  const artists: Artist[] = [];
+
+  const bandName = (): string => {
+    const n1 = pick(NOUN);
+    const n2 = pick(NOUN);
+    const a = pick(ADJ);
+    switch (int(0, 4)) {
+      case 0: return `The ${a} ${n1}s`;
+      case 1: return `${a} ${n1}`;
+      case 2: return n1 === n2 ? `${n1} & ${pick(ADJ)}` : `${n1} & ${n2}`;
+      case 3: return `The ${n1}s`;
+      default: return `${n1} ${n2}`;
+    }
+  };
+
+  const trackTitle = (n: number): string => {
+    switch (int(0, 3)) {
+      case 0: return `${pick(ADJ)} ${pick(NOUN)}`;
+      case 1: return `${pick(NOUN)} Road`;
+      case 2: return `No. ${n} (${pick(ADJ)})`;
+      default: return `${pick(NOUN)} Song`;
+    }
+  };
+
+  const spec = (): FormatSpec => {
+    const r = rng();
+    // echoes the real library's mix (epic #115): mostly ALAC, MP3 minority
+    if (r < 0.25) return alac2448;
+    if (r < 0.62) return alac1644;
+    if (r < 0.94) return mp3320;
+    return rng() < 0.5 ? flac1644 : flac2448;
+  };
+
+  while (artists.length < count) {
+    const name = bandName();
+    if (usedNames.has(name)) continue; // deterministic skip, rng advances
+    usedNames.add(name);
+    const artistId = slug(name);
+    const genre = pick(GENRES);
+    const albums: Album[] = [];
+    const nAlbums = int(1, 4);
+    for (let i = 0; i < nAlbums; i++) {
+      const title = int(0, 2) === 0 ? `${pick(ADJ)} ${pick(NOUN)}` : int(0, 1) === 0 ? `The ${pick(NOUN)}` : `${pick(NOUN)} Sessions`;
+      let albumId = slug(`${artistId}-${title}`);
+      while (usedAlbumIds.has(albumId)) albumId = `${albumId}-x`;
+      usedAlbumIds.add(albumId);
+      const year = int(1968, 2026);
+      const s = spec();
+      const nTracks = int(7, 12);
+      const tracks: [string, string][] = [];
+      for (let t = 1; t <= nTracks; t++) {
+        const dur = int(150, 420);
+        tracks.push([t === 1 ? title : trackTitle(t), `${Math.floor(dur / 60)}:${String(dur % 60).padStart(2, "0")}`]);
+      }
+      albums.push(album(artistId, name, albumId, title, year, genre, s, tracks));
+    }
+    artists.push({
+      id: artistId,
+      name,
+      bio: `${name} hold down the ${genre.toLowerCase()} end of the fixture stacks -- generated stand-ins keeping the shelves honest until the real catalog moves in.`,
+      albums: albums.sort((a, b) => a.year - b.year),
+    });
+  }
+  return artists;
+}
+
+const BULK: Artist[] = buildBulkLibrary(120);
+
+export const ARTISTS: Artist[] = [...HANDCRAFTED, ...BULK];
+
+// Fixture play-recency (issue #118): which albums count as "recently played",
+// most recent first. Drives the recently-played shelf and the rediscovery
+// shelf's anti-recency filter until Phase 2's play_history exists. The
+// handcrafted entries keep the seed queue's album in the story; the bulk
+// entries prove the shelves work over generated data too.
+export const PLAYED_ORDER: string[] = [
+  "gravel-static",
+  "one-bar",
+  "last-set",
+  ...BULK.slice(0, 5).map((a) => a.albums[0].id),
 ];
 
 // Fixture-curated top tracks per artist. In the real system this ranking
