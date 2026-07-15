@@ -1,0 +1,140 @@
+@import "tailwindcss";
+
+/* =============================================================================
+   Music -- "The Listening Room"
+   Same ranger station as the MCC, different room: the base palette (pine-black
+   panels, hairline lines, lantern ink) is carried over verbatim so the two
+   apps read as one household, but the atmosphere swaps the MCC's topographic
+   contours for vinyl grooves -- same repeating-gradient technique, different
+   instrument on the table.
+
+   Deliberately NOT carried over: the species accents (--squirrel/--chipmunk/
+   --turkey) mean "this species" on the detection stream and nothing in this
+   app detects anything, so they don't exist here at all -- the strongest
+   possible form of "never pick these for decoration". --rain stays in the MCC
+   for the same reason (it names something the station measures).
+
+   --led IS carried, with its one job intact: green means LIVE. In a music
+   player the live thing is the track that is audibly playing right now, so
+   the now-playing row and the on-air glyphs wear it.
+   ========================================================================== */
+
+:root {
+  --bg: #0c1310;
+  --panel: #121c17;
+  --panel-2: #16231c;
+  --line: #27392e;
+  --line-bright: #3b5443;
+  --ink: #ece4cf;
+  --ink-dim: #93a794;
+  --ink-faint: #5c6f5f;
+  --led: #6be585;
+
+  /* Hi-res gold (issue #116). Names a QUALITY the catalog indexed -- 24-bit
+     lossless -- the way --rain names a measurement; it never colors anything
+     else, so the semantic-token rule stays intact. Amber-gold #e0b25c sits at
+     OKLCH ~L 0.78 C 0.11 h 82: inside the ink palette's own lightness range,
+     warm against the pine-green field, and clearly separated from --led
+     (h ~150) -- the only other accent in this app. The species hues it might
+     crowd (--squirrel h ~55, --turkey h ~110) are not present here by design,
+     and the badge always carries its label in text, so no meaning ever rides
+     on hue alone. */
+  --hires: #e0b25c;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-panel: var(--panel);
+  --color-panel2: var(--panel-2);
+  --color-line: var(--line);
+  --color-linebright: var(--line-bright);
+  --color-ink: var(--ink);
+  --color-inkdim: var(--ink-dim);
+  --color-inkfaint: var(--ink-faint);
+  --color-led: var(--led);
+  --color-hires: var(--hires);
+  --font-display: var(--font-display);
+  --font-mono: var(--font-mono);
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  /* Vinyl grooves instead of topo contours: two off-canvas records -- one
+     spinning up from the bottom-right corner, a fainter one over the left
+     shoulder -- plus a low warm glow from below, like a lamp behind the
+     turntable. Two repeating gradients and a wash doing all the work. */
+  background-image:
+    radial-gradient(ellipse 120% 80% at 50% 115%, rgba(224, 178, 92, 0.05), transparent 55%),
+    repeating-radial-gradient(
+      circle at 88% 112%,
+      transparent 0px,
+      transparent 5px,
+      rgba(59, 84, 67, 0.17) 6px,
+      transparent 7px
+    ),
+    repeating-radial-gradient(
+      circle at -6% -12%,
+      transparent 0px,
+      transparent 8px,
+      rgba(59, 84, 67, 0.1) 9px,
+      transparent 10px
+    );
+  background-attachment: fixed;
+}
+
+/* Panel reveal on load, inherited from the MCC: instruments warming up.
+   `backwards` (not `both`) for the same containing-block reason documented
+   there -- a retained transform would trap fixed overlays inside the panel. */
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.panel {
+  animation: panel-in 0.45s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+.panel:nth-child(1) { animation-delay: 0.05s; }
+.panel:nth-child(2) { animation-delay: 0.12s; }
+.panel:nth-child(3) { animation-delay: 0.19s; }
+.panel:nth-child(4) { animation-delay: 0.26s; }
+.panel:nth-child(5) { animation-delay: 0.33s; }
+.panel:nth-child(6) { animation-delay: 0.4s; }
+
+/* The needle-drop: three equalizer bars for the audibly-playing row. Drawn
+   with currentColor so they wear --led wherever they land. The stagger makes
+   three identical animations read as music instead of a metronome. */
+@keyframes eq-bounce {
+  0%, 100% { transform: scaleY(0.3); }
+  50% { transform: scaleY(1); }
+}
+.eq-bar {
+  transform-origin: bottom;
+  animation: eq-bounce 0.9s ease-in-out infinite;
+}
+.eq-bar:nth-child(2) { animation-delay: 0.25s; }
+.eq-bar:nth-child(3) { animation-delay: 0.45s; }
+/* Paused: bars hold a low idle instead of vanishing -- the row keeps its
+   glyph (and its width) whether or not sound is coming out. */
+.eq-paused .eq-bar {
+  animation-play-state: paused;
+}
+
+/* Thin scroll gutter in panel line colors instead of the stock browser bar. */
+.scrollpane {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-bright) transparent;
+}
+
+/* Stamped label, like gear inventory lettering on a footlocker. */
+.stamp {
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
