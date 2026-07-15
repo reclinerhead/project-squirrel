@@ -521,6 +521,78 @@ asleep" and journals only the down/up transitions.
 
 ---
 
+## The music catalog (issue #120)
+
+**Not a unit — a command you run by hand.** It's a one-time pass with an end,
+plus occasional re-runs; a `while True` daemon for a job that finishes is the
+wrong shape. No port, no bus topic, nothing to `systemctl status`.
+
+The library mount is already here and is **read-only on purpose** — the audio
+files are an immutable input and we never write tags back to them:
+
+```
+//hummingbird/music on /mnt/music type cifs (ro,relatime,vers=2.0,...)
+```
+
+Confirm it before a pass — an unmounted share walks to zero files, which looks
+exactly like a successful pass over a library that vanished:
+
+```
+mountpoint /mnt/music && ls /mnt/music | head
+```
+
+Running it:
+
+```
+cd ~/project-squirrel
+MERLE_MUSIC_DB=/home/todd/project-squirrel/music.db python3 music_index.py
+```
+
+| Flag | What it does |
+| --- | --- |
+| *(none)* | Full pass, honoring the hash cache |
+| `--limit N` | Stop after N files — a smoke test |
+| `--rehash` | Ignore the cache, re-hash everything |
+| `--prune` | Also drop locations the pass didn't see |
+| `--dry-run` | Walk and hash, write nothing |
+
+**The first pass takes ~3 hours** (612.7 GB, 26,590 files, ~56 MB/s including
+tag reads — it's wire-limited, not CPU-bound). **Every pass after that is
+seconds**: the hash cache is keyed on `(path, size, mtime)` and re-reads
+nothing that hasn't changed. Ctrl-C is a pause, not a loss — it commits what it
+has and the next run resumes.
+
+Env:
+
+- `MERLE_MUSIC_DB` — the catalog. Default `music.db` under the process's
+  `WorkingDirectory`. Give it as an **absolute path**; if MCC ever reads it,
+  that unit must carry the same absolute value, for the same reason
+  `MERLE_WEATHER_DB` does.
+- `MERLE_MUSIC_ROOT` — the library. Default `/mnt/music`.
+
+`--prune` **refuses to run below a 50% floor** and says so. That guard exists
+because the indexer can't tell "the files moved" from "the share isn't
+mounted" — both look like paths that stopped existing, and acting on the second
+would wipe every location the catalog has. A prune only ever drops *locations*;
+tracks, ratings, and history are never touched by it.
+
+**`music.db` needs backing up, and the reason is narrow.** The catalog itself
+is disposable — it rebuilds from the NAS in ~3 hours. But `ratings` and
+`play_history` **do not rebuild at all**: they're accumulated by living with the
+system, and they're what Phase 3's engine and Phase 4's agent both read. Same
+standing as `weather.db`. The config tarball above doesn't cover it:
+
+```
+python3 -c "import sqlite3,sys; s=sqlite3.connect(sys.argv[1]); d=sqlite3.connect(sys.argv[2]); s.backup(d); d.close(); s.close()" \
+    ~/project-squirrel/music.db ~/music-backup-$(date +%F).db
+```
+
+Use the backup API, **not `cp`** — the file is WAL, so a live copy can be torn.
+(There's no `sqlite3` CLI on this box; Python's stdlib has the same API and is
+always here.)
+
+---
+
 ## Pi-hole
 
 Web UI: http://192.168.1.64/admin
