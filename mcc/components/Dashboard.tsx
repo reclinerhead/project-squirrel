@@ -70,6 +70,7 @@ import {
   WEATHER_HISTORY_TOPIC,
   WEATHER_REPORT_TOPIC,
   WEATHER_STATUS_TOPIC,
+  Trend,
   WeatherPoint,
   WeatherReport,
   WeatherStatus,
@@ -2298,10 +2299,10 @@ function WeatherPost() {
   // drag through history.
   const ts0 = (now ?? 0) - PAST_S;
   const ts1 = (now ?? 0) + FUTURE_S;
-  const trend =
+  const trend: Trend =
     now !== null
       ? trendSeries(history, forecast, now, ts0, ts1)
-      : { observed: [], coming: [] };
+      : { observed: [], coming: [], bridged: false };
   const allPts = [...trend.observed, ...trend.coming];
   const range = tempRange(allPts);
   const windMax = windCeil(allPts);
@@ -3159,10 +3160,10 @@ function WeatherStationView({
   const trail = mergePoints(history, archived);
   const oldestKnown = trail.length ? trail[0].ts : ts0;
 
-  const trend =
+  const trend: Trend =
     now !== null
       ? trendSeries(trail, forecast, now, ts0, ts1)
-      : { observed: [], coming: [] };
+      : { observed: [], coming: [], bridged: false };
   const allPts = [...trend.observed, ...trend.coming];
   const nights = nightBands(
     current?.sunrise ?? null,
@@ -3206,8 +3207,9 @@ function WeatherStationView({
   // to know -- how hot Friday gets, how cold tonight -- without hovering point
   // to point. Turning points, not per-calendar-day min/max, so a valley that
   // spans midnight gets ONE label; see tempMarks. Forecast only: the observed
-  // trail is 5-minute data where every passing cloud is a turning point.
-  const marks = hasChart ? tempMarks(trend.coming) : [];
+  // trail is 5-minute data where every passing cloud is a turning point -- and
+  // `bridged` keeps the seam stitch from being the one cloud that gets through.
+  const marks = hasChart ? tempMarks(trend.coming, trend.bridged) : [];
 
   // --- Panning ------------------------------------------------------------
   // The first drag interaction in the codebase, so it sets the pattern:
@@ -4108,10 +4110,13 @@ function WeatherStationView({
                   <dt className="stamp text-[10px] text-inkfaint">
                     wh90 battery
                   </dt>
+                  {/* meter last so its right edge lands flush with the radio
+                      signal's below it -- the two green meters read as one
+                      column (issue #103) */}
                   <dd className="flex items-center gap-2 tabular-nums text-inkdim">
-                    <SegMeter n={battery} of={5} tone={batteryTone} />
                     {current?.station_voltage != null &&
                       `${current.station_voltage.toFixed(2)}v`}
+                    <SegMeter n={battery} of={5} tone={batteryTone} />
                   </dd>
                 </div>
                 <div className="flex items-center justify-between gap-3">
