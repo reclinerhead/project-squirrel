@@ -4,25 +4,26 @@ The living documentation of how project-squirrel (Merle) is built and why. This 
 
 ## Quick start — running the station
 
-The station spans two machines. **pearl** (`192.168.1.64`, always-on Ubuntu) hosts the broker (Mosquitto), the narrator (Marlin), and the weather post (`weatherpost/weather.py`) — always up, nothing to start. **bluejay** (the Windows desktop) runs the two processes that need its GPU and camera; each gets its own terminal from the repo root (PowerShell). Bluejay's standing Ollama install also serves the narrator's LLM calls (port 11434) — not a Merle process, nothing to start. Everything meets on the bus and tolerates the others being absent:
+The station spans two machines. **pearl** (`192.168.1.64`, always-on Ubuntu) hosts the broker (Mosquitto), the narrator (Marlin), the weather post (`weatherpost/weather.py`), and the production dashboard (MCC, `http://pearl:3000`) — always up, nothing to start. **bluejay** (the Windows desktop) runs only the perception daemon, the one process that needs its GPU and camera, from the repo root (PowerShell). Bluejay's standing Ollama install also serves the narrator's LLM calls (port 11434) — not a Merle process, nothing to start. Everything meets on the bus and tolerates the others being absent:
 
 ```powershell
-# 1. Perception daemon (needs MERLE_RTSP_PASS for the camera and MERLE_MQTT
-#    for the bus -- both set User-level on bluejay;
-#    set MERLE_SOURCE=synthetic for the camera-free world).
-#    --host 0.0.0.0 so pearl's production dashboard can reach it across the
-#    LAN (loopback-only was the one-box era); needs a one-time Windows
-#    Firewall inbound allow on TCP 8000 -- the firewall silently DROPS
-#    blocked packets, so the symptom is a hang, not a refusal.
-#    --timeout-graceful-shutdown: pearl's 24/7 dashboard always holds an MJPEG
-#    /stream connection, which never completes -- uvicorn's graceful shutdown
-#    would wait on it forever, so Ctrl+C hung until the flag bounded the wait
-#    (a second Ctrl+C is ignored too; the only other escape is killing the PID).
-.\.venv\Scripts\python.exe -m uvicorn vision.merle_daemon:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 3
-
-# 2. The dashboard -> http://localhost:3000
-pnpm --dir mcc dev
+# Perception daemon (needs MERLE_RTSP_PASS for the camera and MERLE_MQTT
+# for the bus -- both set User-level on bluejay;
+# set MERLE_SOURCE=synthetic for the camera-free world).
+# --host 0.0.0.0 so pearl's production dashboard can reach it across the
+# LAN (loopback-only was the one-box era); needs a one-time Windows
+# Firewall inbound allow on TCP 8000 -- the firewall silently DROPS
+# blocked packets, so the symptom is a hang, not a refusal.
+# --timeout-graceful-shutdown: pearl's 24/7 dashboard always holds an MJPEG
+# /stream connection, which never completes -- uvicorn's graceful shutdown
+# would wait on it forever, so Ctrl+C hung until the flag bounded the wait
+# (a second Ctrl+C is ignored too; the only other escape is killing the PID).
+# --no-access-log: that dashboard also polls /state about twice a second, and
+# each poll printed a line that buried the daemon's own event prints.
+.\.venv\Scripts\python.exe -m uvicorn vision.merle_daemon:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 3 --no-access-log
 ```
+
+`.\start-merle.ps1` runs exactly that in its own Windows Terminal tab (`-Synthetic` for the camera-free world). For dashboard *development* on bluejay, run `pnpm --dir mcc dev` by hand — it's deliberately not in the launcher, since the copy that matters is pearl's.
 
 Rehearsal without live animals — republish archived events onto the bus with original (speed-scaled) timing:
 
