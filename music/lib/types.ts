@@ -29,6 +29,10 @@ export type Album = {
   artistId: string;
   artist: string;
   year: number;
+  /** One genre per album at the UI seam (issue #118). The real catalog tags
+   * genre per track; the seam will derive an album's genre from its tracks'
+   * dominant tag once Phase 0/1's normalization exists. */
+  genre: string;
   tracks: Track[];
 };
 

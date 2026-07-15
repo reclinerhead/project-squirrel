@@ -1,0 +1,35 @@
+// The two library cards (issue #118) -- extracted so home shelves and the
+// browse pages render the exact same cards. The album card's information
+// budget (cover, title, artist, year) is owner-approved as-is from #116;
+// changes here change every surface at once, which is the point.
+
+import Link from "next/link";
+import { CoverArt } from "./CoverArt";
+import type { Album, Artist } from "@/lib/types";
+
+export function AlbumCard({ album }: { album: Album }) {
+  return (
+    <Link href={`/album/${album.id}`} className="group block min-w-0">
+      <span className="relative block aspect-square overflow-hidden rounded-sm border border-line transition-colors group-hover:border-linebright">
+        <CoverArt id={album.id} title={album.title} />
+      </span>
+      <span className="mt-2 block truncate text-sm text-ink">{album.title}</span>
+      <span className="block truncate text-xs text-inkfaint">
+        {album.artist} · {album.year}
+      </span>
+    </Link>
+  );
+}
+
+export function ArtistCard({ artist }: { artist: Artist }) {
+  return (
+    <Link href={`/artist/${artist.id}`} className="group block min-w-0">
+      <span className="relative block aspect-square overflow-hidden rounded-full border border-line transition-colors group-hover:border-linebright">
+        {artist.albums[0] && <CoverArt id={artist.albums[0].id} title={artist.name} />}
+      </span>
+      <span className="mt-2 block truncate text-center text-sm text-inkdim transition-colors group-hover:text-ink">
+        {artist.name}
+      </span>
+    </Link>
+  );
+}
