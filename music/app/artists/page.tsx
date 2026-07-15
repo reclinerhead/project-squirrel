@@ -1,52 +1,54 @@
 // The artist card catalog (issue #118) -- the page TIDAL refuses to build.
-// Same mechanics as /albums: URL state, links only, one page of cards max.
-// "Newest" here means most recent release, which is the question "what have
-// they done lately" actually asks.
+// Same mechanics as /albums: first window server-rendered, the rest appended
+// by <Browser> from /api/artists.
+//
+// Genre here filters on "has any album in this genre" rather than on an
+// artist-level field, because artists span genres in a real library (see
+// artistGenres in lib/api.ts). "Newest" means most recent release -- the
+// question "what have they done lately" actually asks.
 
-import { browseArtists, type BrowseSort } from "@/lib/api";
-import { lettersPresent, pageForLetter } from "@/lib/browse";
-import { ArtistCard } from "@/components/cards";
-import { LetterRail, Pager, SortToggle } from "@/components/browse-ui";
+import { artistRail, browseArtists, listGenres, type BrowseSort } from "@/lib/api";
+import { Browser } from "@/components/Browser";
+import { GenrePills, LetterRail, SortToggle } from "@/components/browse-ui";
 
 export default async function ArtistsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ sort?: string; page?: string }>;
+  searchParams: Promise<{ genre?: string; sort?: string; letter?: string }>;
 }) {
   const sp = await searchParams;
+  const genres = listGenres();
+  const genre = genres.includes(sp.genre ?? "") ? sp.genre : undefined;
   const sort: BrowseSort = sp.sort === "new" ? "new" : "az";
-  const page = Number(sp.page) || 1;
 
-  const { items, pageInfo, total, names } = browseArtists({ sort, page });
-  const letters = sort === "az" ? lettersPresent(names) : [];
-  const pageByLetter = Object.fromEntries(letters.map((l) => [l, Math.max(1, pageForLetter(names, l))]));
+  const rail = sort === "az" ? artistRail(genre) : [];
+  const letter = sort === "az" ? sp.letter : undefined;
+  const start = rail.find((r) => r.letter === letter)?.offset ?? 0;
+
+  const { items, total, nextOffset } = browseArtists({ genre, sort, offset: start });
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-baseline justify-between gap-3">
         <h1 className="text-2xl text-ink" style={{ fontFamily: "var(--font-display)" }}>
           Artists
+          {genre && <span className="text-inkdim"> · {genre}</span>}
         </h1>
-        <SortToggle base="/artists" sort={sort} />
+        <SortToggle base="/artists" sort={sort} extra={{ genre }} />
       </div>
 
-      {letters.length > 0 && (
-        <LetterRail base="/artists" letters={letters} pageByLetter={pageByLetter} />
-      )}
+      <GenrePills base="/artists" genres={genres} active={genre} sort={sort} />
+      <LetterRail base="/artists" rail={rail} active={letter} extra={{ genre }} />
 
-      {items.length === 0 ? (
-        <section className="panel rounded-sm border border-line bg-panel px-4 py-6 text-sm text-inkdim">
-          Nobody on this shelf.
-        </section>
-      ) : (
-        <div className="grid grid-cols-3 gap-4 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
-          {items.map((a) => (
-            <ArtistCard key={a.id} artist={a} />
-          ))}
-        </div>
-      )}
-
-      <Pager base="/artists" pageInfo={pageInfo} total={total} what="artists" extra={{ sort }} />
+      <Browser
+        key={`artists|${genre ?? ""}|${sort}|${letter ?? ""}`}
+        kind="artists"
+        initialItems={items}
+        initialNextOffset={nextOffset}
+        startOffset={start}
+        total={total}
+        query={{ genre, sort }}
+      />
     </div>
   );
 }

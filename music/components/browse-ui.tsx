@@ -1,12 +1,14 @@
-// Shared browse-page chrome (issue #118): sort toggles, the A-Z rail, and
-// the pager. Everything is a <Link> -- sort, letter, and page state live in
-// the URL, so back/forward and sharing behave with zero client state. The
-// rail renders only letters that exist and only under A-Z sort (a letter
-// jump is meaningless on a newest-first list).
+// Shared browse-page chrome (issue #118): genre pills, sort toggles, and the
+// A-Z rail. All <Link>s -- genre, sort, and letter live in the URL, so
+// back/forward and sharing work with no client state, and each is a fresh
+// server render rather than a client refetch.
+//
+// The infinite list below them is client-side (Browser.tsx); these controls
+// deliberately are not. Changing a filter should start a new list, not append
+// to the old one.
 
 import Link from "next/link";
-import type { Page } from "@/lib/browse";
-import type { BrowseSort } from "@/lib/api";
+import type { BrowseSort, RailEntry } from "@/lib/api";
 
 export function buildQuery(params: Record<string, string | number | undefined>): string {
   const q = new URLSearchParams();
@@ -15,6 +17,35 @@ export function buildQuery(params: Record<string, string | number | undefined>):
   }
   const s = q.toString();
   return s ? `?${s}` : "";
+}
+
+export function GenrePills({
+  base,
+  genres,
+  active,
+  sort,
+}: {
+  base: string;
+  genres: string[];
+  active?: string;
+  sort: BrowseSort;
+}) {
+  const pill = (on: boolean) =>
+    `stamp shrink-0 whitespace-nowrap rounded-full border px-4 py-1.5 text-[10px] transition-colors ${
+      on ? "border-linebright bg-panel2 text-ink" : "border-line text-inkdim hover:border-linebright hover:text-ink"
+    }`;
+  return (
+    <nav aria-label="Genre filter" className="scrollpane -mx-1 flex gap-2 overflow-x-auto px-1 pb-1">
+      <Link href={`${base}${buildQuery({ sort })}`} className={pill(!active)}>
+        All
+      </Link>
+      {genres.map((g) => (
+        <Link key={g} href={`${base}${buildQuery({ genre: g, sort })}`} className={pill(active === g)}>
+          {g}
+        </Link>
+      ))}
+    </nav>
+  );
 }
 
 export function SortToggle({
@@ -50,72 +81,36 @@ export function SortToggle({
   );
 }
 
+/** A letter jump sets where the window STARTS (?letter=S), not which page it
+ * lands on -- with infinite scroll there are no pages, and an offset in the
+ * URL would rot the moment the catalog changes. The letter still means the
+ * right thing after a re-index. */
 export function LetterRail({
   base,
-  letters,
-  pageByLetter,
+  rail,
+  active,
   extra,
 }: {
   base: string;
-  letters: string[];
-  pageByLetter: Record<string, number>;
+  rail: RailEntry[];
+  active?: string;
   extra?: Record<string, string | undefined>;
 }) {
+  if (rail.length === 0) return null;
   return (
-    <nav
-      aria-label="Jump to letter"
-      className="scrollpane -mx-1 flex gap-1 overflow-x-auto px-1 py-1"
-    >
-      {letters.map((l) => (
+    <nav aria-label="Jump to letter" className="scrollpane -mx-1 flex gap-1 overflow-x-auto px-1 py-1">
+      {rail.map((r) => (
         <Link
-          key={l}
-          href={`${base}${buildQuery({ ...extra, sort: "az", page: pageByLetter[l] })}`}
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-sm text-xs tabular-nums text-inkfaint transition-colors hover:bg-panel2 hover:text-ink"
+          key={r.letter}
+          href={`${base}${buildQuery({ ...extra, sort: "az", letter: r.letter })}`}
+          aria-current={active === r.letter ? "true" : undefined}
+          className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-sm text-xs tabular-nums transition-colors hover:bg-panel2 hover:text-ink ${
+            active === r.letter ? "bg-panel2 text-ink" : "text-inkfaint"
+          }`}
         >
-          {l}
+          {r.letter}
         </Link>
       ))}
     </nav>
-  );
-}
-
-export function Pager({
-  base,
-  pageInfo,
-  total,
-  what,
-  extra,
-}: {
-  base: string;
-  pageInfo: Page;
-  total: number;
-  what: string;
-  extra?: Record<string, string | undefined>;
-}) {
-  const { page, pages } = pageInfo;
-  const link = (p: number, label: string, ok: boolean) =>
-    ok ? (
-      <Link
-        href={`${base}${buildQuery({ ...extra, page: p })}`}
-        className="stamp rounded-sm border border-line px-3 py-1 text-[10px] text-inkdim transition-colors hover:border-linebright hover:text-ink"
-      >
-        {label}
-      </Link>
-    ) : (
-      <span className="stamp rounded-sm border border-line px-3 py-1 text-[10px] text-inkfaint opacity-40">
-        {label}
-      </span>
-    );
-
-  return (
-    <div className="flex items-center justify-between gap-3 pt-2">
-      <span className="stamp text-[10px] text-inkfaint">
-        {total.toLocaleString()} {what} · page {page} of {pages}
-      </span>
-      <span className="flex items-center gap-2">
-        {link(page - 1, "‹ Prev", page > 1)}
-        {link(page + 1, "Next ›", page < pages)}
-      </span>
-    </div>
   );
 }

@@ -133,6 +133,37 @@ body {
   scrollbar-color: var(--line-bright) transparent;
 }
 
+/* Home shelves are exactly TWO ROWS at every width -- never a horizontal
+   scrollbar. The column count steps with the viewport and the nth-child rules
+   clamp each shelf to two rows' worth: 7x2 on a wide desktop down to 3x2 on a
+   phone. Two reasons this is CSS and not JS: measuring width in JS would make
+   the server render and the client render disagree (hydration), and a shelf
+   that reflows during load would shift the page under a thumb. The shelf still
+   receives all SHELF_CAP items -- the extras are display:none, so widening the
+   window reveals them with no refetch. */
+.shelf-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+}
+.shelf-grid > *:nth-child(n + 7) { display: none; }
+
+@media (min-width: 640px) {
+  .shelf-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .shelf-grid > *:nth-child(n + 7) { display: block; }
+  .shelf-grid > *:nth-child(n + 9) { display: none; }
+}
+@media (min-width: 768px) {
+  .shelf-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .shelf-grid > *:nth-child(n + 9) { display: block; }
+  .shelf-grid > *:nth-child(n + 11) { display: none; }
+}
+@media (min-width: 1024px) {
+  .shelf-grid { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+  .shelf-grid > *:nth-child(n + 11) { display: block; }
+  .shelf-grid > *:nth-child(n + 15) { display: none; }
+}
+
 /* Stamped label, like gear inventory lettering on a footlocker. */
 .stamp {
   letter-spacing: 0.18em;

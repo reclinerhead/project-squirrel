@@ -1,10 +1,16 @@
 // --- Pure browse mechanics (unit-tested in browse.test.ts) ---
-// Pagination, alphabetical bucketing, and sort comparators for the full-
+// Windowing, alphabetical bucketing, and sort comparators for the full-
 // catalog pages (issue #118). The design constraint everything here serves:
-// no page ever renders more than one page-worth of cards, no matter how big
-// the catalog gets.
+// the browser never holds more than what's been scrolled to, no matter how
+// big the catalog gets.
+//
+// The window is offset+limit rather than page numbers because that's what the
+// real catalog will speak: `LIMIT ? OFFSET ?` against SQLite. Infinite scroll
+// asks for "the next N after what I have", which is an offset question, not a
+// page question -- keeping the seam in offsets means Phase 0 swaps the fixture
+// call for a query and the client never notices.
 
-export const PER_PAGE = 60;
+export const PAGE_LIMIT = 60;
 
 /** Sort key: case-folded, leading "The " dropped (so The Cold Frame files
  * under C -- the record-store convention, decided here and tested). "A"/"An"
@@ -30,18 +36,20 @@ export function byNewest<T>(year: (x: T) => number, name: (x: T) => string): (a:
   return (a, b) => year(b) - year(a) || sortKey(name(a)).localeCompare(sortKey(name(b)));
 }
 
-export type Page = {
-  page: number; // clamped, 1-based
-  pages: number; // >= 1
-  start: number; // slice start
+export type Window = {
+  start: number; // slice start, clamped into [0, total]
   end: number; // slice end (exclusive)
+  /** Offset to ask for next, or null when this window reaches the end --
+   * the client's "am I done scrolling" answer, so it never guesses from
+   * a short page. */
+  nextOffset: number | null;
 };
 
-export function paginate(total: number, requestedPage: number, perPage: number = PER_PAGE): Page {
-  const pages = Math.max(1, Math.ceil(total / perPage));
-  const page = Math.min(Math.max(1, Math.floor(requestedPage) || 1), pages);
-  const start = (page - 1) * perPage;
-  return { page, pages, start, end: Math.min(start + perPage, total) };
+export function clampWindow(total: number, offset: number, limit: number = PAGE_LIMIT): Window {
+  const lim = Math.max(1, Math.floor(limit) || PAGE_LIMIT);
+  const start = Math.min(Math.max(0, Math.floor(offset) || 0), Math.max(0, total));
+  const end = Math.min(start + lim, total);
+  return { start, end, nextOffset: end < total ? end : null };
 }
 
 /** The letters actually present, in rail order ('#' last), from a list of
@@ -52,10 +60,11 @@ export function lettersPresent(names: string[]): string[] {
   return set.has("#") ? [...letters, "#"] : letters;
 }
 
-/** Which page (1-based) holds the first item of `letter`, given names ALREADY
- * sorted with byName. -1 if the letter has no items -- the rail shouldn't
- * have offered it, but a stale click must not navigate anywhere wrong. */
-export function pageForLetter(sortedNames: string[], letter: string, perPage: number = PER_PAGE): number {
+/** The index of `letter`'s first entry, given names ALREADY sorted with
+ * byName -- i.e. the offset a letter jump starts the window at. 0 if the
+ * letter has no items: the rail shouldn't have offered it, and a stale click
+ * lands at the top rather than somewhere arbitrary. */
+export function indexForLetter(sortedNames: string[], letter: string): number {
   const i = sortedNames.findIndex((n) => alphaBucket(n) === letter);
-  return i === -1 ? -1 : Math.floor(i / perPage) + 1;
+  return i === -1 ? 0 : i;
 }

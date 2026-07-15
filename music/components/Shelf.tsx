@@ -1,7 +1,9 @@
-// A home shelf (issue #118): titled, capped, horizontally scrollable row of
-// album cards with an optional "view all" deep link. Shelves that have no
-// data are not rendered at all by the caller -- an absent shelf is absence,
-// not a reserved hole; the no-layout-shift rule governs within surfaces.
+// A home shelf (issue #118): titled, capped, TWO ROWS of album cards with an
+// optional "view all" deep link. The two-row clamp and the column steps live
+// in .shelf-grid (globals.css) -- a horizontal scrollbar was the first draft
+// and it hid half the shelf behind a gesture. Shelves with no data render
+// nothing at all -- an absent shelf is absence, not a reserved hole; the
+// no-layout-shift rule governs within surfaces.
 
 import Link from "next/link";
 import { AlbumCard } from "./cards";
@@ -37,11 +39,9 @@ export function Shelf({
           )}
         </span>
       </div>
-      <div className="scrollpane -mx-1 flex gap-4 overflow-x-auto px-1 pb-2">
+      <div className="shelf-grid">
         {albums.map((al) => (
-          <div key={al.id} className="w-36 shrink-0 sm:w-40">
-            <AlbumCard album={al} />
-          </div>
+          <AlbumCard key={al.id} album={al} />
         ))}
       </div>
     </section>

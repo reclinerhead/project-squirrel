@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { alphaBucket, byName, byNewest, lettersPresent, pageForLetter, paginate, sortKey } from "./browse";
+import { alphaBucket, byName, byNewest, clampWindow, indexForLetter, lettersPresent, sortKey } from "./browse";
 
 describe("sortKey / alphaBucket", () => {
   it("drops a leading 'The ' -- record-store filing", () => {
@@ -38,42 +38,45 @@ describe("comparators", () => {
   });
 });
 
-describe("paginate", () => {
-  it("slices interior and final pages correctly", () => {
-    expect(paginate(150, 1, 60)).toEqual({ page: 1, pages: 3, start: 0, end: 60 });
-    expect(paginate(150, 3, 60)).toEqual({ page: 3, pages: 3, start: 120, end: 150 });
+describe("clampWindow", () => {
+  it("slices the first and an interior window", () => {
+    expect(clampWindow(150, 0, 60)).toEqual({ start: 0, end: 60, nextOffset: 60 });
+    expect(clampWindow(150, 60, 60)).toEqual({ start: 60, end: 120, nextOffset: 120 });
   });
 
-  it("clamps out-of-range and nonsense pages", () => {
-    expect(paginate(150, 99, 60).page).toBe(3);
-    expect(paginate(150, 0, 60).page).toBe(1);
-    expect(paginate(150, NaN, 60).page).toBe(1);
+  it("reports nextOffset null only when the window reaches the end", () => {
+    expect(clampWindow(150, 120, 60)).toEqual({ start: 120, end: 150, nextOffset: null });
+    // the trap this guards: a final window that happens to be exactly full
+    expect(clampWindow(120, 60, 60)).toEqual({ start: 60, end: 120, nextOffset: null });
   });
 
-  it("an empty catalog is one empty page, not zero pages", () => {
-    expect(paginate(0, 1, 60)).toEqual({ page: 1, pages: 1, start: 0, end: 0 });
+  it("clamps offsets past the end and nonsense input", () => {
+    expect(clampWindow(150, 999, 60)).toEqual({ start: 150, end: 150, nextOffset: null });
+    expect(clampWindow(150, -5, 60).start).toBe(0);
+    expect(clampWindow(150, NaN, 60).start).toBe(0);
+    expect(clampWindow(150, 0, 0).end).toBe(60); // limit 0 falls back, never an empty window forever
   });
 
-  it("an exact multiple doesn't mint a phantom page", () => {
-    expect(paginate(120, 2, 60).pages).toBe(2);
+  it("an empty catalog yields an empty terminal window", () => {
+    expect(clampWindow(0, 0, 60)).toEqual({ start: 0, end: 0, nextOffset: null });
   });
 });
 
-describe("lettersPresent / pageForLetter", () => {
+describe("lettersPresent / indexForLetter", () => {
   const names = ["Anchor", "Beacon", "The Beacons", "Comet", "2 Fast"];
 
   it("lists only letters that exist, '#' last", () => {
     expect(lettersPresent(names)).toEqual(["A", "B", "C", "#"]);
   });
 
-  it("finds the page holding a letter's first entry", () => {
+  it("finds the offset of a letter's first entry", () => {
     const sorted = ["Anchor", "Apple", "Beacon", "Comet", "Delta", "Echo"];
-    expect(pageForLetter(sorted, "A", 2)).toBe(1);
-    expect(pageForLetter(sorted, "B", 2)).toBe(2);
-    expect(pageForLetter(sorted, "E", 2)).toBe(3);
+    expect(indexForLetter(sorted, "A")).toBe(0);
+    expect(indexForLetter(sorted, "B")).toBe(2);
+    expect(indexForLetter(sorted, "E")).toBe(5);
   });
 
-  it("returns -1 for an absent letter -- a stale click goes nowhere", () => {
-    expect(pageForLetter(["Anchor"], "Q", 2)).toBe(-1);
+  it("falls back to the top for an absent letter -- a stale click lands somewhere sane", () => {
+    expect(indexForLetter(["Anchor"], "Q")).toBe(0);
   });
 });

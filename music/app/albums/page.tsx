@@ -1,31 +1,32 @@
-// The album card catalog (issue #118): the whole library, paginated, with
-// genre filter, sort toggles, and an A-Z rail -- all URL state, all links,
-// no client JS. No page ever renders more than PER_PAGE cards, which is the
-// entire design constraint at 27k tracks.
+// The album card catalog (issue #118): the whole library, loaded a window at
+// a time as you scroll. This server component renders the first window and
+// the chrome; <Browser> appends the rest from /api/albums.
+//
+// Filter/sort/letter are URL state and re-render here on the server; only the
+// scroll-append is client-side. The <Browser> key is what enforces that
+// distinction -- change a filter and you get a new list, not an appended one.
 
-import { browseAlbums, listGenres, type BrowseSort } from "@/lib/api";
-import { lettersPresent, pageForLetter } from "@/lib/browse";
-import { AlbumCard } from "@/components/cards";
-import { buildQuery, LetterRail, Pager, SortToggle } from "@/components/browse-ui";
-import Link from "next/link";
+import { albumRail, browseAlbums, listGenres, type BrowseSort } from "@/lib/api";
+import { Browser } from "@/components/Browser";
+import { GenrePills, LetterRail, SortToggle } from "@/components/browse-ui";
 
 export default async function AlbumsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ genre?: string; sort?: string; page?: string }>;
+  searchParams: Promise<{ genre?: string; sort?: string; letter?: string }>;
 }) {
   const sp = await searchParams;
   const genres = listGenres();
   const genre = genres.includes(sp.genre ?? "") ? sp.genre : undefined;
-  const sort: BrowseSort = sp.sort === "az" ? "az" : sp.sort === "new" ? "new" : "az";
-  const page = Number(sp.page) || 1;
+  const sort: BrowseSort = sp.sort === "new" ? "new" : "az";
 
-  const { items, pageInfo, total, names } = browseAlbums({ genre, sort, page });
-  const extra = { genre };
-  const letters = sort === "az" ? lettersPresent(names) : [];
-  const pageByLetter = Object.fromEntries(letters.map((l) => [l, pageForLetter(names, l)]));
-  // guard against the impossible-but-ugly: a letter whose page came back -1
-  for (const l of letters) if (pageByLetter[l] === -1) pageByLetter[l] = 1;
+  // The rail is meaningless on a newest-first list, so it isn't offered --
+  // and a letter in the URL is likewise ignored there.
+  const rail = sort === "az" ? albumRail(genre) : [];
+  const letter = sort === "az" ? sp.letter : undefined;
+  const start = rail.find((r) => r.letter === letter)?.offset ?? 0;
+
+  const { items, total, nextOffset } = browseAlbums({ genre, sort, offset: start });
 
   return (
     <div className="space-y-4">
@@ -34,49 +35,21 @@ export default async function AlbumsPage({
           Albums
           {genre && <span className="text-inkdim"> · {genre}</span>}
         </h1>
-        <SortToggle base="/albums" sort={sort} extra={extra} />
+        <SortToggle base="/albums" sort={sort} extra={{ genre }} />
       </div>
 
-      {/* genre pills, current one lit; "All" clears the filter */}
-      <nav aria-label="Genre filter" className="scrollpane -mx-1 flex gap-2 overflow-x-auto px-1 pb-1">
-        <Link
-          href={`/albums${buildQuery({ sort })}`}
-          className={`stamp shrink-0 rounded-full border px-4 py-1.5 text-[10px] transition-colors ${
-            !genre ? "border-linebright bg-panel2 text-ink" : "border-line text-inkdim hover:text-ink"
-          }`}
-        >
-          All
-        </Link>
-        {genres.map((g) => (
-          <Link
-            key={g}
-            href={`/albums${buildQuery({ genre: g, sort })}`}
-            className={`stamp shrink-0 whitespace-nowrap rounded-full border px-4 py-1.5 text-[10px] transition-colors ${
-              genre === g ? "border-linebright bg-panel2 text-ink" : "border-line text-inkdim hover:text-ink"
-            }`}
-          >
-            {g}
-          </Link>
-        ))}
-      </nav>
+      <GenrePills base="/albums" genres={genres} active={genre} sort={sort} />
+      <LetterRail base="/albums" rail={rail} active={letter} extra={{ genre }} />
 
-      {letters.length > 0 && (
-        <LetterRail base="/albums" letters={letters} pageByLetter={pageByLetter} extra={extra} />
-      )}
-
-      {items.length === 0 ? (
-        <section className="panel rounded-sm border border-line bg-panel px-4 py-6 text-sm text-inkdim">
-          Nothing on this shelf.
-        </section>
-      ) : (
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
-          {items.map((al) => (
-            <AlbumCard key={al.id} album={al} />
-          ))}
-        </div>
-      )}
-
-      <Pager base="/albums" pageInfo={pageInfo} total={total} what="albums" extra={{ ...extra, sort }} />
+      <Browser
+        key={`albums|${genre ?? ""}|${sort}|${letter ?? ""}`}
+        kind="albums"
+        initialItems={items}
+        initialNextOffset={nextOffset}
+        startOffset={start}
+        total={total}
+        query={{ genre, sort }}
+      />
     </div>
   );
 }
