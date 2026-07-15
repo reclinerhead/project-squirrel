@@ -59,15 +59,19 @@ A few things I'm proud of under the hood:
 
 | Piece | What it does |
 |---|---|
-| `merle_daemon.py` + `frames.py` | The perception daemon: FastAPI app running the model + tracker over the RTSP feed, serving live state, MJPEG stream, snapshots, and history from SQLite. |
-| `perception.py` | The shared tracking brain — coasting, identity stitching, census bookkeeping, box drawing — used by both the daemon and the standalone desktop stack. |
-| `bus.py` | MQTT topics and publisher; the contract every bus process shares. |
-| `narrator.py` + `personas/` | Marlin: event-driven LLM narration with persona files, a shared character bible, pacing gates, and template fallback. |
-| `weather.py` | Willard: OpenWeather polling, 48-hour rolling history, retained bus topics, and the half-hourly LLM on-air segment. |
-| `storage.py` | SQLite archive: sightings, events, training runs. |
-| `live.py`, `prelabel.py`, `dedup.py` | The training flywheel: hard-frame harvesting, pre-labeling, near-duplicate thinning. |
-| `replay_events.py` | Rehearsal: republish archived events onto the bus with original timing — the narrator can't tell the difference. |
+| `vision/merle_daemon.py` + `vision/frames.py` | The perception daemon: FastAPI app running the model + tracker over the RTSP feed, serving live state, MJPEG stream, snapshots, and history from SQLite. |
+| `vision/perception.py` | The shared tracking brain — coasting, identity stitching, census bookkeeping, box drawing — used by both the daemon and the standalone desktop stack. |
+| `vision/storage.py` | SQLite archive: sightings, events, training runs. |
+| `bus.py` | MQTT topics and publisher; the contract every bus process shares. Stays at the root because every box imports it and it belongs to none of them. |
+| `narration/narrator.py` + `narration/personas/` | Marlin: event-driven LLM narration with persona files, a shared character bible, pacing gates, and template fallback. |
+| `weatherpost/weather.py` | Willard: OpenWeather polling, 48-hour rolling history, retained bus topics, and the half-hourly LLM on-air segment. |
+| `jukebox/` | The music catalog: our own store over the ~27k-track NAS library, and the read-only indexer that fills it. |
+| `tools/live.py`, `tools/prelabel.py`, `tools/dedup.py` | The training flywheel: hard-frame harvesting, pre-labeling, near-duplicate thinning. |
+| `tools/replay_events.py` | Rehearsal: republish archived events onto the bus with original timing — the narrator can't tell the difference. |
 | `mcc/` | The **Merle Control Center** — Next.js + TypeScript + Tailwind dashboard, deployed 24/7 on the home server. |
+| `music/` | The music player UI — a second Next app, peer to `mcc/`. |
+
+Python runs as `-m package.module` from the repo root (`python -m vision.merle_daemon`), never as a file path — packages are named for their role because a package `X/` holding `X.py` would shadow the module.
 
 ## Roadmap
 

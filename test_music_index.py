@@ -18,7 +18,7 @@
 import io
 import struct
 
-import music_index as mi
+from jukebox import music_index as mi
 
 
 def fh(data):

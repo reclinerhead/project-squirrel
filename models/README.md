@@ -16,7 +16,9 @@ deliberately separate from `runs/`, which is ultralytics' training scratch space
 
 ```powershell
 # temporarily A/B a candidate without touching current.pt
-$env:MERLE_MODEL = "models/merle-train17.pt"; python live.py
+# (-m from the repo root: MERLE_MODEL's default is CWD-relative, so this is
+#  also what keeps "models/current.pt" resolving -- see TechnicalGuide.md)
+$env:MERLE_MODEL = "models/merle-train17.pt"; python -m tools.live
 ```
 
 ## Promoting a new model

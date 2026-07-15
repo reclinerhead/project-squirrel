@@ -25,7 +25,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-import perception
+from vision import perception
 
 RECONNECT_INTERVAL = 3.0   # seconds between RTSP reconnect attempts
 READ_TIMEOUT = 1.0         # seconds read() waits for a fresh frame before

@@ -1,7 +1,7 @@
 # Tests for replay_events.py's pure timing math (the MQTT side is I/O,
 # desk-tested against the real broker).
 
-import replay_events
+from tools import replay_events
 
 
 def _ev(ts, kind="arrival"):

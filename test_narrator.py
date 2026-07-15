@@ -6,7 +6,7 @@ import random
 
 import pytest
 
-import narrator
+from narration import narrator
 
 
 PERSONA = {"name": "Test", "mqtt_id": "test", "tts_voice": "",

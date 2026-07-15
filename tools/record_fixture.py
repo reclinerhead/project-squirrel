@@ -32,7 +32,7 @@ from datetime import datetime
 
 import cv2
 
-import frames
+from vision import frames
 
 
 def main():

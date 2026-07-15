@@ -12,10 +12,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 import bus
-import merle_daemon
-import perception
-import storage
-from frames import SyntheticFrameSource, Detection
+from vision import merle_daemon
+from vision import perception
+from vision import storage
+from vision.frames import SyntheticFrameSource, Detection
 
 
 class _FakePublisher:
