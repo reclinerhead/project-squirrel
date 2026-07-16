@@ -137,8 +137,8 @@ export function PlayerBar() {
             </div>
             {track ? (
               <RatingControl
-                rating={ratingFor(track.id)}
-                onRate={(c) => rate(track.id, c)}
+                rating={ratingFor(track)}
+                onRate={(c) => rate(track, c)}
                 className="hidden shrink-0 sm:inline-flex"
               />
             ) : (

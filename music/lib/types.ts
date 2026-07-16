@@ -21,6 +21,12 @@ export type Track = {
   sampleRateHz: number | null;
   /** null for lossless -- bitrate is how lossy files brag. */
   bitrateKbps: number | null;
+  /** The listener's thumb as the catalog holds it, 0 when unrated (issue
+   * #135). It rides on the track because every surface that renders a rating
+   * already receives one of these -- and because a rating that only existed
+   * in client state is what this replaced. Edits made this session live in
+   * PlayerProvider and take precedence; this is the baseline it starts from. */
+  rating: Rating;
 };
 
 export type Album = {

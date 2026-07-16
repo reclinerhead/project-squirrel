@@ -59,9 +59,19 @@ export function withDb<T>(empty: T, fn: (db: DatabaseSync) => T): T {
 // and grouping by track artist would explode one album into twenty.
 const ALBUM_ARTIST = "COALESCE(NULLIF(t.album_artist, ''), t.artist, 'Unknown Artist')";
 
+// The rating rides along on every track the app hands out (issue #135). A
+// persisted thumb that doesn't come back on load is indistinguishable from a
+// lost one, so hydration is not a separate feature -- it's the other half of
+// the write, and it belongs where every surface already gets its data.
+//
+// A scalar subquery rather than a LEFT JOIN: TRACK_COLS is spliced into three
+// queries including topTracks' COUNT(ph.id) GROUP BY, where a joined column
+// would have to be grouped too. ratings is keyed by track_id (PK), so this is
+// an index probe per row over a window of tracks, never the catalog.
 const TRACK_COLS =
   "t.id, t.title, t.artist, t.album, t.album_artist, t.track_no, " +
-  "t.duration_s, t.format, t.bitrate, t.samplerate";
+  "t.duration_s, t.format, t.bitrate, t.samplerate, " +
+  "(SELECT value FROM ratings WHERE track_id = t.id) AS rating";
 
 /** One row per album: name pair + year + dominant genre + newest file mtime
  * (the "added" proxy until the catalog has ingest dates). Dominant genre is

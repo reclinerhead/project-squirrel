@@ -5,15 +5,20 @@
 // another origin would drag CORS into a two-box LAN app.
 //
 // GET  /api/player/state          -> daemon GET /state
-// POST /api/player/{play|pause|stop|seek} -> daemon POST, body piped through
+// POST /api/player/{play|pause|stop|seek|rate} -> daemon POST, body piped through
 //
-// The verb allowlist is the security boundary: this proxies four named verbs
+// The verb allowlist is the security boundary: this proxies five named verbs
 // to one configured host, not arbitrary paths anywhere. A daemon that's down
 // or unconfigured answers 503 with a reason -- the player bar treats that as
 // "controls do nothing", never as a crash.
+//
+// `rate` is a write and still belongs here (issue #135): the catalog is
+// pearl's, this app's own DB handle is readOnly by construction, and the
+// daemon is the writer. It rides the player proxy rather than a route of its
+// own because the door and its rules are already exactly right.
 
 const GET_VERBS = new Set(["state"]);
-const POST_VERBS = new Set(["play", "pause", "stop", "seek"]);
+const POST_VERBS = new Set(["play", "pause", "stop", "seek", "rate"]);
 
 function daemonBase(): string | null {
   const base = process.env.MERLE_MUSIC_DAEMON?.trim();
