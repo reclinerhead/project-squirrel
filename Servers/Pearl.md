@@ -541,19 +541,33 @@ asleep" and journals only the down/up transitions.
 plus occasional re-runs; a `while True` daemon for a job that finishes is the
 wrong shape. No port, no bus topic, nothing to `systemctl status`.
 
-The library mount is already here and is **read-only on purpose** — the audio
-files are an immutable input and we never write tags back to them:
+The library mount is **read-only on purpose** — the audio files are an
+immutable input and we never write tags back to them. Since pearl's first
+reboot test (2026-07-16) it persists via `/etc/fstab` rather than the
+hand-mount that quietly didn't survive that reboot:
 
 ```
-//hummingbird/music on /mnt/music type cifs (ro,relatime,vers=2.0,...)
+//hummingbird/music /mnt/music cifs credentials=/etc/cifs-creds-music,ro,vers=2.0,iocharset=utf8,soft,nofail,_netdev,x-systemd.automount 0 0
 ```
 
-Confirm it before a pass — an unmounted share walks to zero files, which looks
-exactly like a successful pass over a library that vanished:
+The last three options are the load-bearing ones. `nofail`: a powered-off
+NAS must never hang pearl's boot — this box is the house's DNS and DHCP, and
+a boot stuck waiting on a music share would take the household down with it.
+`x-systemd.automount`: the mount happens lazily on first access instead of
+racing the network at boot; if hummingbird is down, pearl boots fine and the
+music daemon's streams 404 (a skip in the log, never a crash) until it's
+back. `credentials=/etc/cifs-creds-music` (root-only, `chmod 600`) keeps the
+SMB password out of world-readable fstab.
+
+Confirm it before an indexer pass — an unmounted share walks to zero files,
+which looks exactly like a successful pass over a library that vanished:
 
 ```
 mountpoint /mnt/music && ls /mnt/music | head
 ```
+
+(With the automount, `ls` itself triggers the mount — so this check now
+*fixes* the condition it checks for, unless the NAS is truly down.)
 
 Running it:
 
