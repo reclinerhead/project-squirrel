@@ -590,6 +590,30 @@ mounted" — both look like paths that stopped existing, and acting on the secon
 would wipe every location the catalog has. A prune only ever drops *locations*;
 tracks, ratings, and history are never touched by it.
 
+### Importing an analysis run (issue #136)
+
+The audio-analysis backfill (BPM / ReplayGain / dynamic range) **runs on
+bluejay** — beat tracking is CPU-heavy and needs librosa + ffmpeg, neither of
+which pearl carries. It emits a JSONL keyed by content hash; pearl only
+*imports* it, which is a one-shot manual step, not a unit:
+
+```
+# from bluejay, after the pass:  scp music_analysis.jsonl todd@pearl:/tmp/
+# on pearl -- back up first, this writes the catalog:
+python3 -c "import sqlite3; s=sqlite3.connect('music.db'); d=sqlite3.connect('/tmp/music.db.pre-import'); s.backup(d)"
+MERLE_MUSIC_DB=/home/todd/project-squirrel/music.db \
+    python3 -m jukebox.music_import /tmp/music_analysis.jsonl
+```
+
+The import **UPDATEs** existing rows and is idempotent — re-running it writes
+the same values and moves no row count, so a re-run after a better analysis
+pass is safe. It never inserts: an id the catalog doesn't know is skipped, not
+created. Measurements land in `bpm`/`replaygain_db`/`dynamic_range_db`; a track
+that wouldn't decode lands in `needs_attention` with the ffmpeg reason. The
+first run took coverage 0 → 92.3% (the gap is location-less ghost tracks, not a
+failure). Nothing on pearl depends on the analyzer existing — once imported,
+bluejay can be powered off for good.
+
 **`music.db` needs backing up, and the reason is narrow.** The catalog itself
 is disposable — it rebuilds from the NAS in ~3 hours. But `ratings` and
 `play_history` **do not rebuild at all**: they're accumulated by living with the
