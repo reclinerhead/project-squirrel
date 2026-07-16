@@ -3,9 +3,9 @@
 // by <Browser> from /api/artists.
 //
 // Genre here filters on "has any album in this genre" rather than on an
-// artist-level field, because artists span genres in a real library (see
-// artistGenres in lib/api.ts). "Newest" means most recent release -- the
-// question "what have they done lately" actually asks.
+// artist-level field, because artists span genres in a real library.
+// "Newest" means most recent release -- the question "what have they done
+// lately" actually asks.
 
 import { artistRail, browseArtists, listGenres, type BrowseSort } from "@/lib/api";
 import { Browser } from "@/components/Browser";
@@ -17,15 +17,15 @@ export default async function ArtistsPage({
   searchParams: Promise<{ genre?: string; sort?: string; letter?: string }>;
 }) {
   const sp = await searchParams;
-  const genres = listGenres();
+  const genres = await listGenres();
   const genre = genres.includes(sp.genre ?? "") ? sp.genre : undefined;
   const sort: BrowseSort = sp.sort === "new" ? "new" : "az";
 
-  const rail = sort === "az" ? artistRail(genre) : [];
+  const rail = sort === "az" ? await artistRail(genre) : [];
   const letter = sort === "az" ? sp.letter : undefined;
   const start = rail.find((r) => r.letter === letter)?.offset ?? 0;
 
-  const { items, total, nextOffset } = browseArtists({ genre, sort, offset: start });
+  const { items, total, nextOffset } = await browseArtists({ genre, sort, offset: start });
 
   return (
     <div className="space-y-4">

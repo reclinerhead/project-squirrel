@@ -4,15 +4,24 @@
 // search. Results render in an overlay panel anchored under the input --
 // absolutely positioned, so a query appearing or vanishing never moves the
 // page underneath (rule #1).
+//
+// Search became a debounced fetch of /api/search (issue #129) -- lib/api.ts
+// is server-only now. Stale responses are dropped by sequence number rather
+// than AbortController: results for "capi" arriving after "capital"'s must
+// not win, and a counter is the whole of that logic.
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { getAlbum, search } from "@/lib/api";
+import type { SearchResults } from "@/lib/search";
+import type { Album } from "@/lib/types";
 import { formatDuration } from "@/lib/format";
 import { usePlayer } from "./PlayerProvider";
 import { CoverArt } from "./CoverArt";
 import { ArrowLeftIcon, ArrowRightIcon, SearchIcon } from "./icons";
+
+const NO_RESULTS: SearchResults = { artists: [], albums: [], tracks: [] };
+const DEBOUNCE_MS = 150;
 
 function GroupLabel({ children }: { children: React.ReactNode }) {
   return <div className="stamp px-4 pb-1 pt-3 text-[10px] text-inkfaint">{children}</div>;
@@ -25,7 +34,29 @@ export function Chrome() {
   const [focused, setFocused] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const results = useMemo(() => search(q), [q]);
+  const [results, setResults] = useState<SearchResults>(NO_RESULTS);
+  const seqRef = useRef(0);
+
+  useEffect(() => {
+    const query = q.trim();
+    if (query.length < 2) {
+      setResults(NO_RESULTS);
+      return;
+    }
+    const seq = ++seqRef.current;
+    const id = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+        if (!res.ok) return;
+        const data = (await res.json()) as SearchResults;
+        if (seq === seqRef.current) setResults(data); // stale answers lose
+      } catch {
+        // a failed search leaves the last results standing; typing continues
+      }
+    }, DEBOUNCE_MS);
+    return () => clearTimeout(id);
+  }, [q]);
+
   const hasResults = results.artists.length + results.albums.length + results.tracks.length > 0;
   const open = focused && q.trim().length >= 2;
 
@@ -62,7 +93,7 @@ export function Chrome() {
             Music
           </span>
           <span className="stamp hidden rounded-full border border-line px-2 py-0.5 text-[9px] text-inkfaint sm:inline">
-            fixture data
+            the stacks, live
           </span>
         </Link>
 
@@ -132,13 +163,17 @@ export function Chrome() {
                   <button
                     key={t.id}
                     type="button"
-                    onClick={() => {
-                      const album = getAlbum(t.albumId);
-                      if (album) {
+                    onClick={async () => {
+                      close();
+                      try {
+                        const res = await fetch(`/api/album?id=${encodeURIComponent(t.albumId)}`);
+                        if (!res.ok) return;
+                        const album = (await res.json()) as Album;
                         const i = album.tracks.findIndex((x) => x.id === t.id);
                         playTracks(album.tracks, Math.max(i, 0), album.title);
+                      } catch {
+                        // no album, no play -- the overlay already closed
                       }
-                      close();
                     }}
                     className="flex w-full items-center gap-3 px-4 py-2 text-left text-sm text-inkdim transition-colors hover:bg-panel2 hover:text-ink"
                   >

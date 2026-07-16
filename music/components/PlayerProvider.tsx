@@ -1,15 +1,31 @@
 "use client";
 
-// Client-side player state (issue #116). In v1 this simulates playback --
-// elapsed time ticks, tracks auto-advance, the queue is real state -- so
-// every control is exercisable before Phase 2's daemon exists. When it does,
-// these actions become calls to it and the shape here stays put.
+// Client-side player state (issue #116), wired to the real daemon (issue
+// #129). The queue lives HERE -- the daemon knows one track at a time, on
+// purpose (a server-side queue is Phase 3's engine's job, not plumbing's) --
+// but time and truth come from pearl: a 2s poll of /api/player/state supplies
+// the position, and "the track ended" is observed (the daemon's watcher
+// adjudicated it and cleared its slate), never simulated. The v1 fake clock
+// is gone; if the poll can't reach the daemon, the bar freezes at the last
+// known position rather than inventing progress.
+//
+// The seed queue arrives as a server-rendered prop from layout.tsx (the app
+// opens mid-album on whatever played last, paused) -- this component can't
+// fetch it itself without a loading flash, and the layout is a server
+// component that already knows.
 
-import { createContext, useContext, useEffect, useMemo, useState } from "react";
-import { getSeedQueue } from "@/lib/api";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { queueView, removeUpcoming, shuffleUpcoming, type QueueView } from "@/lib/queue";
 import { nextRating, type ThumbClick } from "@/lib/rating";
 import type { Rating, Track } from "@/lib/types";
+
+const POLL_MS = 2000;
+
+export type SeedQueue = {
+  sequence: Track[];
+  currentIndex: number;
+  playingFrom: string;
+};
 
 type PlayerState = {
   view: QueueView;
@@ -41,8 +57,35 @@ export function usePlayer(): PlayerState {
   return ctx;
 }
 
-export function PlayerProvider({ children }: { children: React.ReactNode }) {
-  const seed = useMemo(() => getSeedQueue(), []);
+/** Fire a verb at the daemon via the proxy. False means it didn't happen --
+ * callers keep their optimistic state honest. Never throws: a daemon that's
+ * down makes the controls inert, not the app broken. */
+async function post(verb: string, body?: object): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/player/${verb}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body ?? {}),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+type DaemonState = {
+  transport: string;
+  position_s: number | null;
+  track: { id: string } | null;
+};
+
+export function PlayerProvider({
+  seed,
+  children,
+}: {
+  seed: SeedQueue;
+  children: React.ReactNode;
+}) {
   const [sequence, setSequence] = useState<Track[]>(seed.sequence);
   const [currentIndex, setCurrentIndex] = useState(seed.currentIndex);
   const [playingFrom, setPlayingFrom] = useState(seed.playingFrom);
@@ -50,38 +93,66 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const [elapsedS, setElapsedS] = useState(0);
   const [shuffle, setShuffle] = useState(false);
   const [repeat, setRepeat] = useState<"off" | "all" | "one">("off");
-  const [outputId, setOutputId] = useState("browser");
+  const [outputId, setOutputId] = useState("denon");
   const [ratings, setRatings] = useState<Record<string, Rating>>({});
+  // Whether the daemon currently holds OUR track -- distinguishes "paused"
+  // (resumable with a bare play) from "never started / already adjudicated".
+  const loadedRef = useRef(false);
 
   const view = useMemo(() => queueView(sequence, currentIndex), [sequence, currentIndex]);
   const current = view.current;
 
-  // The simulated clock: a one-second timeout chain while "playing" -- each
-  // tick schedules the next, and track end advances the cursor (honoring
-  // repeat) inside the same callback. A seek changes elapsedS, which just
-  // re-arms the chain from the new position. Real playback replaces this
-  // with the daemon's reported position.
+  const startTrack = async (track: Track, output: string) => {
+    setElapsedS(0);
+    setIsPlaying(true); // optimistic; corrected below if the daemon refuses
+    const ok = await post("play", { track_id: track.id, output });
+    loadedRef.current = ok;
+    if (!ok) setIsPlaying(false);
+  };
+
+  // The poll: while we believe something is playing, ask pearl what's true.
+  // Position flows down; the end of a track is recognized by the daemon's
+  // slate going empty (its watcher recorded the history row and cleared),
+  // and THEN the queue advances -- order matters, or a fast next-click could
+  // double-record.
   useEffect(() => {
     if (!isPlaying || !current) return;
-    const id = setTimeout(() => {
-      const next = elapsedS + 1;
-      if (next < current.durationS) {
-        setElapsedS(next);
-      } else if (repeat === "one") {
-        setElapsedS(0);
-      } else if (currentIndex + 1 < sequence.length) {
-        setCurrentIndex(currentIndex + 1);
-        setElapsedS(0);
-      } else if (repeat === "all" && sequence.length > 0) {
-        setCurrentIndex(0);
-        setElapsedS(0);
-      } else {
-        setIsPlaying(false);
-        setElapsedS(current.durationS);
+    let busy = false;
+    const id = setInterval(async () => {
+      if (busy) return; // a slow poll must not stack behind itself
+      busy = true;
+      try {
+        const res = await fetch("/api/player/state", { cache: "no-store" });
+        if (!res.ok) return; // daemon down: freeze, don't invent
+        const s = (await res.json()) as DaemonState;
+        if (s.track && s.track.id === current.id) {
+          if (typeof s.position_s === "number") setElapsedS(s.position_s);
+          return;
+        }
+        // Our track is off the daemon's slate: it ended (or was stopped at
+        // the AVR itself -- same fact, the session with this track is over).
+        loadedRef.current = false;
+        if (repeat === "one") {
+          void startTrack(current, outputId);
+        } else if (currentIndex + 1 < sequence.length) {
+          setCurrentIndex(currentIndex + 1);
+          void startTrack(sequence[currentIndex + 1], outputId);
+        } else if (repeat === "all" && sequence.length > 0) {
+          setCurrentIndex(0);
+          void startTrack(sequence[0], outputId);
+        } else {
+          setIsPlaying(false);
+          setElapsedS(current.durationS);
+        }
+      } catch {
+        // network blip: keep the last known position, try again next tick
+      } finally {
+        busy = false;
       }
-    }, 1000);
-    return () => clearTimeout(id);
-  }, [isPlaying, current, elapsedS, repeat, currentIndex, sequence.length]);
+    }, POLL_MS);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPlaying, current?.id, currentIndex, sequence, repeat, outputId]);
 
   const value: PlayerState = {
     view,
@@ -99,19 +170,27 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       setSequence(tracks);
       setCurrentIndex(i);
       setPlayingFrom(from);
-      setElapsedS(0);
-      setIsPlaying(true);
+      void startTrack(tracks[i], outputId);
     },
     togglePlay: () => {
-      if (current) setIsPlaying((p) => !p);
+      if (!current) return;
+      if (isPlaying) {
+        setIsPlaying(false);
+        void post("pause");
+      } else if (loadedRef.current) {
+        setIsPlaying(true);
+        void post("play"); // bare play = resume the pause
+      } else {
+        void startTrack(current, outputId); // seed queue's first real start
+      }
     },
     next: () => {
       if (currentIndex + 1 < sequence.length) {
         setCurrentIndex(currentIndex + 1);
-        setElapsedS(0);
+        void startTrack(sequence[currentIndex + 1], outputId);
       } else if (repeat === "all" && sequence.length > 0) {
         setCurrentIndex(0);
-        setElapsedS(0);
+        void startTrack(sequence[0], outputId);
       }
     },
     prev: () => {
@@ -119,13 +198,17 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       // track", later means "restart this one".
       if (elapsedS > 3 || currentIndex === 0) {
         setElapsedS(0);
+        if (loadedRef.current) void post("seek", { seconds: 0 });
       } else {
         setCurrentIndex(currentIndex - 1);
-        setElapsedS(0);
+        void startTrack(sequence[currentIndex - 1], outputId);
       }
     },
     seek: (s) => {
-      if (current) setElapsedS(Math.min(Math.max(0, s), current.durationS));
+      if (!current) return;
+      const clamped = Math.min(Math.max(0, s), current.durationS);
+      setElapsedS(clamped); // optimistic; the next poll confirms
+      if (loadedRef.current) void post("seek", { seconds: clamped });
     },
     rate: (trackId, click) => {
       setRatings((r) => ({ ...r, [trackId]: nextRating(r[trackId] ?? 0, click) }));

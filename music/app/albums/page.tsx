@@ -16,17 +16,17 @@ export default async function AlbumsPage({
   searchParams: Promise<{ genre?: string; sort?: string; letter?: string }>;
 }) {
   const sp = await searchParams;
-  const genres = listGenres();
+  const genres = await listGenres();
   const genre = genres.includes(sp.genre ?? "") ? sp.genre : undefined;
   const sort: BrowseSort = sp.sort === "new" ? "new" : "az";
 
   // The rail is meaningless on a newest-first list, so it isn't offered --
   // and a letter in the URL is likewise ignored there.
-  const rail = sort === "az" ? albumRail(genre) : [];
+  const rail = sort === "az" ? await albumRail(genre) : [];
   const letter = sort === "az" ? sp.letter : undefined;
   const start = rail.find((r) => r.letter === letter)?.offset ?? 0;
 
-  const { items, total, nextOffset } = browseAlbums({ genre, sort, offset: start });
+  const { items, total, nextOffset } = await browseAlbums({ genre, sort, offset: start });
 
   return (
     <div className="space-y-4">
