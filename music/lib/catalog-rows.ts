@@ -17,7 +17,7 @@
 // (b:<hex>, f:<hex>), already URL-safe, and shared verbatim with the
 // daemon's /stream/{id}.
 
-import type { Album, AudioFormat, Track } from "./types";
+import type { Album, AudioFormat, Rating, Track } from "./types";
 
 // U+241F (symbol for unit separator) between artist and album inside one id:
 // visually obvious in a debugger, and no album title contains it.
@@ -83,6 +83,17 @@ export function formatFromCatalog(format: string | null, bitrate: number | null)
 
 const LOSSY = new Set<AudioFormat>(["mp3", "aac"]);
 
+const RATINGS = new Set([-2, -1, 1, 2]);
+
+/** The catalog's nullable rating -> the UI's Rating. Null (no row) is 0 =
+ * unrated. Anything else the column could somehow hold is also 0: this is the
+ * boundary between a store that promises four values and a control whose
+ * transition table assumes exactly five states, and a stray 3 arriving here
+ * would strand the thumb in a state no click could leave. */
+export function ratingFromRow(value: number | null): Rating {
+  return (RATINGS.has(value as number) ? value : 0) as Rating;
+}
+
 /** One tracks-table row (join carries the album's display artist) -> Track.
  * The album's artist may differ from the track's (compilations: album_artist
  * "Various Artists", track artist the performer) -- both ride along. */
@@ -97,6 +108,9 @@ export type TrackRow = {
   format: string | null;
   bitrate: number | null;
   samplerate: number | null;
+  // The catalog stores only real opinions (-2/-1/+1/+2); an unrated track has
+  // no ratings row at all, so this arrives null and maps to 0 = unrated.
+  rating: number | null;
 };
 
 export function trackFromRow(row: TrackRow): Track {
@@ -120,6 +134,7 @@ export function trackFromRow(row: TrackRow): Track {
     bitDepth: null,
     sampleRateHz: row.samplerate ?? null,
     bitrateKbps: lossy && row.bitrate ? Math.round(row.bitrate / 1000) : null,
+    rating: ratingFromRow(row.rating),
   };
 }
 

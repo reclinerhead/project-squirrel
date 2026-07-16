@@ -647,6 +647,50 @@ def create_app(conn=None, renderer=None, stream_base=None,
         status, payload = player().seek(seconds)
         return JSONResponse(payload, status_code=status)
 
+    @app.post("/rate")
+    def post_rate(cmd: dict):
+        # The thumbs (issue #135). The catalog is pearl's to write and this is
+        # its writer -- the music app's own handle is readOnly by construction,
+        # so a rating comes here rather than growing a second writer.
+        #
+        # Guard order is /stream's, and it matters more here because this one
+        # writes: allowlist the wire's id BEFORE any query, then 404 an
+        # unknown-but-well-formed id (a wrong URL, not a broken daemon), then
+        # let music_catalog.rate() adjudicate the value -- RATING_VALUES lives
+        # there, and duplicating the legal set here is how the two drift.
+        #
+        # value 0 is the control's THIRD CLICK, which clears (lib/rating.ts's
+        # nextRating). It's a legal thing to send and an illegal thing to
+        # store, so it dispatches to unrate() here rather than teaching the
+        # store a zero it would have to ignore forever after.
+        track_id = cmd.get("track_id")
+        if not isinstance(track_id, str) or \
+                not music_catalog.valid_track_id(track_id):
+            return JSONResponse({"error": "malformed track id"},
+                                status_code=400)
+        value = cmd.get("value")
+        # bool subclasses int, so `true` would otherwise sail through as +1.
+        if isinstance(value, bool) or not isinstance(value, int):
+            return JSONResponse({"error": "value must be an integer"},
+                                status_code=400)
+        p = player()
+        with p.lock:
+            if music_catalog.track_info(p.conn, track_id) is None:
+                return JSONResponse({"error": "unknown track"},
+                                    status_code=404)
+            if value == 0:
+                music_catalog.unrate(p.conn, track_id)
+            else:
+                try:
+                    # The timestamp is ours, never the client's: this is the
+                    # one table we cannot rebuild, and a browser clock is a
+                    # guess.
+                    music_catalog.rate(p.conn, track_id, value,
+                                       int(time.time()))
+                except ValueError as e:
+                    return JSONResponse({"error": str(e)}, status_code=400)
+        return JSONResponse({"track_id": track_id, "value": value})
+
     @app.api_route("/stream/{track_id}", methods=["GET", "HEAD"])
     def stream(track_id: str, request: Request):
         # The allowlist runs BEFORE the catalog is asked -- a hostile id

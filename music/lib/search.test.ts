@@ -16,6 +16,7 @@ function track(id: string, title: string, artist: string): Track {
     bitDepth: null,
     sampleRateHz: 44100,
     bitrateKbps: 320,
+    rating: 0,
   };
 }
 

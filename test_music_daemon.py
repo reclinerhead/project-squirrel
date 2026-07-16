@@ -367,3 +367,104 @@ def test_state_is_calm_with_nothing_playing(rig):
     assert body["track"] is None
     assert body["transport"] == "NO_MEDIA_PRESENT"
     assert body["outputs"][0]["id"] == "denon"
+
+
+# --- POST /rate (issue #135) ---------------------------------------------------
+#
+# The thumbs are the one table this stack cannot rebuild, so the route's job is
+# to be boring: take four values and a clear, refuse everything else, and never
+# let a wire id near a query it shouldn't reach.
+
+def test_rate_persists_a_thumb(rig):
+    client, conn, _ = rig
+    r = client.post("/rate", json={"track_id": "b:abc", "value": 2})
+    assert r.status_code == 200
+    assert r.json() == {"track_id": "b:abc", "value": 2}
+    row = conn.execute("SELECT value, rated_at FROM ratings "
+                       "WHERE track_id = 'b:abc'").fetchone()
+    assert row["value"] == 2
+    assert row["rated_at"] > 0  # the daemon's clock, not the client's
+
+
+@pytest.mark.parametrize("value", [-2, -1, 1, 2])
+def test_rate_round_trips_every_legal_value(rig, value):
+    client, conn, _ = rig
+    assert client.post("/rate",
+                       json={"track_id": "b:abc", "value": value}).status_code == 200
+    assert conn.execute("SELECT value FROM ratings WHERE track_id = 'b:abc'"
+                        ).fetchone()["value"] == value
+
+
+def test_re_rating_replaces_rather_than_appends(rig):
+    client, conn, _ = rig
+    client.post("/rate", json={"track_id": "b:abc", "value": 1})
+    client.post("/rate", json={"track_id": "b:abc", "value": -2})
+    rows = conn.execute("SELECT value FROM ratings "
+                        "WHERE track_id = 'b:abc'").fetchall()
+    assert [r["value"] for r in rows] == [-2]  # one row, the current opinion
+
+
+def test_zero_clears_the_rating(rig):
+    # The control's third click. A legal thing to send, an illegal thing to
+    # store: an unrated track is the absence of a row, not a stored zero.
+    client, conn, _ = rig
+    client.post("/rate", json={"track_id": "b:abc", "value": 1})
+    r = client.post("/rate", json={"track_id": "b:abc", "value": 0})
+    assert r.status_code == 200
+    assert conn.execute("SELECT COUNT(*) AS n FROM ratings").fetchone()["n"] == 0
+
+
+def test_clearing_an_unrated_track_is_a_no_op(rig):
+    client, conn, _ = rig
+    assert client.post("/rate",
+                       json={"track_id": "b:abc", "value": 0}).status_code == 200
+    assert conn.execute("SELECT COUNT(*) AS n FROM ratings").fetchone()["n"] == 0
+
+
+@pytest.mark.parametrize("value", [3, -3, 99, "up", None, 1.5, [1], True, False])
+def test_rate_refuses_an_illegal_value_and_writes_nothing(rig, value):
+    # True/False are in here deliberately: bool subclasses int, so `true`
+    # satisfies `in RATING_VALUES` and would file itself as a thumbs-up.
+    client, conn, _ = rig
+    r = client.post("/rate", json={"track_id": "b:abc", "value": value})
+    assert r.status_code == 400
+    assert conn.execute("SELECT COUNT(*) AS n FROM ratings").fetchone()["n"] == 0
+
+
+def test_rate_refuses_a_missing_value(rig):
+    client, conn, _ = rig
+    assert client.post("/rate", json={"track_id": "b:abc"}).status_code == 400
+    assert conn.execute("SELECT COUNT(*) AS n FROM ratings").fetchone()["n"] == 0
+
+
+def test_rate_rejects_a_malformed_id_before_the_catalog(rig):
+    client, conn, _ = rig
+    for bad in ["../../etc/passwd", "b abc", "b:abc;drop", "", "~/x"]:
+        r = client.post("/rate", json={"track_id": bad, "value": 1})
+        assert r.status_code == 400, bad
+    assert conn.execute("SELECT COUNT(*) AS n FROM ratings").fetchone()["n"] == 0
+
+
+def test_rate_rejects_a_non_string_id(rig):
+    client, _, _ = rig
+    assert client.post("/rate", json={"track_id": 7, "value": 1}).status_code == 400
+
+
+def test_rate_404s_an_unknown_but_well_formed_id(rig):
+    # A wrong URL, not a broken daemon -- /play's rule, and a rating for a
+    # track we don't have is not a row worth inventing.
+    client, conn, _ = rig
+    assert client.post("/rate",
+                       json={"track_id": "b:nope", "value": 1}).status_code == 404
+    assert conn.execute("SELECT COUNT(*) AS n FROM ratings").fetchone()["n"] == 0
+
+
+def test_rating_a_track_does_not_touch_playback(rig):
+    # Rating is not a transport verb: it shares the proxy and the lock, and
+    # must not so much as breathe on the renderer.
+    client, _, renderer = rig
+    client.post("/play", json={"track_id": "b:abc", "output": "denon"})
+    before = list(renderer.calls)
+    client.post("/rate", json={"track_id": "b:abc", "value": -2})
+    assert renderer.calls == before
+    assert client.get("/state").json()["track"]["id"] == "b:abc"

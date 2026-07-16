@@ -414,15 +414,33 @@ def rate(conn, track_id, value, at):
     append -- so `ratings` says what the listener thinks NOW. The history of
     opinion changes is not something Phase 3 or 4 asked for.
 
-    Nothing calls this in Phase 0. It exists so the table is real and writable
-    from the day the GUI can reach it."""
-    if value not in RATING_VALUES:
+    The daemon's POST /rate is the only caller (issue #135) -- validation
+    lives here, next to RATING_VALUES, rather than at the route, because a
+    second copy of the legal set is how the two drift apart.
+
+    `bool` is checked explicitly: it subclasses int, so a JSON `true` off the
+    wire satisfies `in RATING_VALUES` and would file itself as a thumbs-up."""
+    if isinstance(value, bool) or not isinstance(value, int) \
+            or value not in RATING_VALUES:
         raise ValueError("rating must be one of %r, got %r"
                          % (RATING_VALUES, value))
     conn.execute(
         "INSERT INTO ratings (track_id, value, rated_at) VALUES (?, ?, ?) "
         "ON CONFLICT(track_id) DO UPDATE SET value=excluded.value, "
         "rated_at=excluded.rated_at", (track_id, value, at))
+    conn.commit()
+
+
+def unrate(conn, track_id):
+    """Clear a thumb -- the control's third click (issue #135). An unrated
+    track is the ABSENCE of a row, never a stored zero: `ratings` says what the
+    listener thinks, and "no opinion" is not an opinion. Phase 3's filters read
+    the rows that exist; a 0 would be a third thing they'd all have to know to
+    ignore.
+
+    Silent on a track that was never rated -- clearing nothing is the state the
+    caller asked for."""
+    conn.execute("DELETE FROM ratings WHERE track_id = ?", (track_id,))
     conn.commit()
 
 

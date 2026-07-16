@@ -35,14 +35,18 @@ type PlayerState = {
   shuffle: boolean;
   repeat: "off" | "all" | "one";
   outputId: string;
-  ratingFor: (trackId: string) => Rating;
+  /** Takes the track, not an id: the catalog's rating rides on it (the
+   * baseline every surface already receives), and the map below holds only
+   * what THIS session changed. An id alone couldn't answer for a track that
+   * isn't in the queue -- an album page's rows, for instance. */
+  ratingFor: (track: Track) => Rating;
 
   playTracks: (tracks: Track[], startIndex: number, from: string) => void;
   togglePlay: () => void;
   next: () => void;
   prev: () => void;
   seek: (s: number) => void;
-  rate: (trackId: string, click: ThumbClick) => void;
+  rate: (track: Track, click: ThumbClick) => void;
   removeUpNext: (upNextIndex: number) => void;
   toggleShuffle: () => void;
   cycleRepeat: () => void;
@@ -94,6 +98,10 @@ export function PlayerProvider({
   const [shuffle, setShuffle] = useState(false);
   const [repeat, setRepeat] = useState<"off" | "all" | "one">("off");
   const [outputId, setOutputId] = useState("denon");
+  // Session edits only -- the catalog's answer arrives on each Track and is
+  // the baseline (issue #135). Not seeded from the queue: a map that started
+  // as the truth would have to be re-seeded on every navigation, and the
+  // tracks already carry it.
   const [ratings, setRatings] = useState<Record<string, Rating>>({});
   // Whether the daemon currently holds OUR track -- distinguishes "paused"
   // (resumable with a bare play) from "never started / already adjudicated".
@@ -162,7 +170,8 @@ export function PlayerProvider({
     shuffle,
     repeat,
     outputId,
-    ratingFor: (trackId) => ratings[trackId] ?? 0,
+    // ?? not ||: a cleared rating is 0, which is falsy but is the answer.
+    ratingFor: (track) => ratings[track.id] ?? track.rating,
 
     playTracks: (tracks, startIndex, from) => {
       if (tracks.length === 0) return;
@@ -216,8 +225,20 @@ export function PlayerProvider({
       setElapsedS(clamped);
       if (loadedRef.current) void post("seek", { seconds: clamped });
     },
-    rate: (trackId, click) => {
-      setRatings((r) => ({ ...r, [trackId]: nextRating(r[trackId] ?? 0, click) }));
+    rate: (track, click) => {
+      // Optimistic, like startTrack: a thumb must land under the finger. The
+      // daemon owns the timestamp, so the body carries only what it can't
+      // know. value 0 (the third click) is a real message -- it clears.
+      const was = ratings[track.id] ?? track.rating;
+      const now = nextRating(was, click);
+      setRatings((r) => ({ ...r, [track.id]: now }));
+      void post("rate", { track_id: track.id, value: now }).then((ok) => {
+        if (ok) return;
+        // Roll back only if this click is still the one showing. The control
+        // is built to be clicked in a burst (set -> escalate -> clear), so a
+        // slow failed POST must not stomp a newer click's state.
+        setRatings((r) => (r[track.id] === now ? { ...r, [track.id]: was } : r));
+      });
     },
     removeUpNext: (upNextIndex) => {
       setSequence((seq) => removeUpcoming(seq, currentIndex, upNextIndex));

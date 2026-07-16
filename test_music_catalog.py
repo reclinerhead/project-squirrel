@@ -314,6 +314,49 @@ def test_rate_rejects_a_value_outside_the_four_levels(conn):
         mc.rate(conn, "b:abc", 5, 7000)
 
 
+def test_rate_rejects_a_bool(conn):
+    """bool subclasses int, so `True in RATING_VALUES` is True and a JSON
+    `true` off the wire would file itself as a thumbs-up (issue #135)."""
+    mc.upsert_track(conn, track())
+    with pytest.raises(ValueError):
+        mc.rate(conn, "b:abc", True, 7000)
+    with pytest.raises(ValueError):
+        mc.rate(conn, "b:abc", False, 7000)
+    assert mc.counts(conn)["ratings"] == 0
+
+
+def test_rate_rejects_zero(conn):
+    """Zero is the CONTROL's third click, not a stored value: an unrated track
+    is the absence of a row. The daemon dispatches 0 to unrate()."""
+    mc.upsert_track(conn, track())
+    with pytest.raises(ValueError):
+        mc.rate(conn, "b:abc", 0, 7000)
+
+
+def test_unrate_removes_the_row(conn):
+    mc.upsert_track(conn, track())
+    mc.rate(conn, "b:abc", mc.RATING_STRONG_UP, 7000)
+    mc.unrate(conn, "b:abc")
+    assert mc.counts(conn)["ratings"] == 0
+
+
+def test_unrate_of_an_unrated_track_is_silent(conn):
+    """Clearing nothing is the state the caller asked for."""
+    mc.upsert_track(conn, track())
+    mc.unrate(conn, "b:abc")  # must not raise
+    assert mc.counts(conn)["ratings"] == 0
+
+
+def test_unrate_leaves_other_tracks_alone(conn):
+    mc.upsert_track(conn, track())
+    mc.upsert_track(conn, track(id="b:def"))
+    mc.rate(conn, "b:abc", mc.RATING_UP, 7000)
+    mc.rate(conn, "b:def", mc.RATING_DOWN, 7000)
+    mc.unrate(conn, "b:abc")
+    rows = conn.execute("SELECT track_id FROM ratings").fetchall()
+    assert [r["track_id"] for r in rows] == ["b:def"]
+
+
 def test_play_history_appends_rather_than_updates(conn):
     """A skip at 0:12 and a completion an hour later are two facts, not a
     correction of one."""

@@ -628,6 +628,14 @@ or `skipped`, judged by the watcher thread. Presence rides `music/status`
 (retained; `offline` is the Last Will, so `systemctl stop` flips it within
 seconds — verified).
 
+It is also **the catalog's only writer** (issue #135): `POST /rate`
+`{track_id, value}` records the thumbs, with `value: 0` clearing one. The
+music app reads `music.db` directly but read-only, so every write — history
+and ratings alike — arrives through this daemon. **That makes this unit's
+uptime the thing standing between a click and the one table on pearl that
+cannot be rebuilt**; `music.db` is to music what `weather.db` is to the
+station, and it belongs in whatever backs that one up.
+
 The venv needs `fastapi` + `uvicorn` (installed 2026-07-16; they're in
 `requirements.txt`, they'd just never been needed on pearl before).
 

@@ -11,6 +11,7 @@ import {
   decodeAlbumId,
   decodeArtistId,
   formatFromCatalog,
+  ratingFromRow,
   trackFromRow,
   type TrackRow,
 } from "./catalog-rows";
@@ -72,6 +73,7 @@ const row = (over: Partial<TrackRow> = {}): TrackRow => ({
   album_artist: null,
   track_no: 1,
   duration_s: 193.0,
+  rating: null,
   format: "m4a",
   bitrate: 1_053_815,
   samplerate: 44100,
@@ -100,6 +102,11 @@ describe("trackFromRow", () => {
     expect(decodeAlbumId(t.albumId)?.artist).toBe("Various Artists");
   });
 
+  it("carries the catalog's thumb, so a rated track renders rated", () => {
+    expect(trackFromRow(row({ rating: -2 })).rating).toBe(-2);
+    expect(trackFromRow(row()).rating).toBe(0); // no ratings row
+  });
+
   it("null tags degrade to placeholders, never crash", () => {
     const t = trackFromRow(row({ title: null, artist: null, album: null,
                                  track_no: null, duration_s: null }));
@@ -125,5 +132,23 @@ describe("albumFromRow", () => {
     const al = albumFromRow({ artist: "X", album: "Y", year: null, genre: null }, []);
     expect(al.year).toBe(0);
     expect(al.genre).toBe("Uncategorized");
+  });
+});
+
+describe("ratingFromRow", () => {
+  it("maps the four real values through", () => {
+    for (const v of [-2, -1, 1, 2]) expect(ratingFromRow(v)).toBe(v);
+  });
+
+  it("null -- no ratings row -- is unrated", () => {
+    // The store holds only opinions; the absence of one is not a stored zero.
+    expect(ratingFromRow(null)).toBe(0);
+  });
+
+  it("clamps a value the store should never hold to unrated", () => {
+    // The control's transition table assumes five states. A stray 3 arriving
+    // from a hand-edited catalog would strand the thumb in a state no click
+    // could leave, which is worse than forgetting it.
+    for (const v of [3, -3, 99, 0.5]) expect(ratingFromRow(v)).toBe(0);
   });
 });

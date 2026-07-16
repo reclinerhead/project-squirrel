@@ -71,10 +71,10 @@ export function TrackList({
               {showArtist && <span className="block truncate text-xs text-inkfaint">{t.artist}</span>}
             </span>
             <RatingControl
-              rating={ratingFor(t.id)}
-              onRate={(c) => rate(t.id, c)}
+              rating={ratingFor(t)}
+              onRate={(c) => rate(t, c)}
               className={`transition-opacity ${
-                ratingFor(t.id) !== 0 ? "" : "opacity-0 focus-within:opacity-100 group-hover:opacity-100"
+                ratingFor(t) !== 0 ? "" : "opacity-0 focus-within:opacity-100 group-hover:opacity-100"
               }`}
             />
             <span className="w-10 text-right text-sm tabular-nums text-inkfaint">

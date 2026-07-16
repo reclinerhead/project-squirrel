@@ -55,6 +55,7 @@ function album(
       album: title,
       trackNo: i + 1,
       durationS: secs(d),
+      rating: 0, // fixtures feed the pure-helper tests; taste lives in the catalog
       ...spec,
     })),
   };
