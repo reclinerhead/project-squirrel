@@ -65,9 +65,13 @@
 #   MERLE_MUSIC_DB=/home/todd/project-squirrel/music.db \
 #   MERLE_MUSIC_STREAM_BASE=http://192.168.1.64:8090 \
 #   python -m uvicorn jukebox.music_daemon:app --host 0.0.0.0 --port 8090 \
-#       --no-access-log
+#       --no-access-log --timeout-graceful-shutdown 3
 #   (--no-access-log: the GUI polls /state; issue #125's lesson applies here
-#   before it becomes a flood instead of after.)
+#   before it becomes a flood instead of after. --timeout-graceful-shutdown:
+#   the RENDERER holds /stream open for the whole song, so an unbounded
+#   graceful drain turns SIGTERM into a zombie that outlives its replacement
+#   -- observed on pearl mid-playback; the vision daemon's flag, same reason,
+#   different client.)
 # =============================================================================
 
 import os

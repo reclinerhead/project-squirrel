@@ -195,19 +195,25 @@ export function PlayerProvider({
     },
     prev: () => {
       // The convention every player shares: early in a track means "previous
-      // track", later means "restart this one".
+      // track", later means "restart this one". Restart re-issues play
+      // rather than seeking to 0: the Denon answers AVTransport Seek with
+      // HTTP 500 on external streams (verified against the real AVR), while
+      // a fresh SetAVTransportURI+Play always works.
       if (elapsedS > 3 || currentIndex === 0) {
-        setElapsedS(0);
-        if (loadedRef.current) void post("seek", { seconds: 0 });
+        if (current) void startTrack(current, outputId);
       } else {
         setCurrentIndex(currentIndex - 1);
         void startTrack(sequence[currentIndex - 1], outputId);
       }
     },
     seek: (s) => {
+      // Optimistic; the 2s poll restores the truth. On the Denon that means
+      // a scrub snaps back -- it refuses Seek (see prev) -- which is honest:
+      // the bar shows where the music actually is. The browser output (2b)
+      // seeks for real via Range.
       if (!current) return;
       const clamped = Math.min(Math.max(0, s), current.durationS);
-      setElapsedS(clamped); // optimistic; the next poll confirms
+      setElapsedS(clamped);
       if (loadedRef.current) void post("seek", { seconds: clamped });
     },
     rate: (trackId, click) => {

@@ -21,6 +21,7 @@ outage brings her back without anyone going downstairs.
 | Willard   | `willard-weather` | —                              | Weather post: polls the Ecowitt gateway (+ OpenWeather forecast), publishes retained `weather/*` |
 | Frames    | `frame-archiver`  | —                              | Still-shot archive (issue #90): files the daemon's event frames to disk for the Field Journal |
 | MCC       | `mcc-dashboard`   | 3000 (HTTP)                    | The Merle dashboard, production build (`next start`)           |
+| Music     | `music-daemon`    | 8090 (HTTP)                    | Playback daemon (issue #129): streams the catalog, drives the Denon over DLNA, writes `play_history` |
 | Deploys   | `merle-autodeploy`| —                              | Deploy watcher (issue #95): polls origin/main, pulls + restarts the Merle units on merge |
 | Pi-hole   | `pihole-FTL`      | 53, 67 (DHCP), 80, 443         | Household DNS + DHCP                                           |
 
@@ -44,6 +45,7 @@ systemctl status narrator-marlin
 systemctl status willard-weather
 systemctl status frame-archiver
 systemctl status mcc-dashboard
+systemctl status music-daemon
 systemctl status merle-autodeploy
 systemctl status pihole-FTL
 ```
@@ -120,8 +122,9 @@ sudo ss -tlnp
 ```
 
 Expected: 22 (ssh), 53 (pihole), 80/443 (pihole web), 1883 + 9001 (mosquitto),
-3000 (mcc-dashboard). Anything else deserves a question. (Marlin, Willard,
-and the frame archiver listen on nothing — they only talk to the broker.)
+3000 (mcc-dashboard), 8090 (music-daemon). Anything else deserves a question.
+(Marlin, Willard, and the frame archiver listen on nothing — they only talk
+to the broker.)
 
 ---
 
@@ -592,6 +595,85 @@ python3 -c "import sqlite3,sys; s=sqlite3.connect(sys.argv[1]); d=sqlite3.connec
 Use the backup API, **not `cp`** — the file is WAL, so a live copy can be torn.
 (There's no `sqlite3` CLI on this box; Python's stdlib has the same API and is
 always here.)
+
+**Since issue #129 the backup is no longer optional in spirit**: the playback
+daemon writes `play_history` on every play, so the irreplaceable tables are
+accumulating *now*. The indexer also skips the share's `#recycle` bin
+(`EXCLUDED_DIRS`) and a one-time `--prune` reclaimed the 3,096 deleted-track
+locations the first pass had cataloged.
+
+---
+
+## The music daemon (issue #129)
+
+Unit: `/etc/systemd/system/music-daemon.service`
+Code: `jukebox/music_daemon.py` in the same checkout + venv as the narrator.
+Port: **8090** — the music GUI's `/api/player/*` proxy and the Denon's
+stream fetches both land here.
+
+Streams catalog tracks over HTTP (`/stream/{id}`, Range-capable) and drives
+the **Denon AVR-X4000** over UPnP/DLNA (`/play`, `/pause`, `/stop`, `/seek`,
+`/state`). The Denon is discovered by SSDP at startup — if it was off, the
+first `/play` retries. Every play ends as one `play_history` row: `completed`
+or `skipped`, judged by the watcher thread. Presence rides `music/status`
+(retained; `offline` is the Last Will, so `systemctl stop` flips it within
+seconds — verified).
+
+The venv needs `fastapi` + `uvicorn` (installed 2026-07-16; they're in
+`requirements.txt`, they'd just never been needed on pearl before).
+
+The unit, following the house pattern (crib from `willard-weather`):
+
+```ini
+[Unit]
+Description=Merle music playback daemon (issue #129)
+After=network-online.target mosquitto.service
+Wants=network-online.target
+
+[Service]
+User=todd
+WorkingDirectory=/home/todd/project-squirrel
+Environment=PYTHONUNBUFFERED=1
+Environment=MERLE_MQTT=localhost:1883
+Environment=MERLE_MUSIC_DB=/home/todd/project-squirrel/music.db
+Environment=MERLE_MUSIC_STREAM_BASE=http://192.168.1.64:8090
+ExecStart=/home/todd/project-squirrel/venv/bin/python -m uvicorn \
+    jukebox.music_daemon:app --host 0.0.0.0 --port 8090 \
+    --no-access-log --timeout-graceful-shutdown 3
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Both uvicorn flags are load-bearing.** `--no-access-log`: the music GUI
+polls `/state` (issue #125's flood, preempted). `--timeout-graceful-shutdown
+3`: the **Denon holds `/stream` open for the whole song**, and without the
+bound a SIGTERM leaves a zombie draining that connection while its
+replacement binds the port — observed live during #129's verification, the
+same trap the perception daemon's flag fixes on bluejay.
+
+`MERLE_MUSIC_STREAM_BASE` is the daemon's own LAN-visible URL: the Denon
+*fetches* audio from it, so `localhost` here means silence in the living
+room. Fail-loudly config, no default.
+
+Hardware notes, so nobody re-diagnoses the AVR: it answers `GetProtocolInfo`
+with HTTP 500 (capability is a table in the code, not a negotiation), and it
+refuses AVTransport `Seek` on external streams (the GUI restarts the track
+instead; real scrubbing arrives with the Phase 2b browser output). It plays
+ALAC natively and untranscoded — that's the whole point of this output.
+
+To run it by hand (stop the service first):
+
+```
+cd ~/project-squirrel && \
+MERLE_MQTT=localhost:1883 \
+MERLE_MUSIC_DB=/home/todd/project-squirrel/music.db \
+MERLE_MUSIC_STREAM_BASE=http://192.168.1.64:8090 \
+venv/bin/python -m uvicorn jukebox.music_daemon:app --host 0.0.0.0 \
+    --port 8090 --no-access-log --timeout-graceful-shutdown 3
+```
 
 ---
 
