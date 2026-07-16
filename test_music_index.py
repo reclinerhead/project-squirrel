@@ -16,6 +16,7 @@
 # =============================================================================
 
 import io
+import os
 import struct
 
 from jukebox import music_index as mi
@@ -272,3 +273,31 @@ def test_root_path_unset_or_blank_is_the_default(monkeypatch):
     assert mi.root_path() == mi.DEFAULT_ROOT
     monkeypatch.setenv("MERLE_MUSIC_ROOT", "/srv/music")
     assert mi.root_path() == "/srv/music"
+
+
+# --- the walk ------------------------------------------------------------------
+
+def test_walk_skips_the_recycle_bin(tmp_path):
+    """Regression for issue #129: the Synology share's `#recycle` bin got
+    indexed on the first pass (3,096 locations of deleted tracks), which would
+    have put deleted albums on the GUI's shelves. The walk must not descend
+    into it -- at any depth, since the NAS keeps the bin's internal tree."""
+    (tmp_path / "Artist" / "Album").mkdir(parents=True)
+    (tmp_path / "Artist" / "Album" / "01 Keeper.mp3").write_bytes(b"x")
+    (tmp_path / "#recycle" / "Artist" / "Album").mkdir(parents=True)
+    (tmp_path / "#recycle" / "Artist" / "Album" / "02 Deleted.mp3").write_bytes(b"x")
+    (tmp_path / "Artist" / "#recycle").mkdir()
+    (tmp_path / "Artist" / "#recycle" / "03 Nested.mp3").write_bytes(b"x")
+
+    found = [path for path, fmt in mi.walk(str(tmp_path))]
+    assert len(found) == 1
+    assert found[0].endswith("01 Keeper.mp3")
+
+
+def test_walk_yields_sorted_and_typed(tmp_path):
+    (tmp_path / "b.mp3").write_bytes(b"x")
+    (tmp_path / "a.flac").write_bytes(b"x")
+    (tmp_path / "notes.txt").write_bytes(b"x")
+    got = list(mi.walk(str(tmp_path)))
+    assert [os.path.basename(p) for p, _ in got] == ["a.flac", "b.mp3"]
+    assert [f for _, f in got] == ["flac", "mp3"]
