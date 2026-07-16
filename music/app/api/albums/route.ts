@@ -24,6 +24,6 @@ export async function GET(request: Request) {
   // or someone poking the URL, and neither should get to allocate the world.
   const limit = Math.min(Math.max(1, Number(p.get("limit")) || PAGE_LIMIT), PAGE_LIMIT);
 
-  const { items, total, nextOffset } = browseAlbums({ genre, sort, offset, limit });
+  const { items, total, nextOffset } = await browseAlbums({ genre, sort, offset, limit });
   return Response.json({ items, total, nextOffset });
 }

@@ -17,10 +17,10 @@ function todaySeed(): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
-export default function Home() {
-  const shelves = getShelves(todaySeed());
-  const genres = listGenres();
-  const counts = libraryCounts();
+export default async function Home() {
+  const shelves = await getShelves(todaySeed());
+  const genres = await listGenres();
+  const counts = await libraryCounts();
 
   return (
     <div className="space-y-8">
@@ -39,7 +39,7 @@ export default function Home() {
 
       <Shelf
         title="Recently played"
-        note="fixture history · play_history later"
+        note="from your listening"
         albums={shelves.recentlyPlayed}
       />
       <Shelf
@@ -49,7 +49,7 @@ export default function Home() {
       />
       <Shelf
         title="Recently added"
-        note="by year until the catalog has ingest dates"
+        note="by file date on the shelf"
         albums={shelves.recentlyAdded}
         viewAllHref="/albums?sort=new"
       />

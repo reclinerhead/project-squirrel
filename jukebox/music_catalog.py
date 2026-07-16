@@ -64,6 +64,7 @@
 # =============================================================================
 
 import os
+import re
 import sqlite3
 
 DEFAULT_DB_PATH = "music.db"
@@ -183,6 +184,19 @@ def db_path():
 
 
 # --- pure: version arithmetic, row shaping ------------------------------------
+
+# The id allowlist, frame_archiver's genre (never trust the wire): every id
+# the indexer mints is a prefix + hex ("b:1fbc...", "f:...", "x:..."), so this
+# is generous already. Anything else -- path separators, dots, spaces -- is
+# rejected BEFORE the catalog is asked, so a hostile id dies here rather than
+# meeting the filesystem, and a typo'd one gets a 404 instead of a traversal.
+TRACK_ID_RE = re.compile(r"[A-Za-z0-9_:-]+")
+
+
+def valid_track_id(track_id):
+    """Whether a wire-supplied track id is even the right SHAPE. Purely a
+    syntax check -- existence is the catalog's question, asked after."""
+    return bool(track_id) and TRACK_ID_RE.fullmatch(track_id) is not None
 
 def pending_migrations(current, migrations=MIGRATIONS, target=SCHEMA_VERSION):
     """The migration steps a file at `current` still owes, as (version, sql)
@@ -425,6 +439,30 @@ def record_play(conn, track_id, played_at, outcome, seconds=None, output=None):
         "output) VALUES (?, ?, ?, ?, ?)",
         (track_id, played_at, outcome, seconds, output))
     conn.commit()
+
+
+def track_info(conn, track_id):
+    """The tracks row for one id, as a dict -- what the daemon needs for the
+    DIDL metadata and the capability check (title, artist, format,
+    duration_s). None when the id isn't in the catalog: the caller turns that
+    into a 404, not an exception, because an unknown id is a wrong URL, not a
+    broken daemon."""
+    row = conn.execute(
+        "SELECT id, title, artist, album, duration_s, format "
+        "FROM tracks WHERE id = ?", (track_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def file_for_track(conn, track_id):
+    """The location to stream for one track, as a dict (path, size, mtime).
+    A track can live at several paths (the album rip and the greatest-hits rip
+    collapse to one id -- the identity design working); which copy streams is
+    musically irrelevant, so pick deterministically (lowest path) rather than
+    letting SQLite's row order decide differently on different days."""
+    row = conn.execute(
+        "SELECT path, size, mtime FROM track_files WHERE track_id = ? "
+        "ORDER BY path LIMIT 1", (track_id,)).fetchone()
+    return dict(row) if row else None
 
 
 def counts(conn):

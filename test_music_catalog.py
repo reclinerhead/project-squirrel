@@ -323,6 +323,47 @@ def test_play_history_appends_rather_than_updates(conn):
     assert mc.counts(conn)["play_history"] == 2
 
 
+# --- the daemon's reads (issue #129) -------------------------------------------
+
+def test_valid_track_id_accepts_every_id_shape_the_indexer_mints():
+    for tid in ("b:1fbc567c3e773e30b70b89b79f7e3783", "f:0a" * 16, "x:deadbeef"):
+        assert mc.valid_track_id(tid)
+
+
+def test_valid_track_id_rejects_traversal_and_junk():
+    """The frame_archiver genre: anything shaped wrong dies at the allowlist,
+    not on the filesystem. These are the actual attack shapes, not typos."""
+    for tid in ("../../../etc/passwd", "b:abc/../..", "b:abc%2F..", "",
+                "b:abc def", "b:abc\x00", "b:abc\n", ".", "/mnt/music/x.m4a"):
+        assert not mc.valid_track_id(tid)
+
+
+def test_track_info_returns_the_daemon_fields(conn):
+    mc.upsert_track(conn, track(duration_s=193.0))
+    info = mc.track_info(conn, "b:abc")
+    assert info == {"id": "b:abc", "title": "Safe and Sound",
+                    "artist": "Capital Cities",
+                    "album": "In a Tidal Wave of Mystery",
+                    "duration_s": 193.0, "format": "m4a"}
+
+
+def test_track_info_unknown_id_is_none_not_an_error(conn):
+    assert mc.track_info(conn, "b:nope") is None
+
+
+def test_file_for_track_picks_the_lowest_path_of_duplicates(conn):
+    """The album rip and the greatest-hits rip share one id; which copy
+    streams must not depend on row order."""
+    mc.upsert_track(conn, track())
+    mc.upsert_file(conn, entry(path="/mnt/music/z-greatest-hits/a.m4a"))
+    mc.upsert_file(conn, entry(path="/mnt/music/album/a.m4a"))
+    assert mc.file_for_track(conn, "b:abc")["path"] == "/mnt/music/album/a.m4a"
+
+
+def test_file_for_track_unknown_id_is_none(conn):
+    assert mc.file_for_track(conn, "b:nope") is None
+
+
 # --- config -------------------------------------------------------------------
 
 def test_db_path_unset_or_blank_is_the_default(monkeypatch):

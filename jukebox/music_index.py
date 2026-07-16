@@ -91,6 +91,14 @@ DEFAULT_ROOT = "/mnt/music"
 AUDIO_EXTS = {".m4a": "m4a", ".mp3": "mp3", ".flac": "flac", ".wav": "wav",
               ".mp4": "mp4"}
 
+# Directories the walk never descends into (issue #129). `#recycle` is the
+# Synology share's recycle bin: deleted tracks, still audio files, still
+# parseable -- 3,096 of the first pass's 26,590 locations came from it, and
+# the moment the GUI read the real catalog they'd have surfaced on shelves.
+# Deleted means deleted. (The bin is the only housekeeping dir this share
+# exposes -- checked, no @eaDir.)
+EXCLUDED_DIRS = {"#recycle"}
+
 READ_CHUNK = 1 << 20
 
 # Progress cadence. The pass is ~1.74 h, so silence for that long is
@@ -335,11 +343,13 @@ def read_tags(path, fmt):
 
 
 def walk(root):
-    """Every audio file under `root`, as (path, format). Sorted per directory
-    so a re-run visits in the same order and its progress log is comparable to
-    the last one's."""
+    """Every audio file under `root`, as (path, format), skipping
+    EXCLUDED_DIRS. Sorted per directory so a re-run visits in the same order
+    and its progress log is comparable to the last one's."""
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames.sort()
+        # In-place assignment is the os.walk pruning contract: replacing the
+        # list's CONTENTS stops the descent; rebinding the name would not.
+        dirnames[:] = sorted(d for d in dirnames if d not in EXCLUDED_DIRS)
         for name in sorted(filenames):
             fmt = format_of(name)
             if fmt:
