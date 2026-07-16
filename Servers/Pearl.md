@@ -22,6 +22,7 @@ outage brings her back without anyone going downstairs.
 | Frames    | `frame-archiver`  | —                              | Still-shot archive (issue #90): files the daemon's event frames to disk for the Field Journal |
 | MCC       | `mcc-dashboard`   | 3000 (HTTP)                    | The Merle dashboard, production build (`next start`)           |
 | Music     | `music-daemon`    | 8090 (HTTP)                    | Playback daemon (issue #129): streams the catalog, drives the Denon over DLNA, writes `play_history` |
+| Jukebox   | `music-app`       | 3001 (HTTP)                    | The music player UI (issue #131), production build (`next start`) — http://192.168.1.64:3001 |
 | Deploys   | `merle-autodeploy`| —                              | Deploy watcher (issue #95): polls origin/main, pulls + restarts the Merle units on merge |
 | Pi-hole   | `pihole-FTL`      | 53, 67 (DHCP), 80, 443         | Household DNS + DHCP                                           |
 
@@ -46,6 +47,7 @@ systemctl status willard-weather
 systemctl status frame-archiver
 systemctl status mcc-dashboard
 systemctl status music-daemon
+systemctl status music-app
 systemctl status merle-autodeploy
 systemctl status pihole-FTL
 ```
@@ -122,9 +124,9 @@ sudo ss -tlnp
 ```
 
 Expected: 22 (ssh), 53 (pihole), 80/443 (pihole web), 1883 + 9001 (mosquitto),
-3000 (mcc-dashboard), 8090 (music-daemon). Anything else deserves a question.
-(Marlin, Willard, and the frame archiver listen on nothing — they only talk
-to the broker.)
+3000 (mcc-dashboard), 3001 (music-app), 8090 (music-daemon). Anything else
+deserves a question. (Marlin, Willard, and the frame archiver listen on
+nothing — they only talk to the broker.)
 
 ---
 
@@ -432,8 +434,9 @@ Wants=network-online.target
 ExecStart=/home/todd/project-squirrel/Servers/autodeploy.sh
 Restart=on-failure
 RestartSec=10
-Environment="MERLE_DEPLOY_UNITS=narrator-marlin willard-weather frame-archiver"
+Environment="MERLE_DEPLOY_UNITS=narrator-marlin willard-weather frame-archiver music-daemon"
 Environment=MERLE_DEPLOY_MCC=1
+Environment=MERLE_DEPLOY_MUSIC=1
 
 [Install]
 WantedBy=multi-user.target
@@ -441,7 +444,12 @@ WantedBy=multi-user.target
 
 (The quotes on the `MERLE_DEPLOY_UNITS` line matter — the value has spaces.
 No `User=`: root on purpose. Optional knobs: `MERLE_DEPLOY_INTERVAL_S`,
-`MERLE_DEPLOY_USER`, `MERLE_REPO`.)
+`MERLE_DEPLOY_USER`, `MERLE_REPO`. Since #131 `music-daemon` rides the
+restart list and `MERLE_DEPLOY_MUSIC=1` gates the music app's
+install → build → restart the way `MERLE_DEPLOY_MCC` gates the MCC's —
+on this box both land via the drop-in
+`/etc/systemd/system/merle-autodeploy.service.d/music.conf` rather than
+edits to the unit file itself.)
 
 To pause auto-deploys (manual pulls and `deploy-mcc.sh` work as before):
 
@@ -452,8 +460,9 @@ sudo systemctl stop merle-autodeploy      # start again to resume
 One tick by hand, no loop (desk-testing):
 
 ```
-sudo MERLE_DEPLOY_UNITS="narrator-marlin willard-weather frame-archiver" \
-     MERLE_DEPLOY_MCC=1 ~/project-squirrel/Servers/autodeploy.sh --once
+sudo MERLE_DEPLOY_UNITS="narrator-marlin willard-weather frame-archiver music-daemon" \
+     MERLE_DEPLOY_MCC=1 MERLE_DEPLOY_MUSIC=1 \
+     ~/project-squirrel/Servers/autodeploy.sh --once
 ```
 
 The script self-updates: a merge that changes `autodeploy.sh` deploys like
@@ -674,6 +683,58 @@ MERLE_MUSIC_STREAM_BASE=http://192.168.1.64:8090 \
 venv/bin/python -m uvicorn jukebox.music_daemon:app --host 0.0.0.0 \
     --port 8090 --no-access-log --timeout-graceful-shutdown 3
 ```
+
+---
+
+## The music app (issue #131)
+
+Unit: `/etc/systemd/system/music-app.service`
+Drop-in: `/etc/systemd/system/music-app.service.d/fast-stop.conf`
+Code: `music/` in the same checkout. Serves http://192.168.1.64:3001
+
+The production Next.js build of the player UI, served by `next start` —
+`mcc-dashboard`'s pattern one directory over, including the **fast-stop
+drop-in** (`TimeoutStopSec=5`): browser tabs hold keep-alive connections and
+Next's graceful shutdown would otherwise sit out systemd's 90s default.
+
+**Deploying: normally automatic** — `merle-autodeploy` rebuilds + restarts
+on any merge touching `music/` (`MERLE_DEPLOY_MUSIC=1`). By hand,
+**`~/project-squirrel/Servers/deploy-music.sh` is *the* way**, for
+`deploy-mcc.sh`'s reason verbatim: `next start` serves the compiled
+`.next/`, so pull + restart re-serves old code, and a build after the
+restart rewrites `.next/` under the live server. Pull → install → build →
+restart, failing loudly, or nothing.
+
+```ini
+[Unit]
+Description=Merle music app (Next.js, issue #131)
+After=network-online.target music-daemon.service
+Wants=network-online.target
+
+[Service]
+User=todd
+WorkingDirectory=/home/todd/project-squirrel/music
+ExecStart=/home/todd/project-squirrel/music/node_modules/.bin/next start -p 3001
+Environment=NODE_ENV=production
+Environment=MERLE_MUSIC_DB=/home/todd/project-squirrel/music.db
+Environment=MERLE_MUSIC_DAEMON=http://127.0.0.1:8090
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Both env vars carry the house's absolute-path lesson.** The unit's
+`WorkingDirectory` is the `music/` subdirectory, so a relative
+`MERLE_MUSIC_DB` would name `music/music.db` — a file nothing writes — and
+the app would serve an empty library with no error anywhere (the
+`MERLE_WEATHER_DB` trap, same words). It reads the **live catalog** — the
+same file `music-daemon` writes — so the recently-played shelf updates in
+real time; read-only per request over WAL, both units run as `todd`, no
+ceremony needed. `MERLE_MUSIC_DAEMON` is loopback because the daemon is one
+unit over; the browser never sees this address (the app proxies
+`/api/player/*` server-side).
 
 ---
 
