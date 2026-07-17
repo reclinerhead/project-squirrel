@@ -1,4 +1,5 @@
 {
+  "bus": "ws://192.168.1.64:9001",
   "tiles": [
     {
       "name": "Merle",
@@ -6,6 +7,7 @@
       "color": "#ff7031",
       "url": "http://mcc.lan/",
       "status": "live",
+      "presence": "services/merle-daemon/status",
       "description": "the driveway field station — live watch, field journal, census"
     },
     {
@@ -14,6 +16,7 @@
       "color": "#e0b25c",
       "url": "http://music.lan/",
       "status": "live",
+      "presence": "music/status",
       "description": "the record library — 25,000 tracks, the Denon, the thumbs"
     },
     {
@@ -22,6 +25,7 @@
       "color": "#6bb6e5",
       "url": "http://mcc.lan/weather",
       "status": "live",
+      "presence": "weather/status",
       "description": "willard's station view — the driveway sky, writ large"
     },
     {

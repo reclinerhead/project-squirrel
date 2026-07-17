@@ -185,8 +185,16 @@ Topics:
 - `weather/status` — Willard's retained presence, same `online`/`offline`
   contract as the narrators but in its own namespace so the dashboard's
   narrator wildcard never picks up a weather reporter
+- `music/status` — the playback daemon's retained presence (issue #129),
+  same contract, its own namespace for the same reason
+- `services/<name>/status` — the house-wide presence namespace (issue #147)
+  for anything that's neither narrator, reporter, nor jukebox; the existing
+  namespaces stay where they are. First tenant:
+  `services/merle-daemon/status` (the perception daemon on bluejay — down is
+  its *normal* state, it only runs during console sessions). The launchpad's
+  tile lamps subscribe to whatever topics `launchpad/tiles.json` names
 
-The `offline` on both status topics is an MQTT Last Will: if the process
+The `offline` on the status topics is an MQTT Last Will: if the process
 dies without saying goodbye, the broker publishes it. The Will fires on any
 socket death without a clean MQTT DISCONNECT — a crash, but also systemd's
 SIGTERM — so `systemctl stop` flips the dashboard lamp within seconds with
@@ -843,9 +851,10 @@ resolved before any of this and needed nothing.
 
 **Not proxied on purpose**: the broker's WebSocket (:9001) — browsers speak
 MQTT to it directly and the MCC's `NEXT_PUBLIC_MERLE_MQTT_WS` names it
-absolutely (whether Caddy should carry it is Phase 4's recorded decision,
-not this phase's); the music daemon (:8090) — only the Denon and the music
-app's server side talk to it.
+absolutely, and since #147 the launchpad's status lamps do the same via the
+`bus` key in `tiles.json`. Phase 4 recorded the decision: no WS proxy until
+something needs it (TLS would be that something); the music daemon (:8090) —
+only the Denon and the music app's server side talk to it.
 
 Health check from anything on the LAN:
 

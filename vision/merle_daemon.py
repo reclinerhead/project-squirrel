@@ -454,7 +454,18 @@ def create_app(source, conn, publisher=None):
         # never opens the camera or loads the model -- that only happens here, at
         # server startup, which pytest/CI never trigger for the module-level app.
         # Same deal for the bus connection: built here, not at import.
-        pub = bus.EventPublisher("merle-daemon").start() if publisher is None else publisher
+        # Presence (issue #147): retained online + Last-Will offline on the
+        # house-wide services namespace, so the launchpad's Merle lamp flips
+        # within seconds of the console closing -- Ctrl+C, crash, or SIGTERM,
+        # no cleanup code anywhere. Down is this daemon's NORMAL state.
+        pub = (
+            bus.EventPublisher(
+                "merle-daemon",
+                status_topic=bus.service_status_topic("merle-daemon"),
+            ).start()
+            if publisher is None
+            else publisher
+        )
         src = source() if callable(source) else source
         worker = Worker(src, state, conn, control, db_lock, pub)
         worker.start()

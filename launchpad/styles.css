@@ -213,6 +213,47 @@ a.tile:focus-visible {
   justify-content: space-between;
   gap: 10px;
 }
+.tile-right {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+/* The presence lamp (issue #147): the MCC's vocabulary -- online pulses
+   led-green, offline is a static faint dot, unknown fainter still. The slot
+   is fixed 8px on every tile (invisible where no topic is configured), so a
+   verdict arriving or changing moves nothing (house rule #1). */
+@keyframes lamp-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 6px 1px currentColor; }
+  50% { opacity: 0.45; box-shadow: 0 0 2px 0 currentColor; }
+}
+.tile-lamp {
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  flex: none;
+}
+.tile-lamp-none {
+  visibility: hidden;
+}
+.tile-lamp-unknown {
+  background-color: var(--ink-faint);
+  opacity: 0.35;
+}
+.tile-lamp-offline {
+  background-color: var(--ink-faint);
+}
+.tile-lamp-online {
+  background-color: var(--led);
+  color: var(--led);
+  animation: lamp-pulse 1.6s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tile-lamp-online {
+    animation: none;
+  }
+}
+
 .tile-status {
   font-size: 10px;
   color: var(--ink-faint);

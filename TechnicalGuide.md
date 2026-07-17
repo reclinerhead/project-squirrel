@@ -345,8 +345,11 @@ files from `webroot + webhome` (see Pearl.md § Pi-hole for the trap).
 Plain HTTP, `auto_https off`, nothing on 443: TLS/auth is the epic's
 deferred single-choke-point payoff, not a current feature. The broker's
 WebSocket (:9001) is deliberately *not* proxied — browsers speak MQTT to it
-directly (`NEXT_PUBLIC_MERLE_MQTT_WS` is absolute), and whether the front
-door should carry it is Phase 4's recorded decision.
+directly (`NEXT_PUBLIC_MERLE_MQTT_WS` is absolute). **Phase 4 decided this
+stays so** (#147): the launchpad's lamps dial `ws://192.168.1.64:9001`
+straight (the `bus` key in `tiles.json`), keeping one idiom with the MCC; a
+`ws://pearl/bus` Caddy proxy is deferred until something actually needs it —
+TLS would be that something.
 
 Canonical Caddyfile: `Servers/Caddyfile` in the repo; live copy
 `/etc/caddy/Caddyfile`, synced **manually on purpose** (a reverse-proxy
@@ -382,8 +385,30 @@ rain-blue, Music hi-res gold, Mole earth-brown, Hearth ember, and the
 coming-soon pair dimmed to a whisper). Fonts are the same Fraunces/Sometype
 Mono subsets next/font self-hosts for the MCC, with its fallback metrics
 copied so the swap can't shift layout; the grid reserves two placard rows
-before `tiles.json` lands (house rule #1). Live status lamps on the tiles
-are Phase 4 (v1.5), deliberately absent here.
+before `tiles.json` lands (house rule #1).
+
+**The lamps (epic #110 Phase 4 — issue #147).** Tiles whose config carries a
+`presence: "<topic>"` wear a live status dot fed by the bus's retained
+`"online"`/`"offline"` strings — the house Last-Will idiom generalized, not
+health checks invented: a publisher dying (crash, Ctrl+C, SIGTERM) flips its
+lamp within seconds with no polling and no cleanup code, verified live by
+hard-killing a publisher. Three states, one class swap on a fixed 8px slot
+every tile reserves (no layout shift): online pulses `--led`, offline is a
+static faint dot, and *unknown* — no verdict yet, or the bus itself
+unreachable — is fainter still, because a dead broker is not a verdict about
+the services. The broker URL is the top-level `bus` key in `tiles.json`
+(explicit, per the epic's note; the same-host fallback idea only works
+because broker and Caddy share pearl, and explicit survives that changing).
+The MQTT client is a **vendored** `mqtt.esm.js` (5.15.1, `launchpad/vendor/`
+— the *browser* build, honoring the MCC's hard-won default-entry gotcha;
+vendoring is not a build step, the no-build rule holds). Current wiring:
+Merle → `services/merle-daemon/status` (the new house-wide namespace from
+#147 — `bus.py` grew `service_status_topic()`, and the perception daemon
+passes it as `status_topic`, so the lamp answers "is the driveway watch on
+right now?"; dark is its *normal* state), Music → `music/status` (the
+engine, not the GUI — pearl's always-on Next apps are boring, the engine is
+the news), Weather Post → `weather/status`. Mole/Hearth/coming-soon carry no
+topic and keep their slot invisible.
 
 ## Repo layout
 
