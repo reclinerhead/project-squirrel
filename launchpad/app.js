@@ -15,7 +15,12 @@ function makeTile(tile) {
   const live = tile.status === "live" && typeof tile.url === "string";
   const el = document.createElement(live ? "a" : "div");
   el.className = live ? "tile" : "tile tile-soon";
-  if (live) el.href = tile.url;
+  if (live) {
+    el.href = tile.url;
+    // Every trail opens in its own tab -- the porch never disappears.
+    el.target = "_blank";
+    el.rel = "noopener";
+  }
   if (tile.color) el.style.setProperty("--blaze", tile.color);
 
   const top = document.createElement("div");

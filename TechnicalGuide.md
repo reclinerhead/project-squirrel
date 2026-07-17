@@ -339,7 +339,9 @@ get a login page that can't log in). The `/mole` path is not a Caddy
 rewrite: the UI's own home moved there (`webserver.paths.webhome =
 "/mole/"`, renamed from the stock `/admin/` in #143 to match the Mole
 tile), so the app generates `/mole/...` links itself and the proxy stays
-dumb. `/api` ignores webhome and stays put. DNS (:53) and DHCP (:67) were untouched.
+dumb — plus the `/var/www/html/mole → admin` symlink, because FTL serves UI
+files from `webroot + webhome` (see Pearl.md § Pi-hole for the trap).
+`/api` ignores webhome and stays put. DNS (:53) and DHCP (:67) were untouched.
 Plain HTTP, `auto_https off`, nothing on 443: TLS/auth is the epic's
 deferred single-choke-point payoff, not a current feature. The broker's
 WebSocket (:9001) is deliberately *not* proxied — browsers speak MQTT to it

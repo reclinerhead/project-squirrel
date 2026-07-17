@@ -801,6 +801,14 @@ The autodeploy watcher does *not* apply Caddyfile changes; the copy is a
 deliberate manual step, because a bad reverse-proxy config landing itself on
 merge could take every web surface down at once.)
 
+**The `caddy` user is in the `todd` group, and that's load-bearing**: Ubuntu
+creates home directories `750`, so without the group the launchpad
+`file_server` can't traverse `/home/todd` and every `/home/` request answers
+403 (found the hard way at first deploy — the fix was
+`sudo usermod -aG todd caddy` + a restart; a *restart*, not a reload, because
+supplementary groups are only picked up by a new process). On a rebuilt
+pearl, re-run that usermod before expecting the porch to serve.
+
 One front door on port 80 (issue #141, epic #110 Phase 1): named URLs
 instead of memorized ports, and the single choke point where TLS/auth would
 be added later without touching any app. Plain HTTP on the LAN
@@ -854,6 +862,17 @@ Web UI: http://pearl/mole (through Caddy; the web server itself sits on
 loopback:8081 since issue #141 and is unreachable directly from the LAN.
 The UI's home path is `/mole/` — `webserver.paths.webhome` in `pihole.toml`,
 renamed from the stock `/admin/` in issue #143 to match the Mole tile)
+
+**The webhome rename needs a symlink, and it's easy to forget**: FTL serves
+the UI's files from `webroot + webhome`, so `/mole/` means it looks in
+`/var/www/html/mole/` — a directory Pi-hole never installs. Without the link
+the login page 404s while the `/mole/` → `/mole/login` redirect still works,
+which looks like a Caddy bug and isn't. The fix (survives `pihole -up`,
+which updates the real `admin/` dir the link points at):
+
+```
+sudo ln -s /var/www/html/admin /var/www/html/mole
+```
 
 Pearl is DNS and DHCP for the whole house. The AT&T gateway (BGW,
 `192.168.1.254`) won't let you set DHCP DNS servers, so its DHCP is disabled
