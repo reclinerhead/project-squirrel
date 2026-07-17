@@ -318,6 +318,36 @@ The music player UI is a **second top-level Next app, `music/`, a peer of `mcc/`
 - **No-layout-shift discipline** (the house #1 rule): the idle player bar renders the playing state's exact skeleton; toggle-button active dots and output-picker checks are present-but-`invisible` when off; rating controls are always mounted and only fade on hover; search results are an absolutely-positioned overlay.
 - **Dev**: **port 3001, pinned in the `dev`/`start` scripts themselves** (`next dev -p 3001`) rather than only at the launcher — a bare `pnpm dev` in `music/` would otherwise default to 3000 and collide with MCC. The app owns its port however it's started. Dev env (`music/.env.local`, not in git): `MERLE_MUSIC_DB` pointing at a **backup-API snapshot** of pearl's catalog (never `cp` a live WAL file), `MERLE_MUSIC_DAEMON=http://192.168.1.64:8090` — browse reads the snapshot, play drives the real daemon, and history rows land on pearl's copy, so a stale dev snapshot only means a stale recently-played shelf. **Ratings make that split sharper (#135), and it's worth knowing before it fools you**: a thumb clicked in dev writes to *pearl's* catalog and is read back from the *snapshot*, so it renders correctly until you reload and then appears to vanish — which looks exactly like the bug #135 fixed. The data is on pearl; the snapshot is stale. Re-snapshot to see it, and don't debug the reload in dev without checking pearl's table first. CI: the `web-music` job in `tests.yml` mirrors `web` with `working-directory: music`. **Production is `music-app` on pearl:3001** (issue #131 — the `mcc-dashboard` pattern whole: `next start`, fast-stop drop-in, live `music.db` by absolute path, daemon proxied over loopback; `Servers/deploy-music.sh` by hand, `merle-autodeploy` on merge via `MERLE_DEPLOY_MUSIC=1`, and `music-daemon` rides `MERLE_DEPLOY_UNITS` so jukebox merges restart playback too). Still deferred from #110: the Caddy route/hostname and the launchpad tile. Deferred with names, not dropped: Explore/pregenerated playlists, similar artists, mini-player, playlist management, queue reorder/clear, a volume control that does anything.
 
+## The front door (epic #110 Phase 1 — issue #141)
+
+Everything on pearl used to be reached by memorized `IP:port` pairs. Since
+#141 there is **one front door: Caddy on pearl:80**, and the house speaks
+names — `pearl/admin` (Pi-hole), `mcc.lan` (:3000), `music.lan` (:3001).
+The names are Pi-hole Local DNS records, and they use the **`.lan` suffix**
+because that's the search domain pearl's DHCP already hands out — so a
+desktop can type `mcc/` and the resolver fills in the rest. (The epic
+proposed `.home`; `.lan` won because it was already deployed to every
+client's resolver config, not chosen.) The Caddyfile lists each site under
+both spellings (`http://mcc, http://mcc.lan`) because the browser's Host
+header carries what was typed, not what DNS resolved.
+
+Pi-hole's own web server (v6: embedded in `pihole-FTL`) moved off 80/443 to
+**loopback:8081** to release the ports — Caddy proxies `/admin` *and* `/api`
+(the v6 admin is a shell over its API; proxy one without the other and you
+get a login page that can't log in). DNS (:53) and DHCP (:67) were untouched.
+Plain HTTP, `auto_https off`, nothing on 443: TLS/auth is the epic's
+deferred single-choke-point payoff, not a current feature. The broker's
+WebSocket (:9001) is deliberately *not* proxied — browsers speak MQTT to it
+directly (`NEXT_PUBLIC_MERLE_MQTT_WS` is absolute), and whether the front
+door should carry it is Phase 4's recorded decision.
+
+Canonical Caddyfile: `Servers/Caddyfile` in the repo; live copy
+`/etc/caddy/Caddyfile`, synced **manually on purpose** (a reverse-proxy
+config that deploys itself on merge could take every web surface down at
+once — see Pearl.md § The front door for the two-line sync). Phase 3 (#143)
+adds the Homestead launchpad at `/home` with `pearl/` redirecting there;
+until then `pearl/` bounces to `/admin`.
+
 ## Repo layout
 
 **The Python is grouped into role packages** (issue #123). It was ~25 flat root scripts until then, and the guide used to defend that as *"deliberate for a single-machine project"* — a rationale that expired two machines ago. The repo is now three boxes plus two web apps, with an import boundary that must hold, so the shape follows the roles:

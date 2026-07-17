@@ -1,0 +1,47 @@
+# Pearl's front door (issue #141, epic #110 Phase 1).
+#
+# Canonical copy lives in the repo at Servers/Caddyfile; the live copy is
+# /etc/caddy/Caddyfile on pearl. Keep them in sync when this changes:
+#
+#     sudo cp ~/project-squirrel/Servers/Caddyfile /etc/caddy/Caddyfile
+#     sudo systemctl reload caddy
+#
+# LAN-only, plain HTTP on purpose — TLS/auth is the epic's Deferred section
+# and arrives (if ever) here, at this one choke point, without touching any
+# app behind it.
+
+{
+	auto_https off
+}
+
+# The pearl host itself — however it was typed. A browser sends the name the
+# user typed as the Host header ("pearl" resolves via the .lan search domain,
+# but the header still says "pearl"), so all three spellings are listed.
+http://pearl, http://pearl.lan, http://192.168.1.64 {
+	# Pi-hole's admin, at its remembered URL. The web server itself moved to
+	# loopback:8081 (Phase 1) — this proxy is the only way in, which is the
+	# point. /api is the Pi-hole v6 API the admin UI calls; it must ride along
+	# or the admin loads as an empty shell.
+	handle /admin* {
+		reverse_proxy 127.0.0.1:8081
+	}
+	handle /api* {
+		reverse_proxy 127.0.0.1:8081
+	}
+
+	# Until the Homestead launchpad lands at /home (Phase 3, issue #143),
+	# the root points at the one thing living here. Phase 3 replaces this
+	# with `redir / /home` + a file_server for launchpad/.
+	redir / /admin 302
+}
+
+# The MCC dashboard. Type "mcc/" on a desktop and the .lan suffix does the
+# rest; phones use the full name.
+http://mcc, http://mcc.lan {
+	reverse_proxy 127.0.0.1:3000
+}
+
+# The music app.
+http://music, http://music.lan {
+	reverse_proxy 127.0.0.1:3001
+}
