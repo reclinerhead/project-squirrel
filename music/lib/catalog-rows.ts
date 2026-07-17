@@ -111,6 +111,10 @@ export type TrackRow = {
   // The catalog stores only real opinions (-2/-1/+1/+2); an unrated track has
   // no ratings row at all, so this arrives null and maps to 0 = unrated.
   rating: number | null;
+  // The album's cover hash (issue #153) -- null before the art pass ran, or
+  // for the ~10% with no art anywhere. Optional so pre-art row shapes (the
+  // daemon's /queue payload) keep satisfying this type unchanged.
+  art_hash?: string | null;
 };
 
 export function trackFromRow(row: TrackRow): Track {
@@ -135,6 +139,7 @@ export function trackFromRow(row: TrackRow): Track {
     sampleRateHz: row.samplerate ?? null,
     bitrateKbps: lossy && row.bitrate ? Math.round(row.bitrate / 1000) : null,
     rating: ratingFromRow(row.rating),
+    artHash: row.art_hash ?? null,
   };
 }
 
@@ -144,6 +149,7 @@ export type AlbumRow = {
   album: string;
   year: number | null;
   genre: string | null;
+  art_hash?: string | null; // issue #153; absent on pre-art shapes
 };
 
 export function albumFromRow(row: AlbumRow, tracks: Track[]): Album {
@@ -155,5 +161,6 @@ export function albumFromRow(row: AlbumRow, tracks: Track[]): Album {
     year: row.year ?? 0,
     genre: row.genre || "Uncategorized",
     tracks,
+    artHash: row.art_hash ?? null,
   };
 }

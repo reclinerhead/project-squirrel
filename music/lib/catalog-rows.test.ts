@@ -152,3 +152,51 @@ describe("ratingFromRow", () => {
     for (const v of [3, -3, 99, 0.5]) expect(ratingFromRow(v)).toBe(0);
   });
 });
+
+// --- the album-key contract with the Python extractor (issue #153) ---------
+//
+// music_catalog.ALBUM_KEY_SQL mints "artist<U+241F>album" strings and the
+// art tables key on them; albumIdOf base64urls the SAME joined string. These
+// fixtures are pinned VERBATIM in test_music_catalog.py
+// (test_album_key_sql_matches_the_gui_derivation) -- change one side and
+// the other side's test is what catches you.
+
+import { describe as describe153, expect as expect153, it as it153 } from "vitest";
+
+const b64url = (s: string) =>
+  Buffer.from(s, "utf-8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+describe153("albumIdOf matches the extractor's album_key (issue #153)", () => {
+  it153("plain artist + album", () => {
+    expect153(albumIdOf("Capital Cities", "In A Tidal Wave Of Mystery")).toBe(
+      b64url("Capital Cities␟In A Tidal Wave Of Mystery"),
+    );
+  });
+  it153("compilations key on the album artist", () => {
+    expect153(albumIdOf("Various Artists", "Now That's Music")).toBe(
+      b64url("Various Artists␟Now That's Music"),
+    );
+  });
+  it153("the nameless tail keys on the display fallbacks", () => {
+    expect153(albumIdOf("Unknown Artist", "Unknown Album")).toBe(
+      b64url("Unknown Artist␟Unknown Album"),
+    );
+  });
+});
+
+describe153("art rides the row mappers (issue #153)", () => {
+  const base = {
+    id: "b:1", title: "T", artist: "A", album: "Al", album_artist: null,
+    track_no: 1, duration_s: 100, format: "mp3", bitrate: 128000,
+    samplerate: 44100, rating: null,
+  };
+  it153("trackFromRow carries art_hash and defaults to null", () => {
+    expect153(trackFromRow({ ...base, art_hash: "abc" }).artHash).toBe("abc");
+    expect153(trackFromRow(base).artHash).toBeNull();
+  });
+  it153("albumFromRow carries art_hash and defaults to null", () => {
+    const row = { artist: "A", album: "Al", year: 2000, genre: "Pop" };
+    expect153(albumFromRow({ ...row, art_hash: "abc" }, []).artHash).toBe("abc");
+    expect153(albumFromRow(row, []).artHash).toBeNull();
+  });
+});

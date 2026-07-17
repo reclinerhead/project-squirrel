@@ -46,7 +46,8 @@ def entry(**kw):
 
 def test_connect_creates_all_tables(conn):
     assert set(mc.counts(conn)) == {
-        "tracks", "track_files", "artists", "ratings", "play_history"}
+        "tracks", "track_files", "artists", "ratings", "play_history",
+        "album_art", "artist_art"}
 
 
 def test_connect_stamps_user_version(conn):
@@ -499,3 +500,93 @@ def test_db_path_unset_or_blank_is_the_default(monkeypatch):
 def test_db_path_honors_the_env(monkeypatch):
     monkeypatch.setenv("MERLE_MUSIC_DB", "/srv/music.db")
     assert mc.db_path() == "/srv/music.db"
+
+
+# --- the art store (issue #153) --------------------------------------------------
+
+def test_album_key_sql_matches_the_gui_derivation(conn):
+    """THE cross-language contract: this exact string, base64url'd, is the
+    GUI's album id. music/lib/catalog-rows.test.ts pins the same fixtures
+    through albumIdOf -- change one side and the paired test on the other
+    is what catches you."""
+    mc.upsert_track(conn, track(id="b:1", artist="Capital Cities",
+                                album="In A Tidal Wave Of Mystery"))
+    mc.upsert_file(conn, entry(path="/m/a.m4a", track_id="b:1"))
+    # A compilation: album_artist wins over the track artist.
+    mc.upsert_track(conn, track(id="b:2", artist="Some Performer",
+                                album_artist="Various Artists",
+                                album="Now That's Music"))
+    mc.upsert_file(conn, entry(path="/m/b.m4a", track_id="b:2"))
+    # The nameless tail: NULLs fall to the GUI's display fallbacks.
+    mc.upsert_track(conn, track(id="b:3", artist=None, album_artist=None,
+                                album=None, title="Mystery"))
+    mc.upsert_file(conn, entry(path="/m/c.m4a", track_id="b:3"))
+    keys = sorted(mc.albums_missing_art(conn))
+    assert keys == [
+        "Capital Cities␟In A Tidal Wave Of Mystery",
+        "Unknown Artist␟Unknown Album",
+        "Various Artists␟Now That's Music",
+    ]
+
+
+def test_albums_missing_art_is_a_worklist_that_shrinks(conn):
+    """The reusability rule in miniature: rows with art drop off, and an
+    empty worklist is what makes the ingestion-era re-run a no-op."""
+    mc.upsert_track(conn, track(id="b:1", album="One"))
+    mc.upsert_file(conn, entry(path="/m/1.m4a", track_id="b:1"))
+    mc.upsert_track(conn, track(id="b:2", album="Two"))
+    mc.upsert_file(conn, entry(path="/m/2.m4a", track_id="b:2"))
+    assert len(mc.albums_missing_art(conn)) == 2
+    mc.set_album_art(conn, "Capital Cities␟One", "h1", mc.ART_EMBEDDED,
+                     500, 500, 1000)
+    work = mc.albums_missing_art(conn)
+    assert list(work) == ["Capital Cities␟Two"]
+    assert work["Capital Cities␟Two"] == ["/m/2.m4a"]
+
+
+def test_owner_art_survives_every_automated_source(conn):
+    """The provenance rule, enforced in SQL: once the listener has chosen,
+    no pass -- embedded, folder, or derived -- may overwrite it."""
+    mc.set_album_art(conn, "A␟X", "owners-pick", mc.ART_OWNER, 1, 1, 1000)
+    for source in (mc.ART_EMBEDDED, mc.ART_FOLDER, mc.ART_DERIVED):
+        mc.set_album_art(conn, "A␟X", "machine-pick", source, 2, 2, 2000)
+    row = conn.execute("SELECT art_hash, source FROM album_art "
+                       "WHERE album_key = 'A␟X'").fetchone()
+    assert row["art_hash"] == "owners-pick"
+    assert row["source"] == mc.ART_OWNER
+
+
+def test_non_owner_art_refreshes(conn):
+    mc.set_album_art(conn, "A␟X", "old", mc.ART_FOLDER, 1, 1, 1000)
+    mc.set_album_art(conn, "A␟X", "new", mc.ART_EMBEDDED, 2, 2, 2000)
+    row = conn.execute("SELECT art_hash, source FROM album_art").fetchone()
+    assert (row["art_hash"], row["source"]) == ("new", mc.ART_EMBEDDED)
+
+
+def test_owner_artist_art_survives_the_promotion_pass(conn):
+    mc.set_artist_art(conn, "Capital Cities", "todds-photo", mc.ART_OWNER,
+                      800, 600, 1000)
+    mc.set_artist_art(conn, "Capital Cities", "derived-cover",
+                      mc.ART_DERIVED, 500, 500, 2000)
+    row = conn.execute("SELECT art_hash FROM artist_art").fetchone()
+    assert row["art_hash"] == "todds-photo"
+
+
+def test_artists_missing_art_scores_by_summed_thumbs(conn):
+    """The promotion worklist carries the score; the pure pick sorts it.
+    An artist with a row already -- owner or derived -- is off the list."""
+    mc.upsert_track(conn, track(id="b:1", album="Loved"))
+    mc.upsert_file(conn, entry(path="/m/1.m4a", track_id="b:1"))
+    mc.upsert_track(conn, track(id="b:2", album="Meh"))
+    mc.upsert_file(conn, entry(path="/m/2.m4a", track_id="b:2"))
+    mc.set_album_art(conn, "Capital Cities␟Loved", "h-loved",
+                     mc.ART_EMBEDDED, 1, 1, 1000)
+    mc.set_album_art(conn, "Capital Cities␟Meh", "h-meh",
+                     mc.ART_EMBEDDED, 1, 1, 1000)
+    mc.rate(conn, "b:1", 2, 1000)
+    rows = mc.artists_missing_art(conn)
+    scores = {r["album_key"]: r["score"] for r in rows}
+    assert scores == {"Capital Cities␟Loved": 2, "Capital Cities␟Meh": 0}
+    mc.set_artist_art(conn, "Capital Cities", "h-loved", mc.ART_DERIVED,
+                      1, 1, 1000)
+    assert mc.artists_missing_art(conn) == []

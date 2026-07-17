@@ -36,13 +36,13 @@ export function AlbumView({ album }: { album: Album }) {
       <section className="panel relative overflow-hidden rounded-sm border border-line bg-panel">
         {/* the cover itself, blown out and blurred, as the backdrop */}
         <div className="absolute inset-0 opacity-40 blur-2xl saturate-[1.2]" aria-hidden>
-          <CoverArt id={album.id} title="" />
+          <CoverArt id={album.id} title="" artHash={album.artHash} size="large" />
         </div>
         <div className="absolute inset-0 bg-gradient-to-t from-panel via-panel/70 to-transparent" aria-hidden />
 
         <div className="relative flex flex-col gap-5 px-5 pb-5 pt-6 sm:flex-row sm:items-end sm:px-6">
           <span className="relative block h-40 w-40 shrink-0 overflow-hidden rounded-sm border border-linebright shadow-[0_12px_40px_rgba(0,0,0,0.5)] sm:h-48 sm:w-48">
-            <CoverArt id={album.id} title={album.title} />
+            <CoverArt id={album.id} title={album.title} artHash={album.artHash} size="large" />
           </span>
           <div className="min-w-0">
             <h1 className="text-3xl text-ink sm:text-4xl" style={{ fontFamily: "var(--font-display)" }}>

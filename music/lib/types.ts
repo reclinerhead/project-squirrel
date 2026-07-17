@@ -27,6 +27,11 @@ export type Track = {
    * in client state is what this replaced. Edits made this session live in
    * PlayerProvider and take precedence; this is the baseline it starts from. */
   rating: Rating;
+  /** The ALBUM's art (issue #153), riding on the track because the player
+   * bar, queue, and search rows render covers off tracks alone. Optional so
+   * the fixture library (which predates art) type-checks untouched; null or
+   * absent renders the generated SVG. */
+  artHash?: string | null;
 };
 
 export type Album = {
@@ -40,6 +45,9 @@ export type Album = {
    * dominant tag once Phase 0/1's normalization exists. */
   genre: string;
   tracks: Track[];
+  /** Real cover art's content hash (issue #153), or null/absent for the
+   * ~10% the extractor found nothing for -- those keep the generated SVG. */
+  artHash?: string | null;
 };
 
 export type Artist = {
@@ -48,6 +56,9 @@ export type Artist = {
   /** Last.fm-style prose; Phase 1's bio-fetcher fills this for real. */
   bio: string;
   albums: Album[];
+  /** The artist image (issue #153): a promoted album cover today
+   * (source='derived'), the owner's own photo once that lands. */
+  artHash?: string | null;
 };
 
 /** Four-level feedback (epic #115): -2 hard-filters, +2 boosts. 0 = unrated. */

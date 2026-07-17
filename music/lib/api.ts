@@ -31,6 +31,7 @@ import {
 import {
   albumIndex,
   artistAlbums,
+  artistArtMap,
   artistFor,
   hydrateAlbum,
   libraryTotals,
@@ -67,6 +68,9 @@ export async function getAlbum(id: string): Promise<Album | null> {
       year: meta?.year ?? 0,
       genre: meta?.genre || "Uncategorized",
       tracks,
+      // The tracks already carry the album's art (one subquery, same rows);
+      // falling to the index entry covers a trackless meta-only hit.
+      artHash: tracks[0]?.artHash ?? meta?.art_hash ?? null,
     };
   });
 }
@@ -87,17 +91,20 @@ export async function search(query: string): Promise<SearchResults> {
     // tested scorer ranks. The overlay renders names and covers off these,
     // never track counts, so the partial albums are honest.
     const tracks = searchTrackRows(db, query.trim()).map(trackFromRow);
+    const artistArt = artistArtMap(db);
     const artists = new Map<string, Artist>();
     for (const t of tracks) {
       let a = artists.get(t.artistId);
       if (!a) {
-        a = { id: t.artistId, name: t.artist, bio: "", albums: [] };
+        a = { id: t.artistId, name: t.artist, bio: "", albums: [],
+              artHash: artistArt.get(t.artist) ?? null };
         artists.set(t.artistId, a);
       }
       let al = a.albums.find((x) => x.id === t.albumId);
       if (!al) {
         al = { id: t.albumId, title: t.album, artistId: t.artistId,
-               artist: t.artist, year: 0, genre: "", tracks: [] };
+               artist: t.artist, year: 0, genre: "", tracks: [],
+               artHash: t.artHash ?? null };
         a.albums.push(al);
       }
       al.tracks.push(t);
@@ -170,12 +177,14 @@ export async function browseArtists(q: BrowseQuery): Promise<BrowseResult<Artist
   return withDb({ items: [], total: 0, nextOffset: null } as BrowseResult<Artist>, (db) => {
     const pool = sortedArtistCards(filteredIndex(albumIndex(db), q.genre), q.sort);
     const win = clampWindow(pool.length, q.offset ?? 0, q.limit ?? PAGE_LIMIT);
+    const art = artistArtMap(db);
     return {
       items: pool.slice(win.start, win.end).map((c) => ({
         id: artistIdOf(c.name),
         name: c.name,
         bio: "",
         albums: c.entries.map((e) => hydrateAlbum(db, e)),
+        artHash: art.get(c.name) ?? null,
       })),
       total: pool.length,
       nextOffset: win.nextOffset,
