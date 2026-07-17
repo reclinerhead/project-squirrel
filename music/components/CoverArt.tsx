@@ -24,6 +24,7 @@ export function CoverArt({
   artHash,
   size = "thumb",
   className,
+  focalY,
 }: {
   id: string;
   title: string;
@@ -32,6 +33,13 @@ export function CoverArt({
   /** thumb (~160px) for grids/rows, large (~600px) for album/artist heroes. */
   size?: "thumb" | "large";
   className?: string;
+  /** Where the art's interest lives vertically, 0..1 (issue #159) -- the
+   * extraction pass's edge-density centroid. Backdrop callers pass it so a
+   * cropped band features the subject, not dead center; square renders
+   * (grids, the anchor cover, the lightbox) leave it unset and object-cover
+   * centers as ever. Null/absent = center, so pre-backfill rows and the
+   * generated SVG change nothing. */
+  focalY?: number | null;
 }) {
   // A 404'd or corrupt image falls back to the SVG -- per instance, sticky
   // for this mount only, so one bad file can't hide anyone else's art.
@@ -123,6 +131,7 @@ export function CoverArt({
           }}
           onError={() => setFailed(true)}
           className="absolute inset-0 h-full w-full object-cover opacity-0 transition-opacity duration-300 [&.loaded]:opacity-100"
+          style={focalY != null ? { objectPosition: `50% ${focalY * 100}%` } : undefined}
           onLoad={(e) => e.currentTarget.classList.add("loaded")}
         />
       )}

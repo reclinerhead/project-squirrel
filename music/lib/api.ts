@@ -71,6 +71,9 @@ export async function getAlbum(id: string): Promise<Album | null> {
       // The tracks already carry the album's art (one subquery, same rows);
       // falling to the index entry covers a trackless meta-only hit.
       artHash: tracks[0]?.artHash ?? meta?.art_hash ?? null,
+      // The backdrop's crop anchor (issue #159) rides the index entry only
+      // -- tracks don't carry it, and null honestly means "center".
+      artFocalY: meta?.focal_y ?? null,
     };
   });
 }

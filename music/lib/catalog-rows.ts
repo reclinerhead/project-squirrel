@@ -163,6 +163,7 @@ export type AlbumRow = {
   year: number | null;
   genre: string | null;
   art_hash?: string | null; // issue #153; absent on pre-art shapes
+  focal_y?: number | null; // issue #159; absent pre-focal, null = center
 };
 
 export function albumFromRow(row: AlbumRow, tracks: Track[]): Album {
@@ -175,5 +176,6 @@ export function albumFromRow(row: AlbumRow, tracks: Track[]): Album {
     genre: row.genre || "Uncategorized",
     tracks,
     artHash: row.art_hash ?? null,
+    artFocalY: row.focal_y ?? null,
   };
 }

@@ -62,15 +62,15 @@ export function AlbumView({ album }: { album: Album }) {
             softened band of the actual art, and object-cover on the wide box
             already crops the square cover to that middle slice. The slight
             scale keeps blur-softened edges off-frame. */}
-        <div className="absolute inset-0 scale-105 opacity-60 blur-md saturate-[1.2]" aria-hidden>
-          <CoverArt id={album.id} title="" artHash={album.artHash} size="large" />
+        <div className="absolute inset-0 scale-105 opacity-75 blur-md saturate-[1.2]" aria-hidden>
+          <CoverArt id={album.id} title="" artHash={album.artHash} size="large" focalY={album.artFocalY} />
         </div>
         {/* Two scrims share the legibility job now that the art shows: the
             house bottom-up fade, plus a bottom-left anchor under the text
             block specifically -- TIDAL's trick, darkest exactly where the
             title sits, scrim-free where the art is the point. */}
         <div className="absolute inset-0 bg-gradient-to-t from-panel via-panel/60 to-transparent" aria-hidden />
-        <div className="absolute inset-0 bg-gradient-to-tr from-panel/80 via-transparent to-transparent" aria-hidden />
+        <div className="absolute inset-0 bg-gradient-to-tr from-panel/90 via-transparent to-transparent" aria-hidden />
 
         <div className="relative flex flex-col gap-5 px-5 pb-5 pt-6 sm:flex-row sm:items-end sm:px-6">
           {/* The cover anchors the page now (issue #155: it had shipped
@@ -101,7 +101,7 @@ export function AlbumView({ album }: { album: Album }) {
             >
               {album.title}
             </h1>
-            <p className="mt-2 text-lg sm:text-xl">
+            <p className="mt-2 text-xl sm:text-2xl">
               <Link
                 href={`/artist/${album.artistId}`}
                 className="text-inkdim transition-colors hover:text-ink"
@@ -147,7 +147,7 @@ export function AlbumView({ album }: { album: Album }) {
             of it. Quieter than the hero ever was: opacity-25 vs its old 40. */}
         <div className="absolute inset-x-0 top-0 h-72 overflow-hidden" aria-hidden>
           <div className="absolute inset-0 scale-110 opacity-25 blur-2xl saturate-[1.2]">
-            <CoverArt id={album.id} title="" artHash={album.artHash} size="large" />
+            <CoverArt id={album.id} title="" artHash={album.artHash} size="large" focalY={album.artFocalY} />
           </div>
           <div className="absolute inset-0 bg-gradient-to-b from-transparent via-panel/40 to-panel" />
         </div>

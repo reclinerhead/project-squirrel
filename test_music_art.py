@@ -111,8 +111,9 @@ def png_bytes(w=300, h=300, color=(200, 40, 40)):
 
 def test_store_image_writes_original_and_both_sizes(tmp_path):
     data = png_bytes(700, 700)
-    art_hash, w, h = ma.store_image(str(tmp_path), data)
+    art_hash, w, h, focal = ma.store_image(str(tmp_path), data)
     assert (w, h) == (700, 700)
+    assert focal == 0.5  # a flat color has no interest anywhere: center
     orig, thumb, large = (tmp_path / n for n in ma.art_names(art_hash))
     assert orig.read_bytes() == data  # the original is UNTOUCHED bytes
     from PIL import Image
@@ -121,7 +122,7 @@ def test_store_image_writes_original_and_both_sizes(tmp_path):
 
 
 def test_store_image_never_upscales(tmp_path):
-    art_hash, w, h = ma.store_image(str(tmp_path), png_bytes(120, 120))
+    art_hash, w, h, _ = ma.store_image(str(tmp_path), png_bytes(120, 120))
     from PIL import Image
     _, thumb, large = (tmp_path / n for n in ma.art_names(art_hash))
     assert Image.open(thumb).size == (120, 120)
@@ -142,3 +143,48 @@ def test_store_image_is_idempotent_and_content_addressed(tmp_path):
 def test_store_image_rejects_garbage_without_litter(tmp_path):
     assert ma.store_image(str(tmp_path), b"not an image at all") is None
     assert os.listdir(str(tmp_path)) == []  # no half-written files
+
+
+# --- focal analysis (issue #159) ------------------------------------------------
+
+def busy_bottom_image(w=300, h=300):
+    """A synthetic Here Come the Runts: flat 'wall' above, busy texture
+    below -- a checkerboard in the bottom third is unambiguous edge
+    density where the subject would be."""
+    from PIL import Image
+    img = Image.new("L", (w, h), 230)
+    px = img.load()
+    for y in range(int(h * 2 / 3), h):
+        for x in range(w):
+            px[x, y] = 255 if (x // 6 + y // 6) % 2 else 0
+    return img
+
+
+def test_focal_uniform_image_is_center():
+    from PIL import Image
+    assert ma.focal_from_image(Image.new("RGB", (400, 400), (90, 12, 34))) == 0.5
+
+
+def test_focal_follows_the_interest():
+    """The issue's acceptance case in miniature: subject low in the frame
+    pulls the focal well below center."""
+    focal = ma.focal_from_image(busy_bottom_image())
+    assert focal > 0.6
+
+
+def test_focal_clamps_at_the_band_edges():
+    """All the ink at the very bottom still keeps context above the
+    subject -- the crop anchor never pins to an edge."""
+    from PIL import Image
+    img = Image.new("L", (300, 300), 230)
+    px = img.load()
+    for y in range(280, 300):
+        for x in range(300):
+            px[x, y] = 255 if (x // 3) % 2 else 0
+    assert ma.focal_from_image(img) <= 0.8
+    assert ma.focal_from_image(img.transpose(Image.FLIP_TOP_BOTTOM)) >= 0.2
+
+
+def test_focal_is_deterministic():
+    img = busy_bottom_image()
+    assert ma.focal_from_image(img) == ma.focal_from_image(img)
