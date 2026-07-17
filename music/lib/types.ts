@@ -16,6 +16,12 @@ export type Track = {
   trackNo: number;
   durationS: number;
   format: AudioFormat;
+  /** The catalog's raw format column -- the CONTAINER (m4a/mp4/flac/wav/mp3),
+   * where `format` above is the codec-level answer (issue #157: the format
+   * pill states both). Optional so pre-container shapes -- fixtures, the
+   * daemon's /queue payload -- type-check untouched; absent falls back to
+   * deriving the container from `format`. */
+  container?: string | null;
   /** null for lossy formats -- bit depth is a lossless concept. */
   bitDepth: number | null;
   sampleRateHz: number | null;

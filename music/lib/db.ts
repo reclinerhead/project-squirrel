@@ -94,7 +94,7 @@ function hasArt(db: DatabaseSync): boolean {
 // an index probe per row over a window of tracks, never the catalog.
 const trackCols = (art: boolean) =>
   "t.id, t.title, t.artist, t.album, t.album_artist, t.track_no, " +
-  "t.duration_s, t.format, t.bitrate, t.samplerate, " +
+  "t.duration_s, t.format, t.codec, t.bitrate, t.samplerate, " +
   "(SELECT value FROM ratings WHERE track_id = t.id) AS rating, " +
   (art ? ART_HASH_SUB : "NULL") + " AS art_hash";
 

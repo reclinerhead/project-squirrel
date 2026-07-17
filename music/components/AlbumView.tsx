@@ -1,9 +1,11 @@
 "use client";
 
-// The album page's interactive body (issues #116, #129, #155): the album's
-// cover blurred into a full-bleed backdrop (the TIDAL move), the cover
-// itself big enough to anchor the page, metadata with the quality badge,
-// and the tracklist with the now-playing row lit. Clicking any row queues
+// The album page's interactive body (issues #116, #129, #155, #157): the
+// album's cover as a RECOGNIZABLE full-bleed backdrop (the TIDAL move,
+// finally at TIDAL's volume), the cover itself big enough to anchor the
+// page, metadata with the quality + format pills, the old heavy-blur wash
+// demoted to the tracklist panel, and the now-playing row lit. Clicking any
+// row queues
 // the whole album from that point; clicking the cover opens the FULL-SIZE
 // original in a lightbox -- the untouched bytes the extractor stored, the
 // one surface that serves /orig. Hand-rolled overlay on the OutputPicker's
@@ -17,9 +19,11 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { formatTotalDuration } from "@/lib/format";
+import { formatBadgeForAlbum } from "@/lib/format-badge";
 import { qualityForAlbum } from "@/lib/quality";
 import { usePlayer } from "@/components/PlayerProvider";
 import { CoverArt } from "@/components/CoverArt";
+import { FormatBadge } from "@/components/FormatBadge";
 import { QualityBadge } from "@/components/QualityBadge";
 import { TrackList } from "@/components/TrackList";
 import { PlayIcon, ShuffleIcon } from "@/components/icons";
@@ -42,6 +46,7 @@ export function AlbumView({ album }: { album: Album }) {
 
   const totalS = album.tracks.reduce((s, t) => s + t.durationS, 0);
   const badge = qualityForAlbum(album.tracks);
+  const formatLabel = formatBadgeForAlbum(album.tracks);
 
   const playAll = () => playTracks(album.tracks, 0, album.title);
   const shufflePlay = () => {
@@ -52,11 +57,20 @@ export function AlbumView({ album }: { album: Album }) {
   return (
     <div className="space-y-6">
       <section className="panel relative overflow-hidden rounded-sm border border-line bg-panel">
-        {/* the cover itself, blown out and blurred, as the backdrop */}
-        <div className="absolute inset-0 opacity-40 blur-2xl saturate-[1.2]" aria-hidden>
+        {/* The cover as the backdrop -- RECOGNIZABLE now (issue #157). The
+            old blur-2xl wash read as a color smear; TIDAL's move is a lightly
+            softened band of the actual art, and object-cover on the wide box
+            already crops the square cover to that middle slice. The slight
+            scale keeps blur-softened edges off-frame. */}
+        <div className="absolute inset-0 scale-105 opacity-60 blur-md saturate-[1.2]" aria-hidden>
           <CoverArt id={album.id} title="" artHash={album.artHash} size="large" />
         </div>
-        <div className="absolute inset-0 bg-gradient-to-t from-panel via-panel/70 to-transparent" aria-hidden />
+        {/* Two scrims share the legibility job now that the art shows: the
+            house bottom-up fade, plus a bottom-left anchor under the text
+            block specifically -- TIDAL's trick, darkest exactly where the
+            title sits, scrim-free where the art is the point. */}
+        <div className="absolute inset-0 bg-gradient-to-t from-panel via-panel/60 to-transparent" aria-hidden />
+        <div className="absolute inset-0 bg-gradient-to-tr from-panel/80 via-transparent to-transparent" aria-hidden />
 
         <div className="relative flex flex-col gap-5 px-5 pb-5 pt-6 sm:flex-row sm:items-end sm:px-6">
           {/* The cover anchors the page now (issue #155: it had shipped
@@ -77,10 +91,17 @@ export function AlbumView({ album }: { album: Album }) {
             </span>
           )}
           <div className="min-w-0">
-            <h1 className="text-3xl text-ink sm:text-4xl" style={{ fontFamily: "var(--font-display)" }}>
+            {/* Typography scale is issue #157's contract: the title owns the
+                page (wrapping welcome, never truncated), the artist is the
+                clear second line, and the stamp row stays the small one --
+                a notch up from before, but still the small one. */}
+            <h1
+              className="text-4xl text-ink sm:text-5xl lg:text-6xl"
+              style={{ fontFamily: "var(--font-display)" }}
+            >
               {album.title}
             </h1>
-            <p className="mt-1 text-sm">
+            <p className="mt-2 text-lg sm:text-xl">
               <Link
                 href={`/artist/${album.artistId}`}
                 className="text-inkdim transition-colors hover:text-ink"
@@ -88,12 +109,13 @@ export function AlbumView({ album }: { album: Album }) {
                 {album.artist}
               </Link>
             </p>
-            <p className="stamp mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-inkfaint">
+            <p className="stamp mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-inkfaint">
               <span>{album.year}</span>
               <span>
                 {album.tracks.length} tracks ({formatTotalDuration(totalS)})
               </span>
-              <QualityBadge badge={badge} />
+              <QualityBadge badge={badge} className="text-[10px]" />
+              <FormatBadge label={formatLabel} className="text-[10px]" />
             </p>
             <div className="mt-4 flex items-center gap-3">
               <button
@@ -115,8 +137,21 @@ export function AlbumView({ album }: { album: Album }) {
         </div>
       </section>
 
-      <section className="panel rounded-sm border border-line bg-panel">
-        <div className="px-1 py-2">
+      <section className="panel relative overflow-hidden rounded-sm border border-line bg-panel">
+        {/* The hero's OLD treatment, demoted downstairs (issue #157): the
+            heavy-blur wash was too quiet for a hero but is exactly right
+            behind dense rows. Top-anchored and dissolving into bg-panel so
+            it reads as the header's atmosphere spilling over the seam --
+            the bottom of a long list stays calm, and the faintest text on
+            the page (numbers, durations) never sits on more than a whisper
+            of it. Quieter than the hero ever was: opacity-25 vs its old 40. */}
+        <div className="absolute inset-x-0 top-0 h-72 overflow-hidden" aria-hidden>
+          <div className="absolute inset-0 scale-110 opacity-25 blur-2xl saturate-[1.2]">
+            <CoverArt id={album.id} title="" artHash={album.artHash} size="large" />
+          </div>
+          <div className="absolute inset-0 bg-gradient-to-b from-transparent via-panel/40 to-panel" />
+        </div>
+        <div className="relative px-1 py-2">
           <TrackList tracks={album.tracks} playingFrom={album.title} />
         </div>
       </section>
