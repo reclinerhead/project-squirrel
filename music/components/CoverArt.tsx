@@ -109,6 +109,18 @@ export function CoverArt({
           alt=""
           loading="lazy"
           decoding="async"
+          ref={(el) => {
+            // THE HYDRATION RACE (issue #155): an immutable-cached image
+            // completes before React attaches onLoad/onError on a hard
+            // reload, so the events fire into the void and a fully loaded
+            // cover sat invisible at opacity-0 (and a cached 404 would show
+            // a broken glyph). The ref runs at attach time and settles
+            // whatever already happened; the handlers below cover the
+            // genuinely-still-loading case, where the fade earns its keep.
+            if (!el || !el.complete) return;
+            if (el.naturalWidth > 0) el.classList.add("loaded");
+            else setFailed(true);
+          }}
           onError={() => setFailed(true)}
           className="absolute inset-0 h-full w-full object-cover opacity-0 transition-opacity duration-300 [&.loaded]:opacity-100"
           onLoad={(e) => e.currentTarget.classList.add("loaded")}
