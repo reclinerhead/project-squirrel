@@ -301,3 +301,84 @@ def test_walk_yields_sorted_and_typed(tmp_path):
     got = list(mi.walk(str(tmp_path)))
     assert [os.path.basename(p) for p, _ in got] == ["a.flac", "b.mp3"]
     assert [f for _, f in got] == ["flac", "mp3"]
+
+
+# --- mp4 codec probe (issue #149) ------------------------------------------------
+#
+# `format` alone can't say what's inside an m4a -- ALAC and lossy AAC share
+# the extension and the browser output treats them oppositely. The probe
+# walks moov>trak>mdia>minf>stbl>stsd for the sample-entry fourcc; a byte
+# scan would misfire on the "alac" magic-cookie box and on cover art.
+
+def stsd(fourcc):
+    entry = struct.pack(">I4s", 16, fourcc) + b"\x00" * 8
+    return atom(b"stsd", b"\x00" * 4 + struct.pack(">I", 1) + entry)
+
+
+def moov_with(fourcc):
+    return atom(b"moov", atom(b"trak", atom(b"mdia", atom(b"minf", atom(
+        b"stbl", stsd(fourcc))))))
+
+
+def test_codec_finds_alac():
+    f, n = fh(atom(b"ftyp", b"M4A ") + moov_with(b"alac") +
+              atom(b"mdat", b"AUDIO"))
+    assert mi.mp4_codec(f, n) == "alac"
+
+
+def test_codec_maps_mp4a_to_aac():
+    f, n = fh(atom(b"ftyp", b"M4A ") + moov_with(b"mp4a") +
+              atom(b"mdat", b"AUDIO"))
+    assert mi.mp4_codec(f, n) == "aac"
+
+
+def test_codec_passes_an_exotic_fourcc_through():
+    """FairPlay relics and exotica stay honest in the catalog; the policy
+    routes them to the FLAC path where an undecodable stream fails visibly."""
+    f, n = fh(moov_with(b"drms"))
+    assert mi.mp4_codec(f, n) == "drms"
+
+
+def test_codec_finds_moov_after_mdat():
+    f, n = fh(atom(b"mdat", b"AUDIO") + moov_with(b"alac"))
+    assert mi.mp4_codec(f, n) == "alac"
+
+
+def test_codec_without_stsd_is_none_not_a_crash():
+    f, n = fh(atom(b"ftyp", b"M4A ") + atom(b"moov", atom(b"trak", b"")) +
+              atom(b"mdat", b"AUDIO"))
+    assert mi.mp4_codec(f, n) is None
+
+
+def test_codec_on_garbage_is_none():
+    f, n = fh(b"this is not an mp4 at all, not even slightly....")
+    assert mi.mp4_codec(f, n) is None
+
+
+def test_codec_bounded_against_a_self_containing_atom():
+    """A malformed atom that claims to contain itself must not recurse
+    forever -- the depth bound is the guard."""
+    # moov whose payload claims another moov of the same claimed size.
+    inner = struct.pack(">I4s", 16, b"moov") + b"\x00" * 8
+    f, n = fh(atom(b"moov", inner))
+    assert mi.mp4_codec(f, n) is None
+
+
+def test_identify_carries_the_codec_for_m4a(tmp_path):
+    data = atom(b"ftyp", b"M4A ") + moov_with(b"alac") + \
+        atom(b"mdat", b"AUDIOAUDIO")
+    p = tmp_path / "t.m4a"
+    p.write_bytes(data)
+    track_id, off, ln, note, codec = mi.identify(str(p), "m4a", len(data))
+    assert track_id is not None and note is None
+    assert codec == "alac"
+
+
+def test_identify_leaves_codec_none_for_other_formats(tmp_path):
+    p = tmp_path / "t.wav"
+    data = b"RIFF" + b"\x00" * 4 + b"WAVE" + \
+        struct.pack("<4sI", b"data", 4) + b"beep"
+    p.write_bytes(data)
+    track_id, off, ln, note, codec = mi.identify(str(p), "wav", len(data))
+    assert track_id is not None
+    assert codec is None

@@ -20,8 +20,17 @@
 // `queue` (issue #139) is the playlist engine's door: it generates a track
 // list on pearl and starts nothing -- the daemon stays one-track-at-a-time
 // on the transport verbs, and PlayerProvider owns the queue it fetches.
+//
+// `report` and `precache` (issue #149) are the browser output's two verbs:
+// the <audio> element reports how its play ended (the watcher can't poll a
+// tab), and the provider names the next queue tracks so the cache warms
+// while the current one plays. The AUDIO ITSELF does not ride this proxy --
+// the element streams straight from the daemon's stream_base, because piping
+// a music stream through a Next route would re-buffer it for no gain and
+// break Range.
 const GET_VERBS = new Set(["state"]);
-const POST_VERBS = new Set(["play", "pause", "stop", "seek", "rate", "queue"]);
+const POST_VERBS = new Set(["play", "pause", "stop", "seek", "rate", "queue",
+                            "report", "precache"]);
 
 function daemonBase(): string | null {
   const base = process.env.MERLE_MUSIC_DAEMON?.trim();

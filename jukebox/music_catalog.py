@@ -72,7 +72,7 @@ DEFAULT_DB_PATH = "music.db"
 # Bumped whenever MIGRATIONS grows. A fresh file gets SCHEMA (already current)
 # and is stamped straight to this; an existing file replays only the steps
 # above its stored PRAGMA user_version.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # The four-level thumbs (#115's feedback model). Phase 3 reads these as RULES
 # -- strong-down is a hard filter applied BEFORE candidate selection, not an
@@ -89,6 +89,18 @@ RATING_VALUES = (RATING_STRONG_DOWN, RATING_DOWN, RATING_UP, RATING_STRONG_UP)
 # writes it until Phase 2 -- the moment something plays, it starts counting.
 PLAY_COMPLETED = "completed"
 PLAY_SKIPPED = "skipped"
+
+# What's inside an m4a/mp4 container -- `format` alone cannot say (issue #149).
+# The extension covers BOTH Apple Lossless and lossy iTunes-purchase AAC, and
+# the browser output treats them oppositely: ALAC repacks to FLAC (lossless to
+# lossless), AAC streams untouched (re-encoding a lossy source to FLAC loses
+# nothing but inflates it for no reason). NULL on an m4a means "not probed
+# yet", which the policy treats as ALAC -- the never-lossy default; the worst
+# case is wasted bytes, never lost ones. Only m4a/mp4 rows carry a codec: for
+# every other format the extension IS the codec and a second column saying so
+# would be a drift risk with no question it answers.
+CODEC_ALAC = "alac"
+CODEC_AAC = "aac"
 
 # `id` is the audio-stream hash: stable across a tag edit AND across a move.
 # Everything that matters -- ratings, history, Phase 1's analysis -- hangs off
@@ -116,6 +128,7 @@ CREATE TABLE IF NOT EXISTS tracks (
     genre        TEXT,
     duration_s   REAL,
     format       TEXT,
+    codec        TEXT,
     bitrate      INTEGER,
     samplerate   INTEGER,
     channels     INTEGER,
@@ -168,11 +181,17 @@ CREATE INDEX IF NOT EXISTS idx_play_history_at ON play_history(played_at);
 # append a step here, bump SCHEMA_VERSION, and mirror the end state into SCHEMA
 # so a fresh file skips the replay entirely.
 #
-# Empty at version 1: SCHEMA *is* version 1, and there is no deployed file
-# older than it. The seam is here so the first real column addition is a
-# one-line append against months of accumulated ratings, rather than an
-# emergency discovered on the day it's needed.
-MIGRATIONS = ()
+# Index i takes a file from version i to i+1 -- and version 1 was never a
+# migration (SCHEMA was born at 1, files were stamped straight to it), so
+# index 0 is a no-op placeholder that keeps that arithmetic honest. Deployed
+# files all sit at 1 and replay only what's above them.
+MIGRATIONS = (
+    "-- version 1 is SCHEMA's birth state; nothing to replay",
+    # 1 -> 2 (issue #149): the codec column, the seam's first real customer
+    # -- exactly the "one-line append against accumulated ratings" it was
+    # built for.
+    "ALTER TABLE tracks ADD COLUMN codec TEXT;",
+)
 
 
 def db_path():
@@ -221,7 +240,7 @@ def track_row(track):
 
 TRACK_COLUMNS = (
     "id", "title", "artist", "album", "album_artist", "track_no", "disc_no",
-    "year", "genre", "duration_s", "format", "bitrate", "samplerate",
+    "year", "genre", "duration_s", "format", "codec", "bitrate", "samplerate",
     "channels", "bpm", "replaygain_db", "dynamic_range_db",
     "needs_attention", "indexed_at",
 )
@@ -322,8 +341,21 @@ def connect(path):
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # Fresh vs existing is decided BEFORE the schema lands, because it's the
+    # fork the seam turns on: a fresh file gets SCHEMA (already the end
+    # state) and is stamped straight to SCHEMA_VERSION -- replaying
+    # migrations against it would ALTER-in columns SCHEMA already mirrors
+    # and die on "duplicate column". An existing file replays only what its
+    # stamp says it owes. This surfaced with the first real migration
+    # (issue #149); the empty-MIGRATIONS era never exercised it.
+    fresh = conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master "
+        "WHERE type='table' AND name='tracks'").fetchone()[0] == 0
     conn.executescript(SCHEMA)
-    migrate(conn)
+    if fresh:
+        conn.execute("PRAGMA user_version=%d" % SCHEMA_VERSION)
+    else:
+        migrate(conn)
     conn.commit()
     return conn
 
@@ -338,7 +370,18 @@ def migrate(conn):
     current = conn.execute("PRAGMA user_version").fetchone()[0]
     applied = []
     for version, sql in pending_migrations(current):
-        conn.executescript(sql)
+        try:
+            conn.executescript(sql)
+        except sqlite3.OperationalError as e:
+            # "duplicate column" means the schema already matches this step
+            # -- the crash window between connect()'s executescript and its
+            # stamp, where DDL landed but the version didn't. The column
+            # being there IS the step's end state, so stamp and move on;
+            # anything else is a real failure and stays loud.
+            if "duplicate column" not in str(e):
+                raise
+            print("[music] migration %d already applied (%s) -- stamping"
+                  % (version, e))
         # PRAGMA won't take a bound parameter; version is ours, never input.
         conn.execute("PRAGMA user_version=%d" % version)
         applied.append(version)
@@ -466,7 +509,7 @@ def track_info(conn, track_id):
     into a 404, not an exception, because an unknown id is a wrong URL, not a
     broken daemon."""
     row = conn.execute(
-        "SELECT id, title, artist, album, duration_s, format "
+        "SELECT id, title, artist, album, duration_s, format, codec "
         "FROM tracks WHERE id = ?", (track_id,)).fetchone()
     return dict(row) if row else None
 
@@ -481,6 +524,27 @@ def file_for_track(conn, track_id):
         "SELECT path, size, mtime FROM track_files WHERE track_id = ? "
         "ORDER BY path LIMIT 1", (track_id,)).fetchone()
     return dict(row) if row else None
+
+
+def set_codec(conn, track_id, codec):
+    """Record what a probe found inside one m4a/mp4 container. The backfill's
+    writer (issue #149) -- one UPDATE per probed file rather than a re-index,
+    because the codec lives in the header and re-reading 16k full files to
+    learn 4 bytes each would turn minutes into hours."""
+    conn.execute("UPDATE tracks SET codec = ? WHERE id = ?", (codec, track_id))
+
+
+def tracks_missing_codec(conn):
+    """(track_id, path) for every m4a/mp4 track not yet probed -- the
+    backfill's worklist. Lowest path per track, file_for_track's determinism
+    rule: which copy gets probed is irrelevant (same container, same codec),
+    so pick the same one every run."""
+    rows = conn.execute(
+        "SELECT t.id AS track_id, MIN(f.path) AS path "
+        "FROM tracks t JOIN track_files f ON f.track_id = t.id "
+        "WHERE t.format IN ('m4a', 'mp4') AND t.codec IS NULL "
+        "GROUP BY t.id ORDER BY t.id")
+    return [(r["track_id"], r["path"]) for r in rows]
 
 
 def counts(conn):
