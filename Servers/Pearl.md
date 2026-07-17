@@ -24,7 +24,8 @@ outage brings her back without anyone going downstairs.
 | Music     | `music-daemon`    | 8090 (HTTP)                    | Playback daemon (issue #129): streams the catalog, drives the Denon over DLNA, writes `play_history` |
 | Jukebox   | `music-app`       | 3001 (HTTP)                    | The music player UI (issue #131), production build (`next start`) — http://192.168.1.64:3001 |
 | Deploys   | `merle-autodeploy`| —                              | Deploy watcher (issue #95): polls origin/main, pulls + restarts the Merle units on merge |
-| Pi-hole   | `pihole-FTL`      | 53, 67 (DHCP), 80, 443         | Household DNS + DHCP                                           |
+| Caddy     | `caddy`           | 80 (HTTP)                      | The front door (issue #141): named URLs instead of ports — `pearl/admin` → Pi-hole, `mcc.lan` → :3000, `music.lan` → :3001 |
+| Pi-hole   | `pihole-FTL`      | 53, 67 (DHCP), web on 127.0.0.1:8081 | Household DNS + DHCP; admin UI reached through Caddy at `pearl/admin` |
 
 Not here: the perception daemon and camera (those live on bluejay,
 `192.168.1.79` — they need the GPU), and Jim, the second narrator (he lives
@@ -49,6 +50,7 @@ systemctl status mcc-dashboard
 systemctl status music-daemon
 systemctl status music-app
 systemctl status merle-autodeploy
+systemctl status caddy
 systemctl status pihole-FTL
 ```
 
@@ -123,10 +125,13 @@ The **MCC is different** — see The MCC dashboard below. Pull + restart is
 sudo ss -tlnp
 ```
 
-Expected: 22 (ssh), 53 (pihole), 80/443 (pihole web), 1883 + 9001 (mosquitto),
-3000 (mcc-dashboard), 3001 (music-app), 8090 (music-daemon). Anything else
-deserves a question. (Marlin, Willard, and the frame archiver listen on
-nothing — they only talk to the broker.)
+Expected: 22 (ssh), 53 (pihole), 80 (caddy), 1883 + 9001 (mosquitto),
+3000 (mcc-dashboard), 3001 (music-app), 8090 (music-daemon), and
+127.0.0.1:8081 (pihole web, loopback only — Caddy is the only way in).
+Nothing on 443: Caddy runs plain HTTP on the LAN (`auto_https off`), and
+TLS is the epic's Deferred section. Anything else deserves a question.
+(Marlin, Willard, and the frame archiver listen on nothing — they only talk
+to the broker.)
 
 ---
 
@@ -777,9 +782,69 @@ unit over; the browser never sees this address (the app proxies
 
 ---
 
+## The front door (Caddy)
+
+Unit: `caddy` (the stock apt unit — it already runs `/usr/bin/caddy run
+--config /etc/caddy/Caddyfile` and enables on install, so unlike the Merle
+units there was nothing to write).
+Config: `/etc/caddy/Caddyfile` — **canonical copy in the repo at
+`Servers/Caddyfile`**, same arrangement as this document itself. Changing it
+means editing the repo copy, then:
+
+```
+sudo cp ~/project-squirrel/Servers/Caddyfile /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+```
+
+(`reload` is graceful — Caddy re-reads config without dropping connections.
+The autodeploy watcher does *not* apply Caddyfile changes; the copy is a
+deliberate manual step, because a bad reverse-proxy config landing itself on
+merge could take every web surface down at once.)
+
+One front door on port 80 (issue #141, epic #110 Phase 1): named URLs
+instead of memorized ports, and the single choke point where TLS/auth would
+be added later without touching any app. Plain HTTP on the LAN
+(`auto_https off`), so **nothing listens on 443** — that's expected, not a
+gap.
+
+What routes where:
+
+| You type | Caddy does |
+| --- | --- |
+| `pearl/admin` (or `.64/admin`) | proxies Pi-hole's admin on loopback:8081 (`/api` rides along — the v6 admin UI calls it) |
+| `pearl/` | 302 → `/admin` for now; the Homestead launchpad takes over `/` → `/home` in Phase 3 (#143) |
+| `mcc/` or `mcc.lan` | proxies the MCC dashboard (:3000) |
+| `music/` or `music.lan` | proxies the music app (:3001) |
+
+The short names work because the house's DHCP hands out `lan` as the search
+domain, so a desktop typing `mcc/` really asks for `mcc.lan` — but the Host
+header still says what was typed, which is why the Caddyfile lists both
+spellings for every site. Phones don't reliably apply the suffix; use the
+full `.lan` names there (the launchpad's tiles do).
+
+The names themselves live in Pi-hole (Settings → Local DNS Records):
+`mcc.lan` and `music.lan`, both → `192.168.1.64`. `pearl.lan` already
+resolved before any of this and needed nothing.
+
+**Not proxied on purpose**: the broker's WebSocket (:9001) — browsers speak
+MQTT to it directly and the MCC's `NEXT_PUBLIC_MERLE_MQTT_WS` names it
+absolutely (whether Caddy should carry it is Phase 4's recorded decision,
+not this phase's); the music daemon (:8090) — only the Denon and the music
+app's server side talk to it.
+
+Health check from anything on the LAN:
+
+```
+curl -sI http://mcc.lan/ | head -1        # HTTP/1.1 200 OK
+curl -sI http://pearl/admin/ | head -1    # 200 or a login redirect — either means alive
+```
+
+---
+
 ## Pi-hole
 
-Web UI: http://192.168.1.64/admin
+Web UI: http://pearl/admin (through Caddy; the web server itself sits on
+loopback:8081 since issue #141 and is unreachable directly from the LAN)
 
 Pearl is DNS and DHCP for the whole house. The AT&T gateway (BGW,
 `192.168.1.254`) won't let you set DHCP DNS servers, so its DHCP is disabled
@@ -795,10 +860,13 @@ pihole disable 5m            # pause blocking, auto-resume
 pihole setpassword
 ```
 
-Static DNS records: `/etc/pihole/custom.list` — for anything with a static
-IP that never speaks DHCP (Pearl herself, the camera, the gateway). Devices
-that lease from Pi-hole register their hostnames automatically; Pearl doesn't,
-which is why she's in that file.
+Static DNS records: Settings → Local DNS Records in the web UI (the file
+behind it is `/etc/pihole/hosts/custom.list` — v6 moved it into `hosts/`) —
+for anything with a static IP that never speaks DHCP (Pearl herself, the
+camera, the gateway), plus the front door's named URLs (`mcc.lan`,
+`music.lan` — see The front door above). Devices that lease from Pi-hole
+register their hostnames automatically; Pearl doesn't, which is why she's in
+that file.
 
 Static DHCP leases: in the web UI, Settings → DHCP.
 bluejay `.79`, merle `.103`.
@@ -839,6 +907,7 @@ sudo tar czf ~/pearl-config-$(date +%F).tar.gz \
     /etc/systemd/system/willard-weather.service \
     /etc/systemd/system/mcc-dashboard.service \
     /etc/systemd/system/mcc-dashboard.service.d/ \
+    /etc/caddy/ \
     /etc/netplan/
 ```
 
