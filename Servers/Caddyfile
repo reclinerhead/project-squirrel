@@ -29,10 +29,18 @@ http://pearl, http://pearl.lan, http://192.168.1.64 {
 		reverse_proxy 127.0.0.1:8081
 	}
 
-	# Until the Homestead launchpad lands at /home (Phase 3, issue #143),
-	# the root points at the one thing living here. Phase 3 replaces this
-	# with `redir / /home` + a file_server for launchpad/.
-	redir / /admin 302
+	# The Homestead launchpad (issue #143): the front door's face, static
+	# files served straight from the checkout. A merge deploys it by pull
+	# alone -- there is no build, so autodeploy needs no gate for it, and
+	# "it deploys by doing nothing" is correct, not broken.
+	redir /home /home/ 308
+	handle_path /home/* {
+		root * /home/todd/project-squirrel/launchpad
+		file_server
+	}
+
+	# The bookmarkable front door: pearl -> the porch.
+	redir / /home/ 302
 }
 
 # The MCC dashboard. Type "mcc/" on a desktop and the .lan suffix does the

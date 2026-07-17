@@ -811,10 +811,17 @@ What routes where:
 
 | You type | Caddy does |
 | --- | --- |
+| `pearl/` | 302 → `/home/` — the Homestead launchpad, the bookmarkable front door (issue #143) |
+| `pearl/home/` | serves `~/project-squirrel/launchpad/` as static files, straight from the checkout |
 | `pearl/admin` (or `.64/admin`) | proxies Pi-hole's admin on loopback:8081 (`/api` rides along — the v6 admin UI calls it) |
-| `pearl/` | 302 → `/admin` for now; the Homestead launchpad takes over `/` → `/home` in Phase 3 (#143) |
 | `mcc/` or `mcc.lan` | proxies the MCC dashboard (:3000) |
 | `music/` or `music.lan` | proxies the music app (:3001) |
+
+**Homestead deploys by pull alone** — it's static files with no build step,
+so `merle-autodeploy`'s ordinary `git pull` *is* its deploy; no gate, no
+restart, nothing in the watcher's log. That's correct, not broken. Adding a
+tile is one entry in `launchpad/tiles.json` (merge → pull → refresh); the
+page fetches it with `cache: no-store`, so a refresh is enough.
 
 The short names work because the house's DHCP hands out `lan` as the search
 domain, so a desktop typing `mcc/` really asks for `mcc.lan` — but the Host

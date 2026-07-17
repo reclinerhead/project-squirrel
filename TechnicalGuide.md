@@ -344,9 +344,39 @@ door should carry it is Phase 4's recorded decision.
 Canonical Caddyfile: `Servers/Caddyfile` in the repo; live copy
 `/etc/caddy/Caddyfile`, synced **manually on purpose** (a reverse-proxy
 config that deploys itself on merge could take every web surface down at
-once — see Pearl.md § The front door for the two-line sync). Phase 3 (#143)
-adds the Homestead launchpad at `/home` with `pearl/` redirecting there;
-until then `pearl/` bounces to `/admin`.
+once — see Pearl.md § The front door for the two-line sync).
+
+## Homestead — the launchpad (epic #110 Phase 3 — issue #143)
+
+The front door's face: `pearl/` 302s to `/home/`, and that redirect is the
+one bookmark the whole system needs — every module is a tile from there.
+**Homestead** is the app's settled name (it was the epic's working title;
+"Trailhead" was the working name it replaces).
+
+`launchpad/` is a top-level peer of `mcc/` and `music/` and is deliberately
+**not a Next app**: four hand-rolled files (`index.html`, `styles.css`,
+`app.js`, `tiles.json`) plus two self-hosted font subsets, served by Caddy's
+`file_server` straight from pearl's checkout. No framework, no build — which
+means **a merge deploys it by `git pull` alone**; `merle-autodeploy` needs
+no gate for it and its journal shows nothing, and that's correct, not
+broken. **Adding a module is one `tiles.json` entry, not a code change**
+(`{name, icon, color, url, description, status: live|soon}`; file order is
+porch order; an unknown/omitted icon key falls back to the signpost glyph,
+so config-alone stays true even for a tile with no bespoke icon; `soon`
+tiles render dimmed and inert). The page fetches `tiles.json` with
+`cache: no-store` so edit-and-refresh never serves a stale porch.
+
+Design language is the MCC's "Ranger Station, Night Watch" one room over —
+same tokens/topo background/type pairing, **copied, not abstracted** (the
+music app's precedent). The tiles are trail placards, not a Card-Card-Card
+grid: each wears a painted **blaze** in the module's own color (hue carries
+identity, the narrators' voice-color idiom — Merle squirrel-orange, Weather
+rain-blue, Music hi-res gold, Mole earth-brown, Hearth ember, and the
+coming-soon pair dimmed to a whisper). Fonts are the same Fraunces/Sometype
+Mono subsets next/font self-hosts for the MCC, with its fallback metrics
+copied so the swap can't shift layout; the grid reserves two placard rows
+before `tiles.json` lands (house rule #1). Live status lamps on the tiles
+are Phase 4 (v1.5), deliberately absent here.
 
 ## Repo layout
 
@@ -371,6 +401,7 @@ until then `pearl/` bounces to `/admin`.
 - `models/`: deployed-weights shelf — `current.pt` (what the app loads) plus versioned `merle-trainNN.pt` copies. Only its README is tracked; the `.pt` files are gitignored. See `models/README.md`.
 - `mcc/`: Next.js 16 App Router, TypeScript, Tailwind 4, pnpm. Tests: Vitest (`pnpm test`), CI runs them on every PR (`.github/workflows/tests.yml`).
 - `music/`: the music player UI (epic #115 / issues #116, #129) — same stack as `mcc/`, own lockfile and CI job (`web-music`), reading the real catalog and driving the playback daemon. See the "Music app" section above.
+- `launchpad/`: Homestead, the house launchpad (issue #143) — deliberately static (no framework, no build, no lockfile, no CI job), served by Caddy from pearl's checkout. See the "Homestead" section above.
 - Not in git: datasets (`training/`), weights (`*.pt`, including `models/`), captures (`hard_frames/`, `snapshots/`, `debug_frames/`, `frames/` — the still-shot archive on pearl), SQLite stores (`*.db` + WAL companions — `merle.db` on bluejay, `weather.db` and `music.db` on pearl), `.venv/`. Gitignored means *state*, not *disposable*: `weather.db` cannot be regenerated (see the weather post above), and neither can `music.db`'s `ratings` / `play_history` — the rest of that file rebuilds from the NAS in ~3 hours, those two tables don't rebuild at all.
 
 ## Project context
