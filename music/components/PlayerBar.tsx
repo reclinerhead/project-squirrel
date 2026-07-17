@@ -124,7 +124,7 @@ export function PlayerBar() {
           {/* left: now playing -- skeleton keeps the exact box when idle */}
           <div className="flex min-w-0 items-center gap-3">
             <div className="relative h-12 w-12 shrink-0 overflow-hidden rounded-sm border border-line bg-panel2">
-              {track && <CoverArt id={track.albumId} title={track.album} />}
+              {track && <CoverArt id={track.albumId} title={track.album} artHash={track.artHash} />}
             </div>
             <div className="min-w-0">
               <div className="truncate text-sm text-ink">

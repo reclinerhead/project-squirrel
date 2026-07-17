@@ -31,13 +31,26 @@ export function ArtistView({ artist, topTracks }: { artist: Artist; topTracks: T
 
   return (
     <div className="space-y-8">
-      {/* hero: the artist's own hue as a dark wash, name in display type */}
+      {/* hero: the artist's image (issue #153) as a washed backdrop -- the
+          AlbumView idiom -- with the hue gradient as the artless fallback
+          AND the legibility layer over the photo either way */}
       <section
         className="panel relative overflow-hidden rounded-sm border border-line"
         style={{
           background: `linear-gradient(160deg, hsl(${hue1} 40% 20%) 0%, var(--panel) 70%)`,
         }}
       >
+        {artist.artHash && (
+          <div className="absolute inset-0" aria-hidden>
+            {/* eslint-disable-next-line @next/next/no-img-element -- see CoverArt */}
+            <img
+              src={`/api/art/${artist.artHash}/large`}
+              alt=""
+              className="h-full w-full object-cover opacity-35"
+            />
+            <div className="absolute inset-0 bg-gradient-to-t from-panel via-panel/60 to-transparent" />
+          </div>
+        )}
         <div className="relative px-5 pb-5 pt-16 sm:px-6 sm:pt-24">
           <h1 className="text-4xl text-ink sm:text-5xl" style={{ fontFamily: "var(--font-display)" }}>
             {artist.name}
@@ -114,7 +127,7 @@ export function ArtistView({ artist, topTracks }: { artist: Artist; topTracks: T
             .map((al) => (
               <Link key={al.id} href={`/album/${al.id}`} className="group min-w-0">
                 <span className="relative block aspect-square overflow-hidden rounded-sm border border-line transition-colors group-hover:border-linebright">
-                  <CoverArt id={al.id} title={al.title} />
+                  <CoverArt id={al.id} title={al.title} artHash={al.artHash} />
                 </span>
                 <span className="mt-2 block truncate text-sm text-ink">{al.title}</span>
                 <span className="block text-xs text-inkfaint">{al.year}</span>

@@ -11,7 +11,7 @@ export function AlbumCard({ album }: { album: Album }) {
   return (
     <Link href={`/album/${album.id}`} className="group block min-w-0">
       <span className="relative block aspect-square overflow-hidden rounded-sm border border-line transition-colors group-hover:border-linebright">
-        <CoverArt id={album.id} title={album.title} />
+        <CoverArt id={album.id} title={album.title} artHash={album.artHash} />
       </span>
       <span className="mt-2 block truncate text-sm text-ink">{album.title}</span>
       <span className="block truncate text-xs text-inkfaint">
@@ -25,7 +25,15 @@ export function ArtistCard({ artist }: { artist: Artist }) {
   return (
     <Link href={`/artist/${artist.id}`} className="group block min-w-0">
       <span className="relative block aspect-square overflow-hidden rounded-full border border-line transition-colors group-hover:border-linebright">
-        {artist.albums[0] && <CoverArt id={artist.albums[0].id} title={artist.name} />}
+        {/* the artist's own image (promoted cover today) wins; their first
+            album's art is the fallback, and its SVG the fallback's fallback */}
+        {artist.albums[0] && (
+          <CoverArt
+            id={artist.albums[0].id}
+            title={artist.name}
+            artHash={artist.artHash ?? artist.albums[0].artHash}
+          />
+        )}
       </span>
       <span className="mt-2 block truncate text-center text-sm text-inkdim transition-colors group-hover:text-ink">
         {artist.name}

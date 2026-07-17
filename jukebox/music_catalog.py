@@ -102,6 +102,28 @@ PLAY_SKIPPED = "skipped"
 CODEC_ALAC = "alac"
 CODEC_AAC = "aac"
 
+# Where a piece of art came from (issue #153). Provenance is load-bearing,
+# not bookkeeping: `owner` rows are the listener's own choice (an uploaded
+# band photo, a promoted cover) and NO automated pass may ever overwrite one
+# -- the upsert enforces it, so the rule can't be forgotten at a call site.
+# `derived` marks a machine's guess (the promoted-cover artist image), which
+# re-runs MAY refresh.
+ART_EMBEDDED = "embedded"
+ART_FOLDER = "folder"
+ART_DERIVED = "derived"
+ART_OWNER = "owner"
+
+# THE ALBUM KEY, shared verbatim with the music app. An album's identity is
+# the display pair the GUI derives (lib/catalog-rows.ts albumIdOf, before its
+# base64url): COALESCE'd artist + U+241F + COALESCE'd title. This SQL is that
+# derivation, and music/lib/db.ts carries its twin -- the paired fixture
+# tests on both sides are what keep them from drifting. U+241F (symbol for
+# unit separator) because no album title contains it.
+ALBUM_KEY_SQL = (
+    "COALESCE(NULLIF(t.album_artist, ''), t.artist, 'Unknown Artist') || "
+    "'␟' || COALESCE(NULLIF(t.album, ''), 'Unknown Album')"
+)
+
 # `id` is the audio-stream hash: stable across a tag edit AND across a move.
 # Everything that matters -- ratings, history, Phase 1's analysis -- hangs off
 # it. Tags are a snapshot taken at index time, never re-read from the file at
@@ -173,6 +195,24 @@ CREATE TABLE IF NOT EXISTS play_history (
 );
 CREATE INDEX IF NOT EXISTS idx_play_history_track ON play_history(track_id);
 CREATE INDEX IF NOT EXISTS idx_play_history_at ON play_history(played_at);
+
+CREATE TABLE IF NOT EXISTS album_art (
+    album_key  TEXT PRIMARY KEY,
+    art_hash   TEXT NOT NULL,
+    source     TEXT NOT NULL,
+    w          INTEGER,
+    h          INTEGER,
+    updated_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS artist_art (
+    artist     TEXT PRIMARY KEY,
+    art_hash   TEXT NOT NULL,
+    source     TEXT NOT NULL,
+    w          INTEGER,
+    h          INTEGER,
+    updated_at INTEGER
+);
 """
 
 # Ordered, append-only. Index N runs to reach user_version N+1, so a file at
@@ -185,6 +225,11 @@ CREATE INDEX IF NOT EXISTS idx_play_history_at ON play_history(played_at);
 # migration (SCHEMA was born at 1, files were stamped straight to it), so
 # index 0 is a no-op placeholder that keeps that arithmetic honest. Deployed
 # files all sit at 1 and replay only what's above them.
+#
+# NEW TABLES NEVER LAND HERE (issue #153's album_art/artist_art set the
+# precedent): CREATE TABLE IF NOT EXISTS in SCHEMA self-applies to existing
+# files on every connect. This seam is for ALTERs only -- do not cargo-cult
+# a no-op step for a table addition.
 MIGRATIONS = (
     "-- version 1 is SCHEMA's birth state; nothing to replay",
     # 1 -> 2 (issue #149): the codec column, the seam's first real customer
@@ -547,12 +592,80 @@ def tracks_missing_codec(conn):
     return [(r["track_id"], r["path"]) for r in rows]
 
 
+def set_album_art(conn, album_key, art_hash, source, w, h, at):
+    """Record an album's art. THE OWNER RULE LIVES IN THE SQL: an existing
+    row with source='owner' is never touched -- the listener's own pick
+    survives every automated re-run by construction, not by caller
+    discipline (issue #153). Everything else refreshes."""
+    conn.execute(
+        "INSERT INTO album_art (album_key, art_hash, source, w, h, "
+        "updated_at) VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(album_key) DO UPDATE SET "
+        "art_hash=excluded.art_hash, source=excluded.source, w=excluded.w, "
+        "h=excluded.h, updated_at=excluded.updated_at "
+        "WHERE album_art.source != ?",
+        (album_key, art_hash, source, w, h, at, ART_OWNER))
+
+
+def set_artist_art(conn, artist, art_hash, source, w, h, at):
+    """Record an artist's image, same owner rule as set_album_art."""
+    conn.execute(
+        "INSERT INTO artist_art (artist, art_hash, source, w, h, "
+        "updated_at) VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(artist) DO UPDATE SET "
+        "art_hash=excluded.art_hash, source=excluded.source, w=excluded.w, "
+        "h=excluded.h, updated_at=excluded.updated_at "
+        "WHERE artist_art.source != ?",
+        (artist, art_hash, source, w, h, at, ART_OWNER))
+
+
+def albums_missing_art(conn):
+    """The art pass's worklist: {album_key: [paths]} for every album with no
+    album_art row. Worklist-driven is THE reusability rule (issue #153) --
+    after ingesting five new albums, this returns exactly those five, and a
+    full-coverage catalog returns nothing. Paths sorted so the probe order
+    (and therefore a tie on identical-size images) is stable across runs."""
+    rows = conn.execute(
+        f"SELECT {ALBUM_KEY_SQL} AS album_key, f.path "
+        f"FROM tracks t JOIN track_files f ON f.track_id = t.id "
+        f"WHERE NOT EXISTS (SELECT 1 FROM album_art aa "
+        f"                  WHERE aa.album_key = {ALBUM_KEY_SQL}) "
+        f"ORDER BY album_key, f.path")
+    out = {}
+    for r in rows:
+        out.setdefault(r["album_key"], []).append(r["path"])
+    return out
+
+
+def artists_missing_art(conn):
+    """The promotion pass's worklist: for each artist with no artist_art
+    row, their albums' art candidates as (artist, album_key, art_hash, w, h,
+    score) rows -- score is the album's summed thumb values, so "their
+    most-rated album's cover" is data the caller just sorts (pick highest
+    score, tie-break lowest album_key: deterministic across runs, the
+    issue's contract)."""
+    rows = conn.execute(
+        f"SELECT COALESCE(NULLIF(t.album_artist, ''), t.artist, "
+        f"       'Unknown Artist') AS artist, "
+        f"       {ALBUM_KEY_SQL} AS album_key, "
+        f"       aa.art_hash, aa.w, aa.h, "
+        f"       COALESCE(SUM(r.value), 0) AS score "
+        f"FROM tracks t "
+        f"JOIN album_art aa ON aa.album_key = {ALBUM_KEY_SQL} "
+        f"LEFT JOIN ratings r ON r.track_id = t.id "
+        f"WHERE NOT EXISTS (SELECT 1 FROM artist_art x WHERE x.artist = "
+        f"      COALESCE(NULLIF(t.album_artist, ''), t.artist, "
+        f"               'Unknown Artist')) "
+        f"GROUP BY artist, album_key")
+    return [dict(r) for r in rows]
+
+
 def counts(conn):
     """Row counts per table -- what the indexer prints when it finishes, and
     what the acceptance criteria are read against."""
     out = {}
     for table in ("tracks", "track_files", "artists", "ratings",
-                  "play_history"):
+                  "play_history", "album_art", "artist_art"):
         out[table] = conn.execute(
             "SELECT COUNT(*) FROM %s" % table).fetchone()[0]
     return out
