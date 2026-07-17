@@ -681,7 +681,9 @@ cannot be rebuilt**; `music.db` is to music what `weather.db` is to the
 station, and it belongs in whatever backs that one up.
 
 The venv needs `fastapi` + `uvicorn` (installed 2026-07-16; they're in
-`requirements.txt`, they'd just never been needed on pearl before).
+`requirements.txt`, they'd just never been needed on pearl before). The
+browser output additionally needs **`ffmpeg`** (apt, installed 2026-07-17)
+for the ALAC→FLAC repack — see the media-cache section below.
 
 The unit, following the house pattern (crib from `willard-weather`):
 
@@ -708,6 +710,46 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
+The browser output's env (issue #149) rides a drop-in rather than an edit to
+the unit above — the box's established pattern (autodeploy's `music.conf`):
+
+```
+# /etc/systemd/system/music-daemon.service.d/cache.conf
+[Service]
+Environment=MERLE_MUSIC_CACHE=/srv/media-cache/music
+# Optional; the in-code default is 40:
+# Environment=MERLE_MUSIC_CACHE_CAP_GB=40
+```
+
+**Unset `MERLE_MUSIC_CACHE` is the kill switch**: the daemon runs
+Denon-only and the picker's "This browser" row reads unavailable. Set but
+missing (LV didn't mount) kills the daemon loudly at startup, on purpose.
+
+### The media-cache LV (issue #149)
+
+`/srv/media-cache` is a 48 GiB ext4 LV (`ubuntu-vg/media-cache`, carved
+2026-07-17 from the mSATA's unallocated half; ~10 GiB VG slack remains for
+`lvextend`) mounted `noatime` via fstab, owned `todd:todd`. It is **shared
+fast local storage for multimedia caching, not music's volume**: each tenant
+gets a subdirectory and manages its own retention — `music/` (the FLAC
+cache, LRU-capped at 40 GiB, swept by the daemon) today; Earl's bird-audio
+buffers (#133) and short-term rover audio are the anticipated next tenants.
+Re-budget the per-tenant caps when a second one lands. Everything on it is
+derived and disposable — it needs no backup, ever.
+
+### Codec backfill (issue #149, one-time)
+
+`format` can't tell ALAC from purchase-AAC inside `.m4a`, and the browser
+policy needs to know. New files get their codec at index time; rows indexed
+before the column existed get it from a header-only pass (minutes over SMB):
+
+```
+cd ~/project-squirrel && MERLE_MUSIC_DB=/home/todd/project-squirrel/music.db \
+    venv/bin/python -m jukebox.music_index --codecs
+```
+
+Resumable and re-runnable for free — the worklist is whatever is still NULL.
+
 **Both uvicorn flags are load-bearing.** `--no-access-log`: the music GUI
 polls `/state` (issue #125's flood, preempted). `--timeout-graceful-shutdown
 3`: the **Denon holds `/stream` open for the whole song**, and without the
@@ -722,8 +764,10 @@ room. Fail-loudly config, no default.
 Hardware notes, so nobody re-diagnoses the AVR: it answers `GetProtocolInfo`
 with HTTP 500 (capability is a table in the code, not a negotiation), and it
 refuses AVTransport `Seek` on external streams (the GUI restarts the track
-instead; real scrubbing arrives with the Phase 2b browser output). It plays
-ALAC natively and untranscoded — that's the whole point of this output.
+instead; the browser output is where real scrubbing lives — Range against
+the cached FLAC). It plays ALAC natively and untranscoded — that's the whole
+point of that output, and the browser path never touches it: `?output=`
+defaults to `denon`, raw bytes, byte-identical to 2a.
 
 To run it by hand (stop the service first):
 
@@ -732,6 +776,7 @@ cd ~/project-squirrel && \
 MERLE_MQTT=localhost:1883 \
 MERLE_MUSIC_DB=/home/todd/project-squirrel/music.db \
 MERLE_MUSIC_STREAM_BASE=http://192.168.1.64:8090 \
+MERLE_MUSIC_CACHE=/srv/media-cache/music \
 venv/bin/python -m uvicorn jukebox.music_daemon:app --host 0.0.0.0 \
     --port 8090 --no-access-log --timeout-graceful-shutdown 3
 ```

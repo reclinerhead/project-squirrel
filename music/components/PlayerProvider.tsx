@@ -2,12 +2,23 @@
 
 // Client-side player state (issue #116), wired to the real daemon (issue
 // #129). The queue lives HERE -- the daemon knows one track at a time, on
-// purpose (a server-side queue is Phase 3's engine's job, not plumbing's) --
-// but time and truth come from pearl: a 2s poll of /api/player/state supplies
-// the position, and "the track ended" is observed (the daemon's watcher
-// adjudicated it and cleared its slate), never simulated. The v1 fake clock
-// is gone; if the poll can't reach the daemon, the bar freezes at the last
-// known position rather than inventing progress.
+// purpose (a server-side queue is Phase 3's engine's job, not plumbing's).
+//
+// TWO TRANSPORTS, ONE PROVIDER (issue #149). On the Denon, time and truth
+// come from pearl: a 2s poll of /api/player/state supplies the position, and
+// "the track ended" is observed (the daemon's watcher adjudicated it),
+// never simulated -- if the poll can't reach the daemon, the bar freezes
+// rather than inventing progress. On the BROWSER output the hidden <audio>
+// element below IS the transport: position is its currentTime, the end is
+// its `ended` event, seeking is real (Range against the cached FLAC), and
+// the poll stays off. History still lands on pearl either way -- the
+// element can't be polled from there, so this side REPORTS each session's
+// end (POST report) and the daemon adjudicates completed-vs-skipped with
+// the same rule the watcher uses.
+//
+// The audio src comes from the daemon's own stream_base (fetched once via
+// the proxy), NOT through a Next route: piping audio through the app server
+// would re-buffer the stream and break Range for no gain.
 //
 // The seed queue arrives as a server-rendered prop from layout.tsx (the app
 // opens mid-album on whatever played last, paused) -- this component can't
@@ -94,6 +105,7 @@ type DaemonState = {
   transport: string;
   position_s: number | null;
   track: { id: string } | null;
+  stream_base?: string;
 };
 
 /** One engine fill: TrackRow shapes off the wire, mapped through the same
@@ -128,14 +140,22 @@ export function PlayerProvider({
   const [elapsedS, setElapsedS] = useState(0);
   const [shuffle, setShuffle] = useState(false);
   const [repeat, setRepeat] = useState<"off" | "all" | "one">("off");
-  const [outputId, setOutputId] = useState("denon");
+  const [outputId, setOutputIdState] = useState("denon");
+  // The browser transport (issue #149): the hidden element, the daemon's
+  // stream base (fetched once, on first need), and which track the element
+  // currently holds -- the outgoing session that gets a skip report when
+  // the listener moves on.
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const streamBaseRef = useRef<string | null>(null);
+  const browserLoadedRef = useRef<string | null>(null);
   // Session edits only -- the catalog's answer arrives on each Track and is
   // the baseline (issue #135). Not seeded from the queue: a map that started
   // as the truth would have to be re-seeded on every navigation, and the
   // tracks already carry it.
   const [ratings, setRatings] = useState<Record<string, Rating>>({});
-  // Whether the daemon currently holds OUR track -- distinguishes "paused"
-  // (resumable with a bare play) from "never started / already adjudicated".
+  // Whether the current transport holds OUR track -- the daemon's slate on
+  // the Denon, the <audio> element's src on the browser. Distinguishes
+  // "paused" (resumable in place) from "never started / already adjudicated".
   const loadedRef = useRef(false);
   // Radio mode: the seed the engine keeps refilling from, null when the
   // queue is an ordinary album/artist sequence. Any explicit playTracks
@@ -146,12 +166,87 @@ export function PlayerProvider({
   const view = useMemo(() => queueView(sequence, currentIndex), [sequence, currentIndex]);
   const current = view.current;
 
+  /** The daemon's LAN-visible stream URL base, learned from /state on first
+   * need and kept for the session -- server config stays server-side (the
+   * proxy's rule); this is the one value the <audio> element genuinely
+   * needs, because the audio itself must not ride the proxy. */
+  const streamBase = async (): Promise<string | null> => {
+    if (streamBaseRef.current) return streamBaseRef.current;
+    try {
+      const res = await fetch("/api/player/state", { cache: "no-store" });
+      if (!res.ok) return null;
+      const s = (await res.json()) as DaemonState;
+      streamBaseRef.current = s.stream_base ?? null;
+    } catch {
+      return null;
+    }
+    return streamBaseRef.current;
+  };
+
+  /** Report the element's current session to play_history and forget it.
+   * Fire-and-forget: history is pearl's bookkeeping, and a lost report
+   * costs one row, never playback. */
+  const reportBrowserSession = () => {
+    const el = audioRef.current;
+    const id = browserLoadedRef.current;
+    if (!el || !id) return;
+    if (el.currentTime > 0) {
+      void post("report", { track_id: id, position_s: el.currentTime });
+    }
+    browserLoadedRef.current = null;
+  };
+
   const startTrack = async (track: Track, output: string) => {
     setElapsedS(0);
-    setIsPlaying(true); // optimistic; corrected below if the daemon refuses
+    setIsPlaying(true); // optimistic; corrected below if the start fails
+    if (output === "browser") {
+      const el = audioRef.current;
+      const base = await streamBase();
+      if (!el || !base) {
+        setIsPlaying(false); // daemon unreachable: inert, not broken
+        return;
+      }
+      // Moving on mid-track is the skip signal -- same fact the daemon's
+      // own /play records for the Denon, reported here before the src swap
+      // tears the session down.
+      reportBrowserSession();
+      browserLoadedRef.current = track.id;
+      el.src = `${base}/stream/${encodeURIComponent(track.id)}?output=browser`;
+      try {
+        await el.play();
+        loadedRef.current = true;
+      } catch {
+        // Autoplay refusals and dead streams land here; the bar goes back
+        // to paused instead of pretending.
+        loadedRef.current = false;
+        browserLoadedRef.current = null;
+        setIsPlaying(false);
+      }
+      return;
+    }
     const ok = await post("play", { track_id: track.id, output });
     loadedRef.current = ok;
     if (!ok) setIsPlaying(false);
+  };
+
+  /** What happens when the current track's session is over and the queue
+   * should move -- one rule for both transports: the poll's slate-cleared
+   * branch (Denon) and the element's `ended` event (browser) both land
+   * here, so repeat/advance behavior cannot drift between outputs. */
+  const advanceAfterEnd = () => {
+    loadedRef.current = false;
+    if (repeat === "one" && current) {
+      void startTrack(current, outputId);
+    } else if (currentIndex + 1 < sequence.length) {
+      setCurrentIndex(currentIndex + 1);
+      void startTrack(sequence[currentIndex + 1], outputId);
+    } else if (repeat === "all" && sequence.length > 0) {
+      setCurrentIndex(0);
+      void startTrack(sequence[0], outputId);
+    } else {
+      setIsPlaying(false);
+      if (current) setElapsedS(current.durationS);
+    }
   };
 
   // The poll: while we believe something is playing, ask pearl what's true.
@@ -160,6 +255,11 @@ export function PlayerProvider({
   // and THEN the queue advances -- order matters, or a fast next-click could
   // double-record.
   useEffect(() => {
+    // The browser transport doesn't poll: its truth is the <audio> element
+    // in this very tab -- timeupdate supplies the position, `ended` the
+    // advance. Polling pearl about it would be asking someone else how
+    // we're feeling.
+    if (outputId === "browser") return;
     if (!isPlaying || !current) return;
     let busy = false;
     const id = setInterval(async () => {
@@ -175,19 +275,7 @@ export function PlayerProvider({
         }
         // Our track is off the daemon's slate: it ended (or was stopped at
         // the AVR itself -- same fact, the session with this track is over).
-        loadedRef.current = false;
-        if (repeat === "one") {
-          void startTrack(current, outputId);
-        } else if (currentIndex + 1 < sequence.length) {
-          setCurrentIndex(currentIndex + 1);
-          void startTrack(sequence[currentIndex + 1], outputId);
-        } else if (repeat === "all" && sequence.length > 0) {
-          setCurrentIndex(0);
-          void startTrack(sequence[0], outputId);
-        } else {
-          setIsPlaying(false);
-          setElapsedS(current.durationS);
-        }
+        advanceAfterEnd();
       } catch {
         // network blip: keep the last known position, try again next tick
       } finally {
@@ -197,6 +285,19 @@ export function PlayerProvider({
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPlaying, current?.id, currentIndex, sequence, repeat, outputId]);
+
+  // Queue warming (issue #149): in browser mode, name the next two tracks
+  // to the daemon whenever the playhead moves, so their transcodes run
+  // while the current one plays and a queue advance is always a cache hit.
+  // Fire-and-forget -- the daemon skips raw formats and cache hits itself,
+  // and a lost warm costs a few seconds of cold start, never playback.
+  useEffect(() => {
+    if (outputId !== "browser") return;
+    const next = sequence
+      .slice(currentIndex + 1, currentIndex + 3)
+      .map((t) => t.id);
+    if (next.length > 0) void post("precache", { track_ids: next });
+  }, [outputId, currentIndex, sequence]);
 
   // The refill loop: when radio mode runs low on upcoming tracks, fetch the
   // next window with EVERYTHING this queue holds excluded -- played, playing,
@@ -254,6 +355,20 @@ export function PlayerProvider({
     },
     togglePlay: () => {
       if (!current) return;
+      if (outputId === "browser") {
+        const el = audioRef.current;
+        if (isPlaying) {
+          el?.pause(); // a pause holds the element; nothing to tell pearl
+          setIsPlaying(false);
+        } else if (loadedRef.current && el &&
+                   browserLoadedRef.current === current.id) {
+          void el.play();
+          setIsPlaying(true);
+        } else {
+          void startTrack(current, outputId);
+        }
+        return;
+      }
       if (isPlaying) {
         setIsPlaying(false);
         void post("pause");
@@ -287,13 +402,27 @@ export function PlayerProvider({
       }
     },
     seek: (s) => {
-      // Optimistic; the 2s poll restores the truth. On the Denon that means
-      // a scrub snaps back -- it refuses Seek (see prev) -- which is honest:
-      // the bar shows where the music actually is. The browser output (2b)
-      // seeks for real via Range.
+      // Optimistic; the truth restores it either way. On the Denon the 2s
+      // poll snaps a scrub back -- it refuses Seek (see prev) -- which is
+      // honest: the bar shows where the music actually is. On the browser
+      // the seek is REAL (Range against the cached FLAC); the one place the
+      // element declines is the first seconds of a cold first play, where
+      // the tail isn't transcoded yet -- timeupdate then keeps the bar on
+      // the audio's actual position rather than the wish.
       if (!current) return;
       const clamped = Math.min(Math.max(0, s), current.durationS);
       setElapsedS(clamped);
+      if (outputId === "browser") {
+        const el = audioRef.current;
+        if (el && loadedRef.current) {
+          try {
+            el.currentTime = clamped;
+          } catch {
+            // unseekable (cold stream): the element keeps playing; honest
+          }
+        }
+        return;
+      }
       if (loadedRef.current) void post("seek", { seconds: clamped });
     },
     rate: (track, click) => {
@@ -326,8 +455,52 @@ export function PlayerProvider({
     cycleRepeat: () => {
       setRepeat((r) => (r === "off" ? "all" : r === "all" ? "one" : "off"));
     },
-    setOutputId,
+    setOutputId: (id) => {
+      if (id === outputId) return;
+      // Switching outputs mid-track STOPS rather than migrates (the v1
+      // rule): the two transports don't share a position, and a silent
+      // handoff that restarts the song from zero would feel like a bug
+      // wearing a feature's name. The next play lands on the new output.
+      if (isPlaying || loadedRef.current) {
+        if (outputId === "browser") {
+          reportBrowserSession(); // the abandoned session is a skip
+          const el = audioRef.current;
+          if (el) {
+            el.pause();
+            el.removeAttribute("src");
+            el.load(); // actually release the stream, not just mute it
+          }
+        } else {
+          void post("stop");
+        }
+        loadedRef.current = false;
+        setIsPlaying(false);
+        setElapsedS(0);
+      }
+      setOutputIdState(id);
+    },
   };
 
-  return <PlayerContext.Provider value={value}>{children}</PlayerContext.Provider>;
+  return (
+    <PlayerContext.Provider value={value}>
+      {/* The browser output's transport (issue #149): parked and srcless in
+          Denon mode, the actual player in browser mode. Hidden because the
+          player bar is the UI -- this element is plumbing, and it reserves
+          no space so nothing shifts (rule #1). */}
+      <audio
+        ref={audioRef}
+        hidden
+        preload="auto"
+        onTimeUpdate={(e) => setElapsedS(e.currentTarget.currentTime)}
+        onEnded={() => {
+          // The element reached the end: report the completion (position
+          // == duration, which the daemon's outcome_for credits), then
+          // move the queue with the same rule the Denon poll uses.
+          reportBrowserSession();
+          advanceAfterEnd();
+        }}
+      />
+      {children}
+    </PlayerContext.Provider>
+  );
 }

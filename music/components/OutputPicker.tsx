@@ -1,12 +1,14 @@
 "use client";
 
 // Sound-output popover (issue #116), fed by discovery (issue #129): the rows
-// are whatever renderers the daemon actually found on the LAN, fetched from
-// /api/player/state when the popover opens. Phase 2a that means the Denon or
-// nothing -- the browser output returns in 2b with the transcode path. An
-// unreachable daemon renders one disabled row saying so: the popover reserves
-// its space either way (rule #1), and silence with no explanation is how
-// mysteries get reported as bugs.
+// are whatever outputs the daemon offers, fetched from /api/player/state when
+// the popover opens -- the discovered renderers, plus "This browser" (issue
+// #149), which the daemon lists as available exactly when its FLAC cache is
+// configured (without it the ALAC majority couldn't play, and a 62%-broken
+// output wearing a checkmark would be a lie). An unreachable daemon renders
+// one disabled row saying so: the popover reserves its space either way
+// (rule #1), and silence with no explanation is how mysteries get reported
+// as bugs.
 
 import { useEffect, useState } from "react";
 import { usePlayer } from "./PlayerProvider";
