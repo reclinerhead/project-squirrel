@@ -2195,7 +2195,12 @@ const wxFixed = (v: number | null, digits: number) =>
  * too short) renders as empty -- the slot is reserved by the row itself. */
 const TREND_GLYPH = { rising: "↗", falling: "↘", steady: "→" } as const;
 
-function WeatherPost() {
+/** The weather feed (issue #142): one bus client's worth of retained
+ * weather topics plus the staleness/presence judgements, shared by the
+ * Weather Post panel and the standalone /weather page. Each caller runs its
+ * own client — the panels' self-contained idiom; Mosquitto shrugs at a
+ * second WebSocket — so mounting the page never entangles the dashboard. */
+export function useWeatherFeed() {
   const [current, setCurrent] = useState<CurrentWeather | null>(null);
   const [history, setHistory] = useState<WeatherPoint[]>([]);
   const [forecast, setForecast] = useState<WeatherPoint[]>([]);
@@ -2286,6 +2291,39 @@ function WeatherPost() {
   const onAir =
     report !== null && now !== null && now - report.ts <= REPORT_STALE_S;
 
+  // The barometer's tendency, judged from the observed trail (issue #51).
+  const baroTrend = now !== null ? pressureTrend(history, now) : null;
+
+  return {
+    current,
+    history,
+    forecast,
+    report,
+    now,
+    busUp,
+    offline,
+    stale,
+    reporting,
+    onAir,
+    baroTrend,
+  };
+}
+
+function WeatherPost() {
+  const {
+    current,
+    history,
+    forecast,
+    report,
+    now,
+    busUp,
+    offline,
+    stale,
+    reporting,
+    onAir,
+    baroTrend,
+  } = useWeatherFeed();
+
   // Hover scrub (issue #40): pointer x as a fraction of the chart width, null
   // when the pointer is elsewhere. Everything else is derived per render.
   const [hoverFrac, setHoverFrac] = useState<number | null>(null);
@@ -2318,8 +2356,6 @@ function WeatherPost() {
   const nights = hasChart
     ? nightBands(current?.sunrise ?? null, current?.sunset ?? null, ts0, ts1)
     : [];
-  // The barometer's tendency, judged from the observed trail (issue #51).
-  const baroTrend = now !== null ? pressureTrend(history, now) : null;
 
   const round = wxRound;
 
@@ -3082,7 +3118,7 @@ function CloseIcon() {
   );
 }
 
-function WeatherStationView({
+export function WeatherStationView({
   current,
   history,
   forecast,
