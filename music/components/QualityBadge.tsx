@@ -10,11 +10,15 @@ const TIER_CLASSES: Record<Badge["tier"], string> = {
   lossy: "border-line text-inkfaint",
 };
 
+/** Text size is the CALLER's (issue #157): the album header's metadata row
+ * runs a notch bigger than the player bar's brag slot, and a size baked in
+ * here would fight the className append. The player bar's idle placeholder
+ * mirrors whatever its call site passes -- keep them in step. */
 export function QualityBadge({ badge, className }: { badge: Badge; className?: string }) {
   if (!badge.label) return null;
   return (
     <span
-      className={`stamp inline-flex items-center whitespace-nowrap rounded-full border px-2 py-0.5 text-[9px] tabular-nums ${TIER_CLASSES[badge.tier]} ${className ?? ""}`}
+      className={`stamp inline-flex items-center whitespace-nowrap rounded-full border px-2 py-0.5 tabular-nums ${TIER_CLASSES[badge.tier]} ${className ?? ""}`}
     >
       {badge.label}
     </span>

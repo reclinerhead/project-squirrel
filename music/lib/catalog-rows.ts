@@ -59,13 +59,19 @@ export function decodeAlbumId(id: string): { artist: string; album: string } | n
   return { artist: text.slice(0, i), album: text.slice(i + 1) };
 }
 
-/** The catalog's format column -> the UI's AudioFormat. The one judgement
- * call: the catalog says "m4a"/"mp4" without knowing what's inside, because
- * codec detection is Phase 1's job. Bitrate splits it honestly today -- ALAC
- * in this library runs ~700-1100 kbps, iTunes-store AAC tops out at 320 --
- * so the quality badge tells the truth for both populations. Phase 1's real
- * codec column replaces this heuristic. */
-export function formatFromCatalog(format: string | null, bitrate: number | null): AudioFormat {
+/** The catalog's format column -> the UI's AudioFormat. The catalog says
+ * "m4a"/"mp4" without saying what's inside; the CODEC column answers that
+ * for real (issue #149's stsd atom walk, wired through here in #157) -- the
+ * same provenance the daemon's needs_flac policy trusts. The bitrate split
+ * (ALAC in this library runs ~700-1100 kbps, iTunes-store AAC tops out at
+ * 320) survives only as the fallback for rows indexed before the column
+ * existed and never backfilled -- its worst case is a mislabeled pill,
+ * never a playback decision. */
+export function formatFromCatalog(
+  format: string | null,
+  bitrate: number | null,
+  codec?: string | null,
+): AudioFormat {
   switch (format) {
     case "mp3":
       return "mp3";
@@ -75,6 +81,8 @@ export function formatFromCatalog(format: string | null, bitrate: number | null)
       return "wav";
     case "m4a":
     case "mp4":
+      if (codec === "alac") return "alac";
+      if (codec === "aac") return "aac";
       return (bitrate ?? 0) > 500_000 ? "alac" : "aac";
     default:
       return "aac"; // unreachable for a catalog the indexer wrote
@@ -106,6 +114,10 @@ export type TrackRow = {
   track_no: number | null;
   duration_s: number | null;
   format: string | null;
+  // What's inside an m4a/mp4 container (issue #149; null elsewhere, and null
+  // for pre-backfill rows). Optional because the daemon's /queue wire shape
+  // predates the column -- absent falls back to the bitrate heuristic.
+  codec?: string | null;
   bitrate: number | null;
   samplerate: number | null;
   // The catalog stores only real opinions (-2/-1/+1/+2); an unrated track has
@@ -121,7 +133,7 @@ export function trackFromRow(row: TrackRow): Track {
   const albumArtist = row.album_artist || row.artist || "Unknown Artist";
   const artist = row.artist || albumArtist;
   const album = row.album || "Unknown Album";
-  const format = formatFromCatalog(row.format, row.bitrate);
+  const format = formatFromCatalog(row.format, row.bitrate, row.codec);
   const lossy = LOSSY.has(format);
   return {
     id: row.id,
@@ -133,6 +145,7 @@ export function trackFromRow(row: TrackRow): Track {
     trackNo: row.track_no ?? 0,
     durationS: row.duration_s ?? 0,
     format,
+    container: row.format,
     // The catalog doesn't carry bit depth (Phase 1); null is honest, and
     // the quality badge treats lossless-with-unknown-depth as plain lossless.
     bitDepth: null,

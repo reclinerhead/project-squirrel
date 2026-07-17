@@ -215,7 +215,7 @@ export function PlayerBar() {
             {/* the brag pill -- reserves its slot with an invisible placeholder when idle */}
             <span className="hidden sm:block">
               {track ? (
-                <QualityBadge badge={qualityForTrack(track)} />
+                <QualityBadge badge={qualityForTrack(track)} className="text-[9px]" />
               ) : (
                 <span className="stamp invisible inline-flex rounded-full border px-2 py-0.5 text-[9px]">
                   24-bit 48 kHz

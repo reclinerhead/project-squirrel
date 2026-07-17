@@ -54,13 +54,23 @@ describe("the format heuristic", () => {
     expect(formatFromCatalog("wav", null)).toBe("wav");
   });
 
-  it("splits m4a by bitrate: ALAC brags in the megabit range", () => {
-    // The catalog can't see inside an mp4 container until Phase 1's codec
-    // column; bitrate separates the two real populations cleanly (ALAC
-    // ~700-1100 kbps, iTunes-store AAC <= 320).
+  it("believes the real codec column over any bitrate (issue #157)", () => {
+    // #149's stsd atom walk beats the heuristic even when they disagree --
+    // a low-bitrate ALAC (sparse solo piano) and a hypothetical fat AAC
+    // both land where the header says, not where the bitrate guesses.
+    expect(formatFromCatalog("m4a", 420_000, "alac")).toBe("alac");
+    expect(formatFromCatalog("m4a", 900_000, "aac")).toBe("aac");
+    expect(formatFromCatalog("mp4", 256_000, "alac")).toBe("alac");
+  });
+
+  it("splits m4a by bitrate when the codec never rode along", () => {
+    // The fallback for pre-backfill rows and the daemon's older wire shapes;
+    // bitrate separates the two real populations cleanly (ALAC ~700-1100
+    // kbps, iTunes-store AAC <= 320).
     expect(formatFromCatalog("m4a", 1_053_815)).toBe("alac");
     expect(formatFromCatalog("m4a", 256_000)).toBe("aac");
-    expect(formatFromCatalog("mp4", 900_000)).toBe("alac");
+    expect(formatFromCatalog("m4a", 256_000, null)).toBe("aac");
+    expect(formatFromCatalog("mp4", 900_000, null)).toBe("alac");
     expect(formatFromCatalog("m4a", null)).toBe("aac");
   });
 });
@@ -100,6 +110,13 @@ describe("trackFromRow", () => {
     expect(t.artist).toBe("Capital Cities"); // the performer, on the row
     expect(t.artistId).toBe(artistIdOf("Various Artists")); // the shelf card
     expect(decodeAlbumId(t.albumId)?.artist).toBe("Various Artists");
+  });
+
+  it("carries the raw container and believes the codec column (issue #157)", () => {
+    const t = trackFromRow(row({ codec: "aac", bitrate: 900_000 }));
+    expect(t.container).toBe("m4a"); // the raw format column, for the pill
+    expect(t.format).toBe("aac"); // the codec wins over the fat bitrate
+    expect(t.bitrateKbps).toBe(900); // and lossy bookkeeping follows the codec
   });
 
   it("carries the catalog's thumb, so a rated track renders rated", () => {
