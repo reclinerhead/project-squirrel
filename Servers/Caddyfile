@@ -18,21 +18,33 @@
 # user typed as the Host header ("pearl" resolves via the .lan search domain,
 # but the header still says "pearl"), so all three spellings are listed.
 http://pearl, http://pearl.lan, http://192.168.1.64 {
-	# Pi-hole's admin, at its remembered URL. The web server itself moved to
+	# The Mole hole (Pi-hole's admin). The web server itself sits on
 	# loopback:8081 (Phase 1) — this proxy is the only way in, which is the
-	# point. /api is the Pi-hole v6 API the admin UI calls; it must ride along
-	# or the admin loads as an empty shell.
-	handle /admin* {
+	# point. The UI lives at /mole natively (webserver.paths.webhome is
+	# "/mole/" in pihole.toml — set via
+	# `sudo pihole-FTL --config webserver.paths.webhome '/mole/'`), so no
+	# path rewriting happens here. /api is the Pi-hole v6 API the admin UI
+	# calls (its path doesn't follow webhome); it must ride along or the
+	# admin loads as an empty shell.
+	handle /mole* {
 		reverse_proxy 127.0.0.1:8081
 	}
 	handle /api* {
 		reverse_proxy 127.0.0.1:8081
 	}
 
-	# Until the Homestead launchpad lands at /home (Phase 3, issue #143),
-	# the root points at the one thing living here. Phase 3 replaces this
-	# with `redir / /home` + a file_server for launchpad/.
-	redir / /admin 302
+	# The Homestead launchpad (issue #143): the front door's face, static
+	# files served straight from the checkout. A merge deploys it by pull
+	# alone -- there is no build, so autodeploy needs no gate for it, and
+	# "it deploys by doing nothing" is correct, not broken.
+	redir /home /home/ 308
+	handle_path /home/* {
+		root * /home/todd/project-squirrel/launchpad
+		file_server
+	}
+
+	# The bookmarkable front door: pearl -> the porch.
+	redir / /home/ 302
 }
 
 # The MCC dashboard. Type "mcc/" on a desktop and the .lan suffix does the

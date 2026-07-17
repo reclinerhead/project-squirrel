@@ -1,0 +1,58 @@
+{
+  "tiles": [
+    {
+      "name": "Merle",
+      "icon": "binoculars",
+      "color": "#ff7031",
+      "url": "http://mcc.lan/",
+      "status": "live",
+      "description": "the driveway field station — live watch, field journal, census"
+    },
+    {
+      "name": "Music",
+      "icon": "note",
+      "color": "#e0b25c",
+      "url": "http://music.lan/",
+      "status": "live",
+      "description": "the record library — 25,000 tracks, the Denon, the thumbs"
+    },
+    {
+      "name": "Weather Post",
+      "icon": "sky",
+      "color": "#6bb6e5",
+      "url": "http://mcc.lan/weather",
+      "status": "live",
+      "description": "willard's station view — the driveway sky, writ large"
+    },
+    {
+      "name": "Mole",
+      "icon": "mound",
+      "color": "#8a7a63",
+      "url": "/mole/",
+      "status": "live",
+      "description": "the mole hole — where the ads go in and don't come back"
+    },
+    {
+      "name": "Hearth",
+      "icon": "hearth",
+      "color": "#ff9b54",
+      "url": "https://hearth.toddtech.llc",
+      "status": "live",
+      "description": "the family site — its own fire, tended elsewhere"
+    },
+    {
+      "name": "Security",
+      "icon": "tower",
+      "color": "#7d93b2",
+      "status": "soon",
+      "description": "frigate's watchtower — eyes on the perimeter"
+    },
+    {
+      "name": "Earl",
+      "icon": "bird",
+      "color": "#9db35c",
+      "status": "soon",
+      "description": "earl with the ears — the yard's birdwatcher"
+    }
+  ]
+}

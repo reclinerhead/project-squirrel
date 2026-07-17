@@ -24,8 +24,8 @@ outage brings her back without anyone going downstairs.
 | Music     | `music-daemon`    | 8090 (HTTP)                    | Playback daemon (issue #129): streams the catalog, drives the Denon over DLNA, writes `play_history` |
 | Jukebox   | `music-app`       | 3001 (HTTP)                    | The music player UI (issue #131), production build (`next start`) — http://192.168.1.64:3001 |
 | Deploys   | `merle-autodeploy`| —                              | Deploy watcher (issue #95): polls origin/main, pulls + restarts the Merle units on merge |
-| Caddy     | `caddy`           | 80 (HTTP)                      | The front door (issue #141): named URLs instead of ports — `pearl/admin` → Pi-hole, `mcc.lan` → :3000, `music.lan` → :3001 |
-| Pi-hole   | `pihole-FTL`      | 53, 67 (DHCP), web on 127.0.0.1:8081 | Household DNS + DHCP; admin UI reached through Caddy at `pearl/admin` |
+| Caddy     | `caddy`           | 80 (HTTP)                      | The front door (issue #141): named URLs instead of ports — `pearl/mole` → Pi-hole, `mcc.lan` → :3000, `music.lan` → :3001 |
+| Pi-hole   | `pihole-FTL`      | 53, 67 (DHCP), web on 127.0.0.1:8081 | Household DNS + DHCP; admin UI reached through Caddy at `pearl/mole` |
 
 Not here: the perception daemon and camera (those live on bluejay,
 `192.168.1.79` — they need the GPU), and Jim, the second narrator (he lives
@@ -811,10 +811,17 @@ What routes where:
 
 | You type | Caddy does |
 | --- | --- |
-| `pearl/admin` (or `.64/admin`) | proxies Pi-hole's admin on loopback:8081 (`/api` rides along — the v6 admin UI calls it) |
-| `pearl/` | 302 → `/admin` for now; the Homestead launchpad takes over `/` → `/home` in Phase 3 (#143) |
+| `pearl/` | 302 → `/home/` — the Homestead launchpad, the bookmarkable front door (issue #143) |
+| `pearl/home/` | serves `~/project-squirrel/launchpad/` as static files, straight from the checkout |
+| `pearl/mole` (or `.64/mole`) | proxies Pi-hole's admin on loopback:8081 — the UI lives at `/mole` natively (`webserver.paths.webhome = "/mole/"` in `pihole.toml`, issue #143), so nothing rewrites paths; `/api` rides along because the v6 admin UI calls it and its path ignores webhome |
 | `mcc/` or `mcc.lan` | proxies the MCC dashboard (:3000) |
 | `music/` or `music.lan` | proxies the music app (:3001) |
+
+**Homestead deploys by pull alone** — it's static files with no build step,
+so `merle-autodeploy`'s ordinary `git pull` *is* its deploy; no gate, no
+restart, nothing in the watcher's log. That's correct, not broken. Adding a
+tile is one entry in `launchpad/tiles.json` (merge → pull → refresh); the
+page fetches it with `cache: no-store`, so a refresh is enough.
 
 The short names work because the house's DHCP hands out `lan` as the search
 domain, so a desktop typing `mcc/` really asks for `mcc.lan` — but the Host
@@ -836,15 +843,17 @@ Health check from anything on the LAN:
 
 ```
 curl -sI http://mcc.lan/ | head -1        # HTTP/1.1 200 OK
-curl -sI http://pearl/admin/ | head -1    # 200 or a login redirect — either means alive
+curl -sI http://pearl/mole/ | head -1     # 200 or a login redirect — either means alive
 ```
 
 ---
 
 ## Pi-hole
 
-Web UI: http://pearl/admin (through Caddy; the web server itself sits on
-loopback:8081 since issue #141 and is unreachable directly from the LAN)
+Web UI: http://pearl/mole (through Caddy; the web server itself sits on
+loopback:8081 since issue #141 and is unreachable directly from the LAN.
+The UI's home path is `/mole/` — `webserver.paths.webhome` in `pihole.toml`,
+renamed from the stock `/admin/` in issue #143 to match the Mole tile)
 
 Pearl is DNS and DHCP for the whole house. The AT&T gateway (BGW,
 `192.168.1.254`) won't let you set DHCP DNS servers, so its DHCP is disabled
