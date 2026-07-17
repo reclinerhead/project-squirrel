@@ -737,6 +737,30 @@ buffers (#133) and short-term rover audio are the anticipated next tenants.
 Re-budget the per-tenant caps when a second one lands. Everything on it is
 derived and disposable — it needs no backup, ever.
 
+### The art store (issue #153)
+
+`/srv/media-cache/music-art/` — the media-cache LV's second tenant (sibling
+of the FLAC cache, never inside it: the cache sweep eats unrecognized
+files). Content-addressed originals plus pre-generated WebP sizes,
+~300–500 MB, all rebuildable. The music app serves it via `/api/art` and
+needs `MERLE_MUSIC_ART=/srv/media-cache/music-art` in a `music-app` drop-in
+(`/etc/systemd/system/music-app.service.d/art.conf`, same pattern as the
+daemon's `cache.conf`). The venv needs **pillow** (mutagen was already
+there).
+
+The pass (worklist-driven — a re-run after ingesting new albums touches
+only those albums; full coverage is a seconds-long no-op):
+
+```
+cd ~/project-squirrel && \
+MERLE_MUSIC_ART=/srv/media-cache/music-art \
+MERLE_MUSIC_DB=/home/todd/project-squirrel/music.db \
+    venv/bin/python -m jukebox.music_art
+```
+
+Owner-picked art (`source='owner'` rows in `album_art`/`artist_art`)
+survives every re-run by construction — the upsert refuses to touch it.
+
 ### Codec backfill (issue #149, one-time)
 
 `format` can't tell ALAC from purchase-AAC inside `.m4a`, and the browser
