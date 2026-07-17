@@ -150,6 +150,70 @@ def mp4_audio_span(fh, size):
     return None
 
 
+# The containers on the path to stsd. Pure boxes: children start right after
+# the 8/16-byte header, so descending is the same walk at a smaller extent.
+MP4_CONTAINERS = {b"moov", b"trak", b"mdia", b"minf", b"stbl"}
+
+# Sample-entry fourcc -> the catalog's codec vocabulary. Anything else (drms
+# FairPlay relics, exotica) passes through as its raw fourcc: the catalog
+# stays honest about what it saw, and the browser policy's never-lossy default
+# routes unknowns to the FLAC path where a genuinely undecodable stream fails
+# VISIBLY at transcode rather than silently at the <audio> tag.
+MP4_CODECS = {b"alac": music_catalog.CODEC_ALAC,
+              b"mp4a": music_catalog.CODEC_AAC}
+
+
+def mp4_codec(fh, size):
+    """What's actually inside an m4a/mp4: the first sample-entry fourcc under
+    moov>trak>mdia>minf>stbl>stsd, mapped through MP4_CODECS. None when the
+    walk dead-ends -- the caller stores nothing and the policy's never-lossy
+    default covers it (issue #149).
+
+    A real walk, not a byte scan: b"alac" appears inside the magic-cookie box
+    of every ALAC file AND as stray bytes in cover art, so grepping the moov
+    would misfire; the stsd entry is the one authoritative slot. Same header
+    handling as mp4_audio_span (64-bit and to-EOF size escapes), bounded depth
+    because a malformed atom that claims to contain itself must not recurse
+    forever."""
+    def walk(pos, end, depth):
+        while pos + 8 <= end:
+            fh.seek(pos)
+            hdr = fh.read(8)
+            if len(hdr) < 8:
+                return None
+            alen, atype = struct.unpack(">I4s", hdr)
+            hdr_len = 8
+            if alen == 1:
+                ext = fh.read(8)
+                if len(ext) < 8:
+                    return None
+                alen = struct.unpack(">Q", ext)[0]
+                hdr_len = 16
+            elif alen == 0:
+                alen = end - pos
+            if alen < hdr_len or pos + alen > end:
+                return None
+            if atype == b"stsd":
+                # After the box header: 4 bytes version/flags + 4 bytes entry
+                # count, then the first entry's own 4-byte size -- the fourcc
+                # is the 4 bytes after that.
+                fh.seek(pos + hdr_len + 8 + 4)
+                fourcc = fh.read(4)
+                return fourcc if len(fourcc) == 4 else None
+            if atype in MP4_CONTAINERS and depth < 8:
+                found = walk(pos + hdr_len, pos + alen, depth + 1)
+                if found is not None:
+                    return found
+            pos += alen
+        return None
+
+    fourcc = walk(0, size, 0)
+    if fourcc is None:
+        return None
+    return MP4_CODECS.get(
+        fourcc, fourcc.decode("ascii", "replace").strip() or None)
+
+
 def mp3_audio_span(fh, size):
     """Everything between the ID3v2 header and the ID3v1/APEv2 trailers.
 
@@ -283,20 +347,27 @@ def hash_span(fh, offset, length):
 
 def identify(path, fmt, size):
     """This file's track id, plus the span we hashed. Returns
-    (id, offset, length, note) where `note` is None on success and a
-    needs_attention reason otherwise.
+    (id, offset, length, note, codec) where `note` is None on success and a
+    needs_attention reason otherwise, and `codec` is the m4a/mp4 sample-entry
+    answer (None for every other format -- see music_catalog.CODEC_ALAC's
+    banner for why only mp4 containers carry one).
+
+    The codec rides along here because the file is already open and the probe
+    is a header read -- a new file gets its codec at index time for free,
+    and --codecs only exists for the rows indexed before the column did.
 
     flac's STREAMINFO MD5 wins where present: it identifies the DECODED audio,
     so it survives not just a tag edit but a re-compression at a different
     level -- strictly stronger than hashing the frames, and free."""
     with open(path, "rb") as fh:
+        codec = mp4_codec(fh, size) if fmt in ("m4a", "mp4") else None
         span, md5 = audio_span(fh, size, fmt)
         if span is None or span[1] <= 0:
-            return None, None, None, "unparsed:%s" % fmt
+            return None, None, None, "unparsed:%s" % fmt, codec
         offset, length = span
         if md5:
-            return "f:" + md5, offset, length, None
-        return "b:" + hash_span(fh, offset, length), offset, length, None
+            return "f:" + md5, offset, length, None, codec
+        return "b:" + hash_span(fh, offset, length), offset, length, None, codec
 
 
 def read_tags(path, fmt):
@@ -374,7 +445,7 @@ def index_file(conn, path, fmt, cache, now, rehash=False, dry_run=False):
         return "cached"
 
     try:
-        track_id, offset, length, note = identify(path, fmt, size)
+        track_id, offset, length, note, codec = identify(path, fmt, size)
     except OSError as e:
         # One unreadable file never kills a 26k-file pass.
         print("[music] read failed, skipping: %s -- %s" % (path, e))
@@ -390,14 +461,58 @@ def index_file(conn, path, fmt, cache, now, rehash=False, dry_run=False):
     if dry_run:
         return "unparsed" if note else "hashed"
 
-    track = {"id": track_id, "format": fmt, "needs_attention": note,
-             "indexed_at": now}
+    track = {"id": track_id, "format": fmt, "codec": codec,
+             "needs_attention": note, "indexed_at": now}
     track.update(read_tags(path, fmt))
     music_catalog.upsert_track(conn, track)
     music_catalog.upsert_file(conn, {
         "path": path, "track_id": track_id, "size": size, "mtime": mtime,
         "audio_offset": offset, "audio_length": length, "seen_at": now})
     return "unparsed" if note else "hashed"
+
+
+def backfill_codecs(conn):
+    """Probe the codec for every m4a/mp4 track indexed before the codec column
+    existed (issue #149). Header reads only -- ~4 KB per file against 28 MB
+    files -- so the whole 16k-track pass is minutes over SMB, not hours.
+    Resumable for free: each success is an UPDATE, so a re-run's worklist is
+    only what's still NULL. One unreadable file is logged and skipped,
+    never fatal (weather.py:773-777's ethos)."""
+    work = music_catalog.tracks_missing_codec(conn)
+    print("[music] codec backfill: %d tracks to probe" % len(work))
+    tally = {"probed": 0, "unparsed": 0, "error": 0}
+    started = time.time()
+    for i, (track_id, path) in enumerate(work, 1):
+        try:
+            size = os.path.getsize(path)
+            with open(path, "rb") as fh:
+                codec = mp4_codec(fh, size)
+        except OSError as e:
+            print("[music] codec probe failed, skipping: %s -- %s" % (path, e))
+            tally["error"] += 1
+            continue
+        if codec is None:
+            # Left NULL: the policy's never-lossy default covers it, and a
+            # re-run gets another look for free.
+            tally["unparsed"] += 1
+            continue
+        music_catalog.set_codec(conn, track_id, codec)
+        tally["probed"] += 1
+        if i % LOG_EVERY == 0:
+            conn.commit()
+            print("[music] %d/%d -- %d probed, %d unparsed, %d errors"
+                  % (i, len(work), tally["probed"], tally["unparsed"],
+                     tally["error"]))
+    conn.commit()
+    dist = conn.execute(
+        "SELECT codec, COUNT(*) FROM tracks WHERE format IN ('m4a', 'mp4') "
+        "GROUP BY codec").fetchall()
+    print("[music] codec backfill done in %.1f min -- %d probed, %d unparsed, "
+          "%d errors" % ((time.time() - started) / 60, tally["probed"],
+                         tally["unparsed"], tally["error"]))
+    print("[music] m4a/mp4 codecs now: %s"
+          % ", ".join("%s=%d" % (r[0] or "NULL", r[1]) for r in dist))
+    return 0
 
 
 def main():
@@ -410,6 +525,9 @@ def main():
     ap.add_argument("--prune", action="store_true",
                     help="drop locations this pass didn't see (never drops "
                          "tracks, ratings, or history)")
+    ap.add_argument("--codecs", action="store_true",
+                    help="backfill the codec column for m4a/mp4 tracks "
+                         "indexed before it existed, then exit")
     ap.add_argument("--dry-run", action="store_true", help="write nothing")
     args = ap.parse_args()
 
@@ -422,6 +540,12 @@ def main():
     if not os.path.isdir(root):
         print("[music] library root not found: %s" % root)
         return 1
+
+    if args.codecs:
+        # Its own early exit, sharing the mount check above: the worklist's
+        # paths live on the same share, and a missing mount would present as
+        # 16k "errors" rather than one loud refusal.
+        return backfill_codecs(music_catalog.connect(db))
 
     print("[music] indexing %s -> %s%s%s" %
           (root, db, " (rehash)" if args.rehash else "",

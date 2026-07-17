@@ -176,8 +176,12 @@ class FakeRenderer:
 
 
 @pytest.fixture
-def rig(tmp_path):
-    """A live app over a :memory: catalog holding one real temp file."""
+def rig(tmp_path, monkeypatch):
+    """A live app over a :memory: catalog holding one real temp file. No
+    cache on purpose (and the env cleared, so a developer's real
+    MERLE_MUSIC_CACHE can't leak in): this rig is the Denon-only world, which
+    must keep working on a bare checkout."""
+    monkeypatch.delenv("MERLE_MUSIC_CACHE", raising=False)
     audio_file = tmp_path / "01 Safe And Sound.m4a"
     audio_file.write_bytes(AUDIO)
     conn = mc.connect(":memory:")
@@ -563,3 +567,264 @@ def test_queue_excludes_a_track_played_moments_ago(rig):
     r = client.post("/queue", json={"seed": {"artist": "X"}})
     assert r.status_code == 200
     assert "b:abc" not in [t["id"] for t in r.json()["tracks"]]
+
+
+# --- the browser output (issue #149) ----------------------------------------------
+#
+# The other transport: the listener's <audio> element pulls ?output=browser,
+# ALAC repacks to FLAC through the cache (the lossless rule), natively
+# decodable formats stay raw, and history arrives by client report. The cache
+# here is a fake -- the real ffmpeg is proven on pearl; these tests pin the
+# POLICY: who transcodes, who streams untouched, who may never be asked.
+
+from jukebox import music_cache as mcc
+
+
+class FakeCache:
+    """ensure() answers like the real thing: a finished file when one exists,
+    otherwise an already-done Job whose part file holds fake FLAC bytes --
+    which exercises the daemon's tailing branch end to end."""
+
+    def __init__(self, root):
+        self.root = root
+        self.ensures = []
+
+    def path_for(self, track_id):
+        return os.path.join(self.root, mcc.cache_name(track_id))
+
+    def lookup(self, track_id):
+        p = self.path_for(track_id)
+        return p if os.path.isfile(p) else None
+
+    def ensure(self, track_id, src_path, background=False):
+        self.ensures.append((track_id, background))
+        hit = self.lookup(track_id)
+        if hit:
+            return "file", hit
+        final = self.path_for(track_id)
+        job = mcc.Job(final + ".part", final)
+        with open(job.part_path, "wb") as f:
+            f.write(b"FLACDATA")
+        job.ok = True
+        job.done.set()
+        return "job", job
+
+
+import os  # noqa: E402  (grouped with the fixture that needs it)
+
+
+@pytest.fixture
+def brig(tmp_path, monkeypatch):
+    """The browser-era rig: an ALAC track, an AAC track, an mp3, and an
+    unprobed m4a, plus an injected fake cache."""
+    monkeypatch.delenv("MERLE_MUSIC_CACHE", raising=False)
+    conn = mc.connect(":memory:")
+    tracks = [
+        ("b:alc", "m4a", "alac", "alac.m4a"),
+        ("b:acc", "m4a", "aac", "aac.m4a"),
+        ("b:mp3", "mp3", None, "x.mp3"),
+        ("b:nul", "m4a", None, "unprobed.m4a"),
+    ]
+    for tid, fmt, codec, name in tracks:
+        p = tmp_path / name
+        p.write_bytes(AUDIO)
+        mc.upsert_track(conn, {
+            "id": tid, "title": tid, "artist": "A", "album": "B",
+            "duration_s": 193.0, "format": fmt, "codec": codec,
+            "indexed_at": 1000, "bpm": 120.0})
+        mc.upsert_file(conn, {
+            "path": str(p), "track_id": tid, "size": len(AUDIO),
+            "mtime": 200, "audio_offset": 0, "audio_length": len(AUDIO),
+            "seen_at": 1000})
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    cache = FakeCache(str(cache_dir))
+    app = md.create_app(conn=conn, renderer=FakeRenderer(),
+                        stream_base="http://pearl.test:8090",
+                        publisher_factory=lambda: object(), cache=cache)
+    with TestClient(app) as client:
+        yield client, conn, cache
+
+
+def test_browser_gets_aac_bytes_untouched(brig):
+    """Already lossy: repacking loses nothing but inflates for no reason,
+    and the cache must not even be consulted."""
+    client, _, cache = brig
+    r = client.get("/stream/b:acc", params={"output": "browser"})
+    assert r.status_code == 200
+    assert r.content == AUDIO
+    assert r.headers["content-type"].startswith("audio/mp4")
+    assert cache.ensures == []
+
+
+def test_browser_gets_mp3_bytes_untouched(brig):
+    client, _, cache = brig
+    r = client.get("/stream/b:mp3", params={"output": "browser"})
+    assert r.content == AUDIO
+    assert cache.ensures == []
+
+
+def test_browser_alac_cold_click_tails_the_transcode(brig):
+    client, _, cache = brig
+    r = client.get("/stream/b:alc", params={"output": "browser"})
+    assert r.status_code == 200
+    assert r.content == b"FLACDATA"
+    assert r.headers["content-type"].startswith("audio/flac")
+    assert "content-length" not in r.headers  # chunked: size unknowable
+    assert cache.ensures == [("b:alc", False)]  # a listener waits: not gated
+
+
+def test_browser_unprobed_m4a_takes_the_never_lossy_default(brig):
+    client, _, cache = brig
+    r = client.get("/stream/b:nul", params={"output": "browser"})
+    assert r.status_code == 200
+    assert r.content == b"FLACDATA"
+
+
+def test_browser_alac_cache_hit_serves_ranges(brig):
+    """The whole reason the cache is a file: a cached track seeks like one."""
+    client, _, cache = brig
+    with open(cache.path_for("b:alc"), "wb") as f:
+        f.write(b"CACHEDFLACBYTES")
+    r = client.get("/stream/b:alc", params={"output": "browser"},
+                   headers={"Range": "bytes=6-9"})
+    assert r.status_code == 206
+    assert r.content == b"FLAC"
+    assert r.headers["content-range"] == "bytes 6-9/15"
+    assert r.headers["content-type"].startswith("audio/flac")
+
+
+def test_browser_head_probe_never_costs_a_transcode(brig):
+    client, _, cache = brig
+    r = client.head("/stream/b:alc", params={"output": "browser"})
+    assert r.status_code == 200
+    assert cache.ensures == []
+
+
+def test_denon_still_gets_alac_bytes_untouched(brig):
+    """The do-not-change line: every URL the daemon ever handed the renderer
+    means exactly what it did in 2a -- raw catalog bytes, no cache."""
+    client, _, cache = brig
+    r = client.get("/stream/b:alc")  # no ?output= -- the Denon's URL shape
+    assert r.status_code == 200
+    assert r.content == AUDIO
+    assert r.headers["content-type"].startswith("audio/mp4")
+    assert cache.ensures == []
+
+
+def test_stream_refuses_an_unknown_output(brig):
+    client, _, _ = brig
+    r = client.get("/stream/b:alc", params={"output": "toaster"})
+    assert r.status_code == 422
+
+
+def test_play_refuses_the_browser_output(brig):
+    """The browser's transport is the listener's tab; /play aims renderers."""
+    client, _, _ = brig
+    r = client.post("/play", json={"track_id": "b:alc", "output": "browser"})
+    assert r.status_code == 422
+
+
+def test_browser_alac_without_a_cache_is_a_503(rig):
+    """The kill switch: MERLE_MUSIC_CACHE unset means no browser transcode.
+    (rig, not brig -- the cacheless world.)"""
+    client, _, _ = rig
+    r = client.get("/stream/b:abc", params={"output": "browser"})
+    assert r.status_code == 503
+
+
+def test_state_offers_the_browser_exactly_when_the_cache_exists(rig, brig):
+    ids = {o["id"]: o["available"]
+           for o in rig[0].get("/state").json()["outputs"]}
+    assert ids["browser"] is False
+    ids = {o["id"]: o["available"]
+           for o in brig[0].get("/state").json()["outputs"]}
+    assert ids["browser"] is True
+
+
+def test_state_carries_the_stream_base(brig):
+    assert brig[0].get("/state").json()["stream_base"] == \
+        "http://pearl.test:8090"
+
+
+# --- POST /report -----------------------------------------------------------------
+
+def test_report_near_the_end_is_a_completion(brig):
+    client, conn, _ = brig
+    r = client.post("/report", json={"track_id": "b:alc",
+                                     "position_s": 190.0})
+    assert r.status_code == 200
+    assert r.json()["outcome"] == mc.PLAY_COMPLETED
+    row = conn.execute("SELECT outcome, seconds, output "
+                       "FROM play_history").fetchone()
+    assert row["outcome"] == mc.PLAY_COMPLETED
+    assert row["seconds"] == 190.0
+    assert row["output"] == "browser"
+
+
+def test_report_early_bail_is_a_skip(brig):
+    client, conn, _ = brig
+    r = client.post("/report", json={"track_id": "b:alc",
+                                     "position_s": 12.0})
+    assert r.json()["outcome"] == mc.PLAY_SKIPPED
+
+
+def test_report_without_a_position_errs_toward_skip(brig):
+    """outcome_for's rule, one arbiter for both transports: unknown position
+    never credits a listen."""
+    client, conn, _ = brig
+    assert client.post("/report",
+                       json={"track_id": "b:alc"}).json()["outcome"] == \
+        mc.PLAY_SKIPPED
+    assert conn.execute("SELECT seconds FROM play_history"
+                        ).fetchone()["seconds"] is None
+
+
+def test_report_validates_like_rate_does(brig):
+    client, conn, _ = brig
+    assert client.post("/report", json={"track_id": "../../x",
+                                        "position_s": 1}).status_code == 400
+    assert client.post("/report", json={"track_id": 7}).status_code == 400
+    assert client.post("/report", json={"track_id": "b:alc",
+                                        "position_s": True}).status_code == 400
+    assert client.post("/report", json={"track_id": "b:alc",
+                                        "position_s": "far"}).status_code == 400
+    assert client.post("/report", json={"track_id": "b:nope",
+                                        "position_s": 1}).status_code == 404
+    assert conn.execute("SELECT COUNT(*) AS n "
+                        "FROM play_history").fetchone()["n"] == 0
+
+
+# --- POST /precache ---------------------------------------------------------------
+
+def test_precache_warms_only_what_needs_the_flac_path(brig):
+    """aac and mp3 stream raw and an unknown id is a skip, not an error --
+    warming is best-effort by contract."""
+    client, _, cache = brig
+    r = client.post("/precache", json={
+        "track_ids": ["b:alc", "b:acc", "b:mp3", "b:nope"]})
+    assert r.status_code == 200
+    assert r.json() == {"queued": 1}
+    assert cache.ensures == [("b:alc", True)]  # background: gated, not urgent
+
+
+def test_precache_skips_an_already_cached_track(brig):
+    client, _, cache = brig
+    with open(cache.path_for("b:alc"), "wb") as f:
+        f.write(b"X")
+    assert client.post("/precache", json={
+        "track_ids": ["b:alc"]}).json() == {"queued": 0}
+
+
+def test_precache_400s_garbage(brig):
+    client, _, _ = brig
+    for body in ({}, {"track_ids": "b:alc"},
+                 {"track_ids": ["b alc"]},
+                 {"track_ids": ["b:alc"] * (md.PRECACHE_MAX + 1)}):
+        assert client.post("/precache", json=body).status_code == 400, body
+
+
+def test_precache_without_a_cache_is_a_503(rig):
+    client, _, _ = rig
+    assert client.post("/precache",
+                       json={"track_ids": ["b:abc"]}).status_code == 503

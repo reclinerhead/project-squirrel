@@ -1,13 +1,20 @@
 # =============================================================================
 # project-squirrel -- music_daemon.py
 #
-# The playback daemon (issue #129, epic #115 Phase 2a): streams catalog tracks
-# over HTTP and drives the Denon AVR over UPnP/DLNA. Runs on pearl as the
-# `music-daemon` unit, port 8090. Phase 2a is DENON-ONLY on purpose -- the
-# spike (#115) found the build order backwards from the design's guess: the
-# Denon plays ALAC natively (verified, audible, correct duration parsed from
-# the container), while Chrome refuses it outright and pearl has no ffmpeg.
-# The browser output and its transcode cache are Phase 2b.
+# The playback daemon (issues #129 + #149, epic #115 Phase 2): streams catalog
+# tracks over HTTP and drives the Denon AVR over UPnP/DLNA. Runs on pearl as
+# the `music-daemon` unit, port 8090. Two outputs, opposite transports:
+#
+#   denon    the daemon drives the renderer (SOAP) and the renderer pulls
+#            bytes UNTOUCHED -- it plays ALAC natively (spike-verified), so
+#            transcoding it would throw away the lossless for nothing.
+#   browser  the listener's <audio> element pulls /stream?output=browser and
+#            the daemon drives NOTHING -- Chrome refuses ALAC outright (the
+#            spike again), so the ALAC majority repacks to FLAC through
+#            music_cache (lossless to lossless, issue #149's owner rule: no
+#            lossy transcode, ever) while natively-decodable formats stay
+#            raw. Play-history arrives by client report (POST /report), since
+#            a browser tab can't be polled the way a renderer can.
 #
 # Shape: FastAPI, like vision/merle_daemon.py, because the one hard
 # requirement -- HTTP Range on /stream -- doesn't fit the weather.py flat-loop
@@ -88,7 +95,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 import bus
-from jukebox import music_catalog, music_playlist
+from jukebox import music_cache, music_catalog, music_playlist
 
 STREAM_CHUNK = 1 << 20
 
@@ -106,10 +113,21 @@ WATCH_MAX_FAILURES = 3
 # banner). The Denon list is every format the catalog holds: ALAC/m4a is
 # spike-verified; mp3/flac/wav are DLNA bread-and-butter. A format the Denon
 # unexpectedly gags on shows up as an instant STOPPED in the log and a skip
-# row -- visible, not fatal. "browser" enters this table in Phase 2b.
+# row -- visible, not fatal. The browser (Phase 2b, issue #149) also takes
+# everything -- raw bytes where it decodes natively, the FLAC repack where it
+# doesn't (music_cache.needs_flac is that policy's second half, decided from
+# the catalog's codec column, never by sniffing).
 OUTPUT_FORMATS = {
     "denon": {"m4a", "mp4", "mp3", "flac", "wav"},
+    "browser": {"m4a", "mp4", "mp3", "flac", "wav"},
 }
+
+# Outputs the daemon drives over UPnP. The browser is deliberately NOT one:
+# its transport is the <audio> element in the listener's tab, so /play aims
+# only renderers, the GUI plays browser tracks itself off /stream, and
+# /report is how those plays reach play_history (the watcher can't poll a
+# browser tab).
+RENDERER_OUTPUTS = {"denon"}
 
 # The renderer /play matches against discovery, by friendlyName substring
 # (case-insensitive). The Denon's own name is "Denon AVR-X4000"; matching the
@@ -375,10 +393,15 @@ class Player:
     lock over both the state and the DB writes -- FastAPI's sync endpoints
     run in a threadpool, the watcher is its own thread, and SQLite is shared."""
 
-    def __init__(self, conn, renderer, stream_base):
+    def __init__(self, conn, renderer, stream_base, browser_available=False):
         self.conn = conn
         self.renderer = renderer
         self.stream_base = stream_base.rstrip("/")
+        # Whether the cache is configured (issue #149). The browser output
+        # is offered exactly when it is: without ffmpeg's landing pad the
+        # ALAC majority can't play, and a 62%-broken output in the picker
+        # would be a lie wearing a checkmark.
+        self.browser_available = browser_available
         self.lock = threading.Lock()
         self.current = None  # {track_id,title,artist,album,duration_s,output}
         self.last_pos = None  # last position observed while PLAYING
@@ -403,6 +426,11 @@ class Player:
     def play(self, track_id, output):
         if output not in OUTPUT_FORMATS:
             return 422, {"error": "unknown output: %s" % output}
+        if output not in RENDERER_OUTPUTS:
+            # The browser's transport is the listener's own <audio> element;
+            # there is nothing here to drive (see RENDERER_OUTPUTS).
+            return 422, {"error": "%s plays client-side -- stream directly "
+                                  "and POST /report" % output}
         if not music_catalog.valid_track_id(track_id):
             return 400, {"error": "malformed track id"}
         with self.lock:
@@ -506,11 +534,22 @@ class Player:
             "transport": transport,
             "position_s": position,
             "track": self.current,
-            "outputs": [{"id": "denon",
-                         "name": self.renderer.name if self.renderer
-                         else "Denon (not found)",
-                         "kind": "dlna",
-                         "available": self.renderer is not None}],
+            # The GUI builds browser <audio> srcs from this -- the same
+            # LAN-visible address the Denon fetches from, which is exactly
+            # the property the browser needs too. Served here rather than
+            # baked into a client bundle (the proxy-route rule).
+            "stream_base": self.stream_base,
+            "outputs": [
+                {"id": "denon",
+                 "name": self.renderer.name if self.renderer
+                 else "Denon (not found)",
+                 "kind": "dlna",
+                 "available": self.renderer is not None},
+                {"id": "browser",
+                 "name": "This browser",
+                 "kind": "local",
+                 "available": self.browser_available},
+            ],
         }
         return out
 
@@ -614,18 +653,74 @@ def seed_track_row(conn, track_id):
     return dict(row) if row else None
 
 
+# --- serving bytes: the one Range-aware file response ----------------------------
+
+def file_response(path, request, media, label):
+    """Serve one on-disk file with the hand-rolled Range support (see banner
+    -- non-negotiable, and now shared: the Denon's untouched catalog bytes and
+    the browser's cached FLAC ride the SAME code, so the Range behavior the
+    spike validated cannot drift between outputs). Returns None when the file
+    vanished -- the caller's 404, since what that means differs by branch.
+
+    DLNA headers ride on every response: required by renderers, harmless to
+    browsers (the spike's finding, unchanged)."""
+    try:
+        size = os.path.getsize(path)  # trust the fs over a stale catalog
+    except OSError:
+        return None
+    try:
+        rng = parse_range(request.headers.get("range"), size)
+    except ValueError:
+        return Response(status_code=416,
+                        headers={"Content-Range": "bytes */%d" % size})
+    start, end = rng if rng else (0, size - 1)
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(end - start + 1),
+        **DLNA_HEADERS,
+    }
+    if rng:
+        headers["Content-Range"] = "bytes %d-%d/%d" % (start, end, size)
+    status = 206 if rng else 200
+    if request.method == "HEAD":
+        return Response(status_code=status, headers=headers, media_type=media)
+    print("[music] stream %s %s bytes %d-%d"
+          % (label, "(range)" if rng else "(full)", start, end))
+
+    def body(path=path, start=start, end=end):
+        # Principle 1 is enforced, not trusted: "rb" against an ro mount.
+        with open(path, "rb") as fh:
+            fh.seek(start)
+            left = end - start + 1
+            while left > 0:
+                chunk = fh.read(min(STREAM_CHUNK, left))
+                if not chunk:
+                    break
+                left -= len(chunk)
+                yield chunk
+
+    return StreamingResponse(body(), status_code=status, headers=headers,
+                             media_type=media)
+
+
+# The most track ids one /precache accepts. The GUI warms the next two; the
+# cap just keeps a buggy caller from enqueueing the whole library.
+PRECACHE_MAX = 8
+
+
 # --- the app --------------------------------------------------------------------
 
 def create_app(conn=None, renderer=None, stream_base=None,
-               publisher_factory=None):
+               publisher_factory=None, cache=None):
     """Build the app. Everything injectable so tests run with a :memory:
-    catalog, a fake renderer, and no network; production passes nothing and
-    the lifespan reads env -- loudly, at startup, which is where a missing
-    MERLE_MUSIC_DB must kill the daemon rather than 404 every track from an
-    accidentally-created empty file."""
+    catalog, a fake renderer, a fake cache, and no network; production passes
+    nothing and the lifespan reads env -- loudly, at startup, which is where
+    a missing MERLE_MUSIC_DB must kill the daemon rather than 404 every track
+    from an accidentally-created empty file."""
 
-    injected = dict(conn=conn, renderer=renderer, stream_base=stream_base)
-    state = {"player": None, "publisher": None}
+    injected = dict(conn=conn, renderer=renderer, stream_base=stream_base,
+                    cache=cache)
+    state = {"player": None, "publisher": None, "cache": None}
 
     async def lifespan(app):
         db = injected["conn"]
@@ -655,6 +750,41 @@ def create_app(conn=None, renderer=None, stream_base=None,
         player = Player(db, rnd, base)
         player.start_watcher()
         state["player"] = player
+
+        # The FLAC cache (issue #149). Unset MERLE_MUSIC_CACHE is the kill
+        # switch -- the Denon path runs on a bare checkout, and the picker
+        # simply never offers the browser. SET but missing is a config error
+        # and dies loudly: the LV didn't mount, and "playable but 62% broken"
+        # must not look healthy. Built after the player because the sweep's
+        # view of the catalog goes through the player's lock -- SQLite is
+        # shared with the watcher and every endpoint, one lock for all of it.
+        mcache = injected["cache"]
+        if mcache is None:
+            croot = music_cache.cache_root()
+            if croot:
+                if not os.path.isdir(croot):
+                    raise RuntimeError(
+                        "MERLE_MUSIC_CACHE does not exist: %s -- is the "
+                        "media-cache LV mounted? (Servers/Pearl.md)" % croot)
+
+                def expected_names():
+                    with player.lock:
+                        rows = player.conn.execute(
+                            "SELECT id FROM tracks").fetchall()
+                    return {music_cache.cache_name(r["id"]) for r in rows}
+
+                mcache = music_cache.MusicCache(
+                    croot, music_cache.cache_cap_bytes(), expected_names)
+                print("[music] cache: %s (cap %.0f GB)"
+                      % (croot, mcache.cap_bytes / (1 << 30)))
+                # Startup sweep: yesterday's orphans and any crashed .part
+                # go now, not on the first transcode.
+                mcache.sweep()
+            else:
+                print("[music] MERLE_MUSIC_CACHE unset -- browser output "
+                      "disabled")
+        state["cache"] = mcache
+        player.browser_available = mcache is not None
         if publisher_factory is not None:
             state["publisher"] = publisher_factory()
         else:
@@ -815,54 +945,143 @@ def create_app(conn=None, renderer=None, stream_base=None,
         # frame_archiver's guard genre).
         if not music_catalog.valid_track_id(track_id):
             return Response(status_code=400, content="malformed track id")
+        # ?output= picks the per-output policy (issue #149). Default is the
+        # Denon so every URL the daemon ever handed a renderer -- including
+        # one it's holding open right now -- means exactly what it did in 2a.
+        output = request.query_params.get("output", "denon")
+        if output not in OUTPUT_FORMATS:
+            return Response(status_code=422,
+                            content="unknown output: %s" % output)
         p = player()
         with p.lock:
             info = music_catalog.track_info(p.conn, track_id)
             loc = music_catalog.file_for_track(p.conn, track_id)
         if info is None or loc is None:
             return Response(status_code=404, content="unknown track")
+        if info["format"] not in OUTPUT_FORMATS[output]:
+            return Response(status_code=415, content="%s does not play %s"
+                            % (output, info["format"]))
         path = loc["path"]
-        try:
-            size = os.path.getsize(path)  # trust the fs over a stale catalog
-        except OSError:
+
+        if output == "browser" and music_cache.needs_flac(info["format"],
+                                                          info.get("codec")):
+            cache = state["cache"]
+            if cache is None:
+                # The kill switch (MERLE_MUSIC_CACHE unset). The GUI never
+                # offers the output in this state, so reaching here is a
+                # hand-built URL -- refuse it plainly.
+                return Response(status_code=503,
+                                content="browser output not configured")
+            if request.method == "HEAD":
+                # A probe must not cost a transcode: answer from the cache
+                # if it's there, and say 200-no-length otherwise (the GET
+                # will be chunked anyway).
+                hit = cache.lookup(track_id)
+                if hit:
+                    resp = file_response(hit, request, "audio/flac",
+                                         "%s->%s" % (track_id, output))
+                    if resp is not None:
+                        return resp
+                return Response(status_code=200, media_type="audio/flac")
+            kind, val = cache.ensure(track_id, path)
+            if kind == "file":
+                resp = file_response(val, request, "audio/flac",
+                                     "%s->%s (cache)" % (track_id, output))
+                if resp is not None:
+                    return resp
+                return Response(status_code=404, content="cache entry lost")
+            # Cold click: tail the transcode as it runs. 200 and chunked --
+            # the final size is unknowable until the encoder finishes, and
+            # ignoring Range outright is the RFC-blessed move (parse_range's
+            # reasoning; a post-completion seek Range-requests the finished
+            # file and gets a real 206).
+            print("[music] stream %s->%s cold -- tailing transcode"
+                  % (track_id, output))
+            return StreamingResponse(music_cache.iter_growing(val),
+                                     status_code=200,
+                                     media_type="audio/flac")
+
+        # Everything else -- every Denon stream, and the browser's natively
+        # decodable majority-minority -- is catalog bytes UNTOUCHED.
+        resp = file_response(path, request, content_type_for(info["format"]),
+                             "%s->%s" % (track_id, output))
+        if resp is None:
             print("[music] stream: file missing: %s" % path)
             return Response(status_code=404, content="file missing")
+        return resp
 
-        try:
-            rng = parse_range(request.headers.get("range"), size)
-        except ValueError:
-            return Response(status_code=416,
-                            headers={"Content-Range": "bytes */%d" % size})
-        start, end = rng if rng else (0, size - 1)
-        headers = {
-            "Accept-Ranges": "bytes",
-            "Content-Length": str(end - start + 1),
-            **DLNA_HEADERS,
-        }
-        if rng:
-            headers["Content-Range"] = "bytes %d-%d/%d" % (start, end, size)
-        status = 206 if rng else 200
-        media = content_type_for(info["format"])
-        if request.method == "HEAD":
-            return Response(status_code=status, headers=headers,
-                            media_type=media)
-        print("[music] stream %s %s bytes %d-%d"
-              % (track_id, "(range)" if rng else "(full)", start, end))
+    @app.post("/report")
+    def post_report(cmd: dict):
+        # The browser's half of play-history (issue #149): the watcher polls
+        # the Denon, but a browser tab can't be polled, so it reports its own
+        # session's end -- once per play, position at the moment it ended.
+        # The OUTCOME is still adjudicated HERE, by the same outcome_for the
+        # watcher uses: the client says where playback stopped, never what it
+        # meant -- one arbiter, two transports, and a clock that's ours
+        # (/rate's reasoning: the history table is irreplaceable and a
+        # browser clock is a guess).
+        track_id = cmd.get("track_id")
+        if not isinstance(track_id, str) or \
+                not music_catalog.valid_track_id(track_id):
+            return JSONResponse({"error": "malformed track id"},
+                                status_code=400)
+        pos = cmd.get("position_s")
+        # bool subclasses int (the /rate lesson); None is legal -- "position
+        # unknown" -- and outcome_for already treats it as a skip.
+        if pos is not None and (isinstance(pos, bool)
+                                or not isinstance(pos, (int, float))):
+            return JSONResponse({"error": "position_s must be a number"},
+                                status_code=400)
+        p = player()
+        with p.lock:
+            info = music_catalog.track_info(p.conn, track_id)
+            if info is None:
+                return JSONResponse({"error": "unknown track"},
+                                    status_code=404)
+            outcome = outcome_for(
+                float(pos) if pos is not None else None,
+                info["duration_s"])
+            music_catalog.record_play(p.conn, track_id, int(time.time()),
+                                      outcome, seconds=pos, output="browser")
+        print("[music] %s (browser): %s -- %s at %.0fs"
+              % (outcome, info["artist"], info["title"], pos or 0))
+        return {"track_id": track_id, "outcome": outcome}
 
-        def body(path=path, start=start, end=end):
-            # Principle 1 is enforced, not trusted: "rb" against an ro mount.
-            with open(path, "rb") as fh:
-                fh.seek(start)
-                left = end - start + 1
-                while left > 0:
-                    chunk = fh.read(min(STREAM_CHUNK, left))
-                    if not chunk:
-                        break
-                    left -= len(chunk)
-                    yield chunk
-
-        return StreamingResponse(body(), status_code=status, headers=headers,
-                                 media_type=media)
+    @app.post("/precache")
+    def post_precache(cmd: dict):
+        # Queue warming (issue #149): the GUI names the next tracks and the
+        # cache repacks them while the current one plays, so a queue advance
+        # is always a hit and the transcode delay is unobservable in playlist
+        # listening. Best-effort THROUGHOUT: an unknown id, a raw-bytes
+        # format, an already-cached track are all skips, not errors --
+        # warming is a nicety and must never make the GUI handle failure.
+        cache = state["cache"]
+        if cache is None:
+            return JSONResponse({"error": "browser output not configured"},
+                                status_code=503)
+        ids = cmd.get("track_ids")
+        if not isinstance(ids, list) or len(ids) > PRECACHE_MAX or any(
+                not isinstance(x, str) or not music_catalog.valid_track_id(x)
+                for x in ids):
+            return JSONResponse({"error": "track_ids must be up to %d track "
+                                          "ids" % PRECACHE_MAX},
+                                status_code=400)
+        p = player()
+        queued = 0
+        for tid in ids:
+            with p.lock:
+                info = music_catalog.track_info(p.conn, tid)
+                loc = music_catalog.file_for_track(p.conn, tid)
+            if info is None or loc is None:
+                continue
+            if not music_cache.needs_flac(info["format"], info.get("codec")):
+                continue
+            kind, _ = cache.ensure(tid, loc["path"], background=True)
+            if kind == "job":
+                queued += 1
+        if queued:
+            print("[music] precache: %d transcode(s) queued" % queued)
+        return {"queued": queued}
 
     return app
 

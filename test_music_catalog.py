@@ -105,6 +105,84 @@ def test_migrate_applies_and_stamps(tmp_path):
     c.close()
 
 
+def test_v1_file_gains_codec_and_keeps_its_rows(tmp_path):
+    """The seam's first real customer (issue #149), replayed against the
+    thing it exists to protect: a file with pre-migration data. The row
+    survives, the column appears, the stamp advances."""
+    import sqlite3
+    p = str(tmp_path / "v1.db")
+    raw = sqlite3.connect(p)
+    raw.execute("CREATE TABLE tracks (id TEXT PRIMARY KEY, title TEXT, "
+                "format TEXT)")
+    raw.execute("INSERT INTO tracks VALUES ('b:old', 'Kept', 'm4a')")
+    raw.execute("PRAGMA user_version=1")
+    raw.commit()
+    raw.close()
+    c = mc.connect(p)
+    cols = {r[1] for r in c.execute("PRAGMA table_info(tracks)")}
+    assert "codec" in cols
+    assert c.execute("PRAGMA user_version").fetchone()[0] == mc.SCHEMA_VERSION
+    row = c.execute("SELECT title, codec FROM tracks "
+                    "WHERE id = 'b:old'").fetchone()
+    assert row["title"] == "Kept"
+    assert row["codec"] is None  # not probed yet -- the backfill's worklist
+    c.close()
+
+
+def test_fresh_file_is_stamped_not_replayed(tmp_path):
+    """A fresh file's SCHEMA already holds the codec column; replaying the
+    ALTER against it would die on "duplicate column". connect() must stamp
+    it straight to SCHEMA_VERSION instead."""
+    p = str(tmp_path / "fresh.db")
+    c = mc.connect(p)
+    assert c.execute("PRAGMA user_version").fetchone()[0] == mc.SCHEMA_VERSION
+    cols = {r[1] for r in c.execute("PRAGMA table_info(tracks)")}
+    assert "codec" in cols
+    c.close()
+
+
+def test_crash_window_between_ddl_and_stamp_recovers(tmp_path):
+    """A file whose schema is current but whose stamp is behind (the crash
+    window between connect()'s DDL and its PRAGMA) must come back up, not
+    crash-loop on "duplicate column"."""
+    p = str(tmp_path / "torn.db")
+    c = mc.connect(p)
+    c.execute("PRAGMA user_version=1")  # roll the stamp back, keep the schema
+    c.commit()
+    c.close()
+    c2 = mc.connect(p)  # replays the ALTER, tolerates the duplicate, stamps
+    assert c2.execute("PRAGMA user_version").fetchone()[0] == mc.SCHEMA_VERSION
+    c2.close()
+
+
+# --- the codec column (issue #149) ----------------------------------------------
+
+def test_codec_round_trips_through_upsert_and_track_info(conn):
+    mc.upsert_track(conn, track(codec="alac"))
+    assert mc.track_info(conn, "b:abc")["codec"] == "alac"
+
+
+def test_set_codec_updates_one_track(conn):
+    mc.upsert_track(conn, track())
+    assert mc.track_info(conn, "b:abc")["codec"] is None
+    mc.set_codec(conn, "b:abc", "aac")
+    assert mc.track_info(conn, "b:abc")["codec"] == "aac"
+
+
+def test_tracks_missing_codec_is_the_backfill_worklist(conn):
+    """Only unprobed m4a/mp4 tracks belong on it -- an mp3 never carries a
+    codec, and a probed track is done. Lowest path per track, so which copy
+    of a duplicated rip gets probed is deterministic."""
+    mc.upsert_track(conn, track(id="b:m4a"))
+    mc.upsert_file(conn, entry(path="/mnt/music/z.m4a", track_id="b:m4a"))
+    mc.upsert_file(conn, entry(path="/mnt/music/a.m4a", track_id="b:m4a"))
+    mc.upsert_track(conn, track(id="b:mp3", format="mp3"))
+    mc.upsert_file(conn, entry(path="/mnt/music/c.mp3", track_id="b:mp3"))
+    mc.upsert_track(conn, track(id="b:done", codec="aac"))
+    mc.upsert_file(conn, entry(path="/mnt/music/d.m4a", track_id="b:done"))
+    assert mc.tracks_missing_codec(conn) == [("b:m4a", "/mnt/music/a.m4a")]
+
+
 # --- tag normalization --------------------------------------------------------
 
 def test_norm_tag_blanks_become_none():
@@ -387,7 +465,7 @@ def test_track_info_returns_the_daemon_fields(conn):
     assert info == {"id": "b:abc", "title": "Safe and Sound",
                     "artist": "Capital Cities",
                     "album": "In a Tidal Wave of Mystery",
-                    "duration_s": 193.0, "format": "m4a"}
+                    "duration_s": 193.0, "format": "m4a", "codec": None}
 
 
 def test_track_info_unknown_id_is_none_not_an_error(conn):
