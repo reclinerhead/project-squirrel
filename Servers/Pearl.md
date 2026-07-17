@@ -745,8 +745,9 @@ files). Content-addressed originals plus pre-generated WebP sizes,
 ~300–500 MB, all rebuildable. The music app serves it via `/api/art` and
 needs `MERLE_MUSIC_ART=/srv/media-cache/music-art` in a `music-app` drop-in
 (`/etc/systemd/system/music-app.service.d/art.conf`, same pattern as the
-daemon's `cache.conf`). The venv needs **pillow** (mutagen was already
-there).
+daemon's `cache.conf`). The venv needs **pillow + mutagen** (both installed
+2026-07-17 — mutagen had only ever lived in system python3, where the
+indexer runs; the art pass runs from the venv like the daemon does).
 
 The pass (worklist-driven — a re-run after ingesting new albums touches
 only those albums; full coverage is a seconds-long no-op):
