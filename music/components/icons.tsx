@@ -145,6 +145,18 @@ export function ArrowRightIcon(p: IconProps) {
   );
 }
 
+export function RadioIcon(p: IconProps) {
+  // A broadcast dot with radiating arcs -- "play me stuff like this" as a
+  // transmitter, not a tower (the bar's glyph grammar is gear, not scenery).
+  return (
+    <I {...p}>
+      <circle cx="12" cy="12" r="1.7" fill="currentColor" stroke="none" />
+      <path d="M8.5 15.5a5 5 0 010-7M15.5 8.5a5 5 0 010 7" />
+      <path d="M5.8 18.2a9 9 0 010-12.4M18.2 5.8a9 9 0 010 12.4" />
+    </I>
+  );
+}
+
 export function ThumbIcon({ className, down }: IconProps & { down?: boolean }) {
   // One path, flipped for down -- the two thumbs must be exact mirrors or
   // the split control looks lopsided at 14px.

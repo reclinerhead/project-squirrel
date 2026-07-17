@@ -17,8 +17,11 @@
 // daemon is the writer. It rides the player proxy rather than a route of its
 // own because the door and its rules are already exactly right.
 
+// `queue` (issue #139) is the playlist engine's door: it generates a track
+// list on pearl and starts nothing -- the daemon stays one-track-at-a-time
+// on the transport verbs, and PlayerProvider owns the queue it fetches.
 const GET_VERBS = new Set(["state"]);
-const POST_VERBS = new Set(["play", "pause", "stop", "seek", "rate"]);
+const POST_VERBS = new Set(["play", "pause", "stop", "seek", "rate", "queue"]);
 
 function daemonBase(): string | null {
   const base = process.env.MERLE_MUSIC_DAEMON?.trim();

@@ -15,11 +15,21 @@
 // component that already knows.
 
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { trackFromRow, type TrackRow } from "@/lib/catalog-rows";
 import { queueView, removeUpcoming, shuffleUpcoming, type QueueView } from "@/lib/queue";
 import { nextRating, type ThumbClick } from "@/lib/rating";
 import type { Rating, Track } from "@/lib/types";
 
 const POLL_MS = 2000;
+
+// Radio mode (issue #139): how many tracks each engine fill returns, and how
+// few upcoming tracks trigger the next one. Count-based, not time-based --
+// clockless, and the provider already knows its index.
+const RADIO_FILL_N = 25;
+const RADIO_REFILL_AT = 3;
+
+/** What the engine can be seeded with today; mood/weather are Phase 5's. */
+export type RadioSeed = { track_id: string } | { artist: string };
 
 export type SeedQueue = {
   sequence: Track[];
@@ -42,6 +52,9 @@ type PlayerState = {
   ratingFor: (track: Track) => Rating;
 
   playTracks: (tracks: Track[], startIndex: number, from: string) => void;
+  /** Seed the engine, replace the queue, play. The queue then refills itself
+   * near its end for as long as radio mode holds -- never-ending on purpose. */
+  startRadio: (seed: RadioSeed, from: string) => void;
   togglePlay: () => void;
   next: () => void;
   prev: () => void;
@@ -83,6 +96,24 @@ type DaemonState = {
   track: { id: string } | null;
 };
 
+/** One engine fill: TrackRow shapes off the wire, mapped through the same
+ * tested trackFromRow every other surface uses. Empty on any failure -- a
+ * daemon that's down makes radio inert, not the app broken. */
+async function fetchRadioFill(seed: RadioSeed, exclude: string[]): Promise<Track[]> {
+  try {
+    const res = await fetch("/api/player/queue", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ seed, n: RADIO_FILL_N, exclude }),
+    });
+    if (!res.ok) return [];
+    const body = (await res.json()) as { tracks?: TrackRow[] };
+    return (body.tracks ?? []).map(trackFromRow);
+  } catch {
+    return [];
+  }
+}
+
 export function PlayerProvider({
   seed,
   children,
@@ -106,6 +137,11 @@ export function PlayerProvider({
   // Whether the daemon currently holds OUR track -- distinguishes "paused"
   // (resumable with a bare play) from "never started / already adjudicated".
   const loadedRef = useRef(false);
+  // Radio mode: the seed the engine keeps refilling from, null when the
+  // queue is an ordinary album/artist sequence. Any explicit playTracks
+  // exits radio -- the listener chose something, stop generating.
+  const [radioSeed, setRadioSeed] = useState<RadioSeed | null>(null);
+  const refillBusy = useRef(false);
 
   const view = useMemo(() => queueView(sequence, currentIndex), [sequence, currentIndex]);
   const current = view.current;
@@ -162,6 +198,27 @@ export function PlayerProvider({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPlaying, current?.id, currentIndex, sequence, repeat, outputId]);
 
+  // The refill loop: when radio mode runs low on upcoming tracks, fetch the
+  // next window with EVERYTHING this queue holds excluded -- played, playing,
+  // and upcoming -- so a refill never repeats it (the engine's own cooldown
+  // covers what actually played; the exclusion list covers what hasn't yet).
+  // Continuous play is this loop, not a server-side queue: the daemon stays
+  // one-track-at-a-time and generates lists on request.
+  useEffect(() => {
+    if (!radioSeed) return;
+    if (sequence.length - 1 - currentIndex > RADIO_REFILL_AT) return;
+    if (refillBusy.current) return;
+    refillBusy.current = true;
+    void fetchRadioFill(radioSeed, sequence.map((t) => t.id)).then((more) => {
+      refillBusy.current = false;
+      if (more.length === 0) return; // engine dry or daemon down: play out what's left
+      // The id filter is a belt over the engine's suspenders: the sequence
+      // may have grown (a second refill racing a slow first) between the
+      // fetch and this append.
+      setSequence((seq) => [...seq, ...more.filter((t) => !seq.some((s) => s.id === t.id))]);
+    });
+  }, [radioSeed, sequence, currentIndex]);
+
   const value: PlayerState = {
     view,
     playingFrom,
@@ -175,11 +232,25 @@ export function PlayerProvider({
 
     playTracks: (tracks, startIndex, from) => {
       if (tracks.length === 0) return;
+      setRadioSeed(null); // an explicit pick ends radio mode
       const i = Math.min(Math.max(startIndex, 0), tracks.length - 1);
       setSequence(tracks);
       setCurrentIndex(i);
       setPlayingFrom(from);
       void startTrack(tracks[i], outputId);
+    },
+    startRadio: (seed, from) => {
+      void fetchRadioFill(seed, []).then((tracks) => {
+        // An empty fill (unknown seed, daemon down, engine dry) leaves the
+        // current queue alone -- radio that can't start must not eat what
+        // was playing.
+        if (tracks.length === 0) return;
+        setRadioSeed(seed);
+        setSequence(tracks);
+        setCurrentIndex(0);
+        setPlayingFrom(from);
+        void startTrack(tracks[0], outputId);
+      });
     },
     togglePlay: () => {
       if (!current) return;

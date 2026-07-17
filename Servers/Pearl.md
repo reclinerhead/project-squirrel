@@ -652,6 +652,13 @@ or `skipped`, judged by the watcher thread. Presence rides `music/status`
 (retained; `offline` is the Last Will, so `systemctl stop` flips it within
 seconds — verified).
 
+Since #139 it also hosts the playlist engine's one endpoint: `POST /queue`
+`{seed, n, exclude}` returns an ordered track list from
+`jukebox/music_playlist.py` (pure scoring over the analysis axes — see
+`TechnicalGuide.md`). It generates lists only: no playback started, no queue
+state held, the transport verbs stay one-track-at-a-time. No new unit —
+it's the same daemon.
+
 It is also **the catalog's only writer** (issue #135): `POST /rate`
 `{track_id, value}` records the thumbs, with `value: 0` clearing one. The
 music app reads `music.db` directly but read-only, so every write — history
