@@ -150,6 +150,13 @@ describe("albumFromRow", () => {
     expect(al.year).toBe(0);
     expect(al.genre).toBe("Uncategorized");
   });
+
+  it("carries the focal anchor, centering when unanalyzed (issue #159)", () => {
+    const base = { artist: "X", album: "Y", year: 2020, genre: "Rock" };
+    expect(albumFromRow({ ...base, focal_y: 0.71 }, []).artFocalY).toBe(0.71);
+    expect(albumFromRow({ ...base, focal_y: null }, []).artFocalY).toBeNull();
+    expect(albumFromRow(base, []).artFocalY).toBeNull(); // pre-focal shape
+  });
 });
 
 describe("ratingFromRow", () => {

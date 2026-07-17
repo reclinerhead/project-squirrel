@@ -60,7 +60,11 @@
 # Usage (on pearl):
 #   MERLE_MUSIC_ART=/srv/media-cache/music-art \
 #   MERLE_MUSIC_DB=/home/todd/project-squirrel/music.db \
-#       venv/bin/python -m jukebox.music_art [--limit N]
+#       venv/bin/python -m jukebox.music_art [--limit N] [--focal]
+#
+# --focal (issue #159) backfills the focal_y column for rows extracted
+# before it existed; extraction computes focal inline now, so a fresh
+# install never runs it.
 # =============================================================================
 
 import argparse
@@ -103,6 +107,46 @@ def art_names(art_hash):
     return (art_hash + ".orig",
             art_hash + ".thumb.webp",
             art_hash + ".large.webp")
+
+
+
+# Focal analysis (issue #159): where the art's interest lives vertically.
+# The backdrop band crops the square cover; dead-center featured the empty
+# wall above the band on covers whose subject sits low. Interest = edge
+# density -- flat wall scores ~0, faces and busy texture score high -- and
+# the interest-weighted centroid of the rows is the crop anchor. Pure
+# arithmetic over a tiny grayscale grid; no ML, deterministic, PIL-only.
+FOCAL_GRID = 64
+# The crop band must never pin to an edge -- a poster-style cover with all
+# its ink at the very bottom still wants SOME context above the subject.
+FOCAL_CLAMP = (0.2, 0.8)
+
+
+def focal_from_image(img):
+    """The vertical interest centroid of one cover, 0..1 clamped to
+    FOCAL_CLAMP (0.5 = center = today's behavior). FIND_EDGES on a 64x64
+    grayscale downscale; the 1px border is cropped off first because the
+    filter treats the image boundary itself as an edge, and a hard frame
+    would drag every centroid toward 0.5 regardless of content. Uniform
+    covers (no edges anywhere) return exactly 0.5 rather than dividing
+    by zero."""
+    from PIL import ImageFilter
+    g = img.convert("L").resize((FOCAL_GRID, FOCAL_GRID))
+    e = g.filter(ImageFilter.FIND_EDGES).crop(
+        (1, 1, FOCAL_GRID - 1, FOCAL_GRID - 1))
+    width = FOCAL_GRID - 2
+    # tobytes(), not getdata(): mode-L pixels ARE the raw bytes, and this
+    # spelling is neither deprecated (Pillow 14) nor missing on older
+    # installs (pearl's venv predates get_flattened_data).
+    data = e.tobytes()
+    rows = [sum(data[y * width:(y + 1) * width]) for y in range(width)]
+    total = sum(rows)
+    if total <= 0:
+        return 0.5
+    centroid = sum(((y + 1 + 0.5) / FOCAL_GRID) * v
+                   for y, v in enumerate(rows)) / total
+    lo, hi = FOCAL_CLAMP
+    return round(min(hi, max(lo, centroid)), 4)
 
 
 def largest_picture(pictures):
@@ -182,7 +226,10 @@ def folder_picture(track_paths):
 
 def store_image(root, data):
     """Content-address one original and generate its sizes. Returns
-    (art_hash, w, h) or None for bytes Pillow can't decode. Idempotent by
+    (art_hash, w, h, focal_y) or None for bytes Pillow can't decode --
+    focal computed HERE, inline (issue #159), because the image is already
+    open: a fresh-install extraction produces complete rows in one run and
+    the --focal backfill exists only for pre-#159 history. Idempotent by
     construction: an image already in the store (same hash) writes nothing
     -- two albums sharing one JPEG share one set of files."""
     from PIL import Image
@@ -192,6 +239,7 @@ def store_image(root, data):
         img = Image.open(io.BytesIO(data))
         img.load()
         w, h = img.size
+        focal = focal_from_image(img)
     except Exception as e:
         print("[music] undecodable image (%d bytes): %s" % (len(data), e))
         return None
@@ -208,7 +256,46 @@ def store_image(root, data):
         tmp = name + ".part"
         variant.save(tmp, "WEBP", quality=WEBP_QUALITY)
         os.replace(tmp, name)
-    return art_hash, w, h
+    return art_hash, w, h, focal
+
+
+def backfill_focal(conn, root):
+    """Compute focal_y for art rows extracted before the column existed
+    (issue #159) -- the --codecs relationship exactly: extraction computes
+    inline going forward, this drains the history once and then returns
+    "0 rows" forever. Reads the .large.webp variant (600px is plenty for a
+    64x64 analysis grid and far cheaper than a full-size .orig); a missing
+    or undecodable file logs and skips, staying on the worklist for a
+    future run after the store is repaired."""
+    from PIL import Image
+    work = music_catalog.album_art_missing_focal(conn)
+    artists = music_catalog.artist_art_missing_focal(conn)
+    print("[music] focal backfill: %d albums, %d artists"
+          % (len(work), len(artists)))
+    started = time.time()
+    done = skipped = 0
+    for kind, items, setter in (
+            ("album", work, music_catalog.set_album_focal),
+            ("artist", artists, music_catalog.set_artist_focal)):
+        for key, art_hash in items:
+            _, _, large = art_names(art_hash)
+            try:
+                with Image.open(os.path.join(root, large)) as img:
+                    focal = focal_from_image(img)
+            except Exception as e:
+                print("[music] focal failed, skipping %s %s -- %s"
+                      % (kind, key, e))
+                skipped += 1
+                continue
+            setter(conn, key, focal)
+            done += 1
+            if done % LOG_EVERY == 0:
+                conn.commit()
+                print("[music] focal %d/%d" % (done, len(work) + len(artists)))
+    conn.commit()
+    print("[music] focal backfill done in %.1f min -- %d computed, %d skipped"
+          % ((time.time() - started) / 60, done, skipped))
+    return 0
 
 
 def main():
@@ -218,6 +305,10 @@ def main():
     ap.add_argument("--art", default=None, help="art store dir")
     ap.add_argument("--limit", type=int, default=0,
                     help="stop after N albums (smoke test)")
+    ap.add_argument("--focal", action="store_true",
+                    help="backfill focal_y for art rows extracted before "
+                         "the column existed (issue #159); new extractions "
+                         "compute it inline and never need this")
     args = ap.parse_args()
 
     root = args.art or art_root()
@@ -236,6 +327,8 @@ def main():
         return 1
 
     conn = music_catalog.connect(args.db or music_catalog.db_path())
+    if args.focal:
+        return backfill_focal(conn, root)
     work = music_catalog.albums_missing_art(conn)
     print("[music] art pass: %d albums on the worklist" % len(work))
 
@@ -260,9 +353,9 @@ def main():
             if stored is None:
                 tally["error"] += 1
                 continue
-            art_hash, w, h = stored
+            art_hash, w, h, focal = stored
             music_catalog.set_album_art(conn, album_key, art_hash, source,
-                                        w, h, int(time.time()))
+                                        w, h, int(time.time()), focal)
             tally[source] += 1
         except OSError as e:
             print("[music] art failed, skipping: %s -- %s" % (album_key, e))
@@ -283,7 +376,8 @@ def main():
             music_catalog.artists_missing_art(conn)).items()):
         music_catalog.set_artist_art(conn, artist, row["art_hash"],
                                      music_catalog.ART_DERIVED,
-                                     row["w"], row["h"], int(time.time()))
+                                     row["w"], row["h"], int(time.time()),
+                                     row.get("focal_y"))
         promoted += 1
     conn.commit()
 

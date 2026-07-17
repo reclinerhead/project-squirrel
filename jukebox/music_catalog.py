@@ -72,7 +72,7 @@ DEFAULT_DB_PATH = "music.db"
 # Bumped whenever MIGRATIONS grows. A fresh file gets SCHEMA (already current)
 # and is stamped straight to this; an existing file replays only the steps
 # above its stored PRAGMA user_version.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
 
 # The four-level thumbs (#115's feedback model). Phase 3 reads these as RULES
 # -- strong-down is a hard filter applied BEFORE candidate selection, not an
@@ -202,7 +202,8 @@ CREATE TABLE IF NOT EXISTS album_art (
     source     TEXT NOT NULL,
     w          INTEGER,
     h          INTEGER,
-    updated_at INTEGER
+    updated_at INTEGER,
+    focal_y    REAL
 );
 
 CREATE TABLE IF NOT EXISTS artist_art (
@@ -211,7 +212,8 @@ CREATE TABLE IF NOT EXISTS artist_art (
     source     TEXT NOT NULL,
     w          INTEGER,
     h          INTEGER,
-    updated_at INTEGER
+    updated_at INTEGER,
+    focal_y    REAL
 );
 """
 
@@ -236,6 +238,13 @@ MIGRATIONS = (
     # -- exactly the "one-line append against accumulated ratings" it was
     # built for.
     "ALTER TABLE tracks ADD COLUMN codec TEXT;",
+    # 2 -> 3, 3 -> 4 (issue #159): where the art's interest lives vertically,
+    # 0..1, the extraction pass's edge-density centroid; NULL = not analyzed
+    # (the --focal worklist). TWO steps, one ALTER each, on purpose: migrate()
+    # tolerates "duplicate column" by stamping the step done, so a two-ALTER
+    # script whose first line already landed would skip its second forever.
+    "ALTER TABLE album_art ADD COLUMN focal_y REAL;",
+    "ALTER TABLE artist_art ADD COLUMN focal_y REAL;",
 )
 
 
@@ -592,31 +601,67 @@ def tracks_missing_codec(conn):
     return [(r["track_id"], r["path"]) for r in rows]
 
 
-def set_album_art(conn, album_key, art_hash, source, w, h, at):
+def set_album_art(conn, album_key, art_hash, source, w, h, at, focal_y=None):
     """Record an album's art. THE OWNER RULE LIVES IN THE SQL: an existing
     row with source='owner' is never touched -- the listener's own pick
     survives every automated re-run by construction, not by caller
-    discipline (issue #153). Everything else refreshes."""
+    discipline (issue #153). Everything else refreshes. focal_y rides the
+    row since #159 (extraction computes it inline); defaulted so pre-focal
+    callers and tests stay honest about "not analyzed"."""
     conn.execute(
         "INSERT INTO album_art (album_key, art_hash, source, w, h, "
-        "updated_at) VALUES (?, ?, ?, ?, ?, ?) "
+        "updated_at, focal_y) VALUES (?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(album_key) DO UPDATE SET "
         "art_hash=excluded.art_hash, source=excluded.source, w=excluded.w, "
-        "h=excluded.h, updated_at=excluded.updated_at "
+        "h=excluded.h, updated_at=excluded.updated_at, "
+        "focal_y=excluded.focal_y "
         "WHERE album_art.source != ?",
-        (album_key, art_hash, source, w, h, at, ART_OWNER))
+        (album_key, art_hash, source, w, h, at, focal_y, ART_OWNER))
 
 
-def set_artist_art(conn, artist, art_hash, source, w, h, at):
+def set_artist_art(conn, artist, art_hash, source, w, h, at, focal_y=None):
     """Record an artist's image, same owner rule as set_album_art."""
     conn.execute(
         "INSERT INTO artist_art (artist, art_hash, source, w, h, "
-        "updated_at) VALUES (?, ?, ?, ?, ?, ?) "
+        "updated_at, focal_y) VALUES (?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(artist) DO UPDATE SET "
         "art_hash=excluded.art_hash, source=excluded.source, w=excluded.w, "
-        "h=excluded.h, updated_at=excluded.updated_at "
+        "h=excluded.h, updated_at=excluded.updated_at, "
+        "focal_y=excluded.focal_y "
         "WHERE artist_art.source != ?",
-        (artist, art_hash, source, w, h, at, ART_OWNER))
+        (artist, art_hash, source, w, h, at, focal_y, ART_OWNER))
+
+
+def set_album_focal(conn, album_key, focal_y):
+    """The --focal backfill's write: focal_y ONLY, deliberately no owner
+    guard -- analysis of where the interest sits isn't a clobber of WHICH
+    image the owner chose (issue #159), and an owner-override image wants
+    a good crop as much as any other."""
+    conn.execute("UPDATE album_art SET focal_y = ? WHERE album_key = ?",
+                 (focal_y, album_key))
+
+
+def set_artist_focal(conn, artist, focal_y):
+    """set_album_focal's artist twin."""
+    conn.execute("UPDATE artist_art SET focal_y = ? WHERE artist = ?",
+                 (focal_y, artist))
+
+
+def album_art_missing_focal(conn):
+    """The --focal backfill worklist: rows extracted before the column
+    existed (issue #159). (key, art_hash) pairs, sorted for stable logs;
+    inline computation at extraction keeps this list empty from here on,
+    so on a fresh install this returns nothing, ever."""
+    return [(r["album_key"], r["art_hash"]) for r in conn.execute(
+        "SELECT album_key, art_hash FROM album_art "
+        "WHERE focal_y IS NULL ORDER BY album_key")]
+
+
+def artist_art_missing_focal(conn):
+    """album_art_missing_focal's artist twin."""
+    return [(r["artist"], r["art_hash"]) for r in conn.execute(
+        "SELECT artist, art_hash FROM artist_art "
+        "WHERE focal_y IS NULL ORDER BY artist")]
 
 
 def albums_missing_art(conn):
@@ -648,7 +693,7 @@ def artists_missing_art(conn):
         f"SELECT COALESCE(NULLIF(t.album_artist, ''), t.artist, "
         f"       'Unknown Artist') AS artist, "
         f"       {ALBUM_KEY_SQL} AS album_key, "
-        f"       aa.art_hash, aa.w, aa.h, "
+        f"       aa.art_hash, aa.w, aa.h, aa.focal_y, "
         f"       COALESCE(SUM(r.value), 0) AS score "
         f"FROM tracks t "
         f"JOIN album_art aa ON aa.album_key = {ALBUM_KEY_SQL} "

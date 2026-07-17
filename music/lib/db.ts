@@ -83,6 +83,21 @@ function hasArt(db: DatabaseSync): boolean {
     .get();
 }
 
+/** Whether album_art carries focal_y yet (issue #159, migration v3). The
+ * table guard above isn't enough here: a snapshot can hold the table from
+ * before the column's migration, and SELECTing a missing column doesn't
+ * degrade, it throws -- which withDb would turn into an empty catalog. */
+function hasFocal(db: DatabaseSync): boolean {
+  return (
+    hasArt(db) &&
+    !!db.prepare("SELECT 1 FROM pragma_table_info('album_art') WHERE name = 'focal_y'").get()
+  );
+}
+
+// Focal's scalar subquery, ART_HASH_SUB's twin (issue #159): where the
+// cover's interest lives vertically, for the album page's backdrop crop.
+const FOCAL_SUB = `(SELECT focal_y FROM album_art WHERE album_key = ${ALBUM_KEY})`;
+
 // The rating rides along on every track the app hands out (issue #135). A
 // persisted thumb that doesn't come back on load is indistinguishable from a
 // lost one, so hydration is not a separate feature -- it's the other half of
@@ -109,13 +124,14 @@ export function albumIndex(db: DatabaseSync): AlbumIndexEntry[] {
   // safe because every row in a (artist, album, genre) group derives the
   // same key, so SQLite's any-row semantics can't pick differently.
   const art = hasArt(db) ? ART_HASH_SUB : "NULL";
+  const focal = hasFocal(db) ? FOCAL_SUB : "NULL";
   const rows = db
     .prepare(
       `SELECT ${ALBUM_ARTIST} AS artist,
               COALESCE(NULLIF(t.album, ''), 'Unknown Album') AS album,
               t.genre AS genre, COUNT(*) AS n,
               MAX(t.year) AS year, MAX(f.mtime) AS added,
-              ${art} AS art_hash
+              ${art} AS art_hash, ${focal} AS focal_y
        FROM tracks t JOIN track_files f ON f.track_id = t.id
        GROUP BY 1, 2, 3`,
     )

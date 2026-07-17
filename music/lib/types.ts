@@ -54,6 +54,11 @@ export type Album = {
   /** Real cover art's content hash (issue #153), or null/absent for the
    * ~10% the extractor found nothing for -- those keep the generated SVG. */
   artHash?: string | null;
+  /** Where the cover's interest lives vertically, 0..1 (issue #159) -- the
+   * extraction pass's edge-density centroid. Anchors the album page's
+   * cropped backdrop band; null/absent = center, exactly the pre-focal
+   * behavior. */
+  artFocalY?: number | null;
 };
 
 export type Artist = {
