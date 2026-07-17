@@ -9,6 +9,7 @@
 
 import { usePlayer } from "./PlayerProvider";
 import { EqGlyph } from "./EqGlyph";
+import { RadioIcon } from "./icons";
 import { RatingControl } from "./RatingControl";
 import { formatDuration } from "@/lib/format";
 import type { Track } from "@/lib/types";
@@ -30,7 +31,7 @@ export function TrackList({
   showArtist?: boolean;
   numbered?: boolean;
 }) {
-  const { view, isPlaying, playTracks, ratingFor, rate } = usePlayer();
+  const { view, isPlaying, playTracks, startRadio, ratingFor, rate } = usePlayer();
   const playFrom = queue ?? tracks;
 
   return (
@@ -53,7 +54,7 @@ export function TrackList({
                 playTracks(playFrom, Math.max(i, 0), playingFrom);
               }
             }}
-            className="group grid cursor-pointer grid-cols-[2rem_minmax(0,1fr)_auto_auto] items-center gap-3 rounded-sm px-3 py-2 transition-colors hover:bg-panel2"
+            className="group grid cursor-pointer grid-cols-[2rem_minmax(0,1fr)_auto_auto_auto] items-center gap-3 rounded-sm px-3 py-2 transition-colors hover:bg-panel2"
           >
             <span className="flex w-8 items-center justify-center">
               {isCurrent ? (
@@ -70,6 +71,20 @@ export function TrackList({
               </span>
               {showArtist && <span className="block truncate text-xs text-inkfaint">{t.artist}</span>}
             </span>
+            {/* Radio from this row (issue #139) -- always mounted, fades in
+             * like the rating control: reveal-on-hover must never reflow. */}
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                startRadio({ track_id: t.id }, `Radio · ${t.title}`);
+              }}
+              aria-label={`radio from ${t.title}`}
+              title={`Radio from ${t.title}`}
+              className="rounded-sm p-1 text-inkfaint opacity-0 transition-opacity hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
+            >
+              <RadioIcon className="h-4 w-4" />
+            </button>
             <RatingControl
               rating={ratingFor(t)}
               onRate={(c) => rate(t, c)}

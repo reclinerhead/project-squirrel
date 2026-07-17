@@ -75,6 +75,7 @@
 # =============================================================================
 
 import os
+import random
 import re
 import socket
 import threading
@@ -87,7 +88,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 import bus
-from jukebox import music_catalog
+from jukebox import music_catalog, music_playlist
 
 STREAM_CHUNK = 1 << 20
 
@@ -556,6 +557,63 @@ class Player:
                     self._record_outcome_locked()
 
 
+# --- the queue half: candidates for the Phase 3 engine ---------------------------
+
+# How many tracks a /queue call returns unless asked, and the most it will
+# ever return. The GUI refills in windows, so a bigger n buys fewer refills
+# at the cost of staler exclusions.
+QUEUE_DEFAULT_N = 25
+QUEUE_MAX_N = 100
+
+# What each queued track carries on the wire: exactly the GUI's TrackRow shape
+# (music/lib/catalog-rows.ts), so the client feeds responses through the same
+# tested trackFromRow mapper every other surface uses. Scoring fields stay
+# server-side -- the GUI has no business rendering raw BPM as precise
+# (measured fact 1 in music_playlist.py).
+QUEUE_TRACK_KEYS = ("id", "title", "artist", "album", "album_artist",
+                    "track_no", "duration_s", "format", "bitrate",
+                    "samplerate", "rating")
+
+
+def queue_candidates(conn, now):
+    """Every track the engine may consider, as plain dicts. THE HARD FILTERS
+    LIVE IN THIS WHERE CLAUSE, not in the scorer (epic principle 4 -- the ban
+    is enforced by the query, not entrusted to arithmetic):
+
+      - strong-down (-2) never enters the candidate set;
+      - anything played inside the cooldown window is out (the horizon is the
+        engine's COOLDOWN_HOURS -- one constant, shared, so the query and the
+        pure rule cannot drift);
+      - bpm IS NOT NULL -- the engine scores mood axes, and a track that
+        predates analysis has none;
+      - the track has a location the daemon can actually stream."""
+    cutoff = now - music_playlist.COOLDOWN_HOURS * 3600.0
+    rows = conn.execute(
+        "SELECT t.id, t.title, t.artist, t.album, t.album_artist, "
+        "t.track_no, t.duration_s, t.format, t.bitrate, t.samplerate, "
+        "t.bpm, t.replaygain_db, t.dynamic_range_db, t.year, t.genre, "
+        "r.value AS rating "
+        "FROM tracks t LEFT JOIN ratings r ON r.track_id = t.id "
+        "WHERE t.bpm IS NOT NULL "
+        "AND (r.value IS NULL OR r.value != ?) "
+        "AND t.id NOT IN (SELECT track_id FROM play_history "
+        "                 WHERE played_at >= ?) "
+        "AND EXISTS (SELECT 1 FROM track_files f WHERE f.track_id = t.id)",
+        (music_catalog.RATING_STRONG_DOWN, cutoff)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def seed_track_row(conn, track_id):
+    """The feature row a track seed resolves from -- fetched OUTSIDE the
+    candidate filters on purpose: the seed is usually the track playing right
+    now, which the cooldown just excluded. Its features are still the target;
+    it just can't be in the queue (resolve_seed excludes it)."""
+    row = conn.execute(
+        "SELECT id, bpm, replaygain_db, dynamic_range_db, year, genre "
+        "FROM tracks WHERE id = ?", (track_id,)).fetchone()
+    return dict(row) if row else None
+
+
 # --- the app --------------------------------------------------------------------
 
 def create_app(conn=None, renderer=None, stream_base=None,
@@ -690,6 +748,65 @@ def create_app(conn=None, renderer=None, stream_base=None,
                 except ValueError as e:
                     return JSONResponse({"error": str(e)}, status_code=400)
         return JSONResponse({"track_id": track_id, "value": value})
+
+    @app.post("/queue")
+    def post_queue(cmd: dict):
+        # The playlist engine's one door (issue #139). Generates a list, full
+        # stop: it does not start playback, does not touch the renderer, and
+        # holds no queue state -- the daemon stays one-track-at-a-time on the
+        # transport verbs, and the GUI owns the queue it fetches.
+        #
+        # Guard order is /rate's: allowlist every wire id BEFORE any query,
+        # 404 an unknown-but-well-formed seed track, and let the pure engine
+        # decline everything else (an unknown artist is an empty queue, not
+        # an error -- there is nothing wrong with the request but the taste).
+        seed = cmd.get("seed")
+        if not isinstance(seed, dict):
+            return JSONResponse({"error": "seed must be an object"},
+                                status_code=400)
+        track_id = seed.get("track_id")
+        artist = seed.get("artist")
+        if track_id is not None:
+            if not isinstance(track_id, str) or \
+                    not music_catalog.valid_track_id(track_id):
+                return JSONResponse({"error": "malformed track id"},
+                                    status_code=400)
+        elif not (isinstance(artist, str) and artist.strip()):
+            return JSONResponse(
+                {"error": "seed needs a track_id or an artist"},
+                status_code=400)
+        n = cmd.get("n", QUEUE_DEFAULT_N)
+        if isinstance(n, bool) or not isinstance(n, int) \
+                or not 1 <= n <= QUEUE_MAX_N:
+            return JSONResponse({"error": "n must be an integer in 1..%d"
+                                          % QUEUE_MAX_N}, status_code=400)
+        exclude = cmd.get("exclude", [])
+        if not isinstance(exclude, list) or any(
+                not isinstance(x, str) or not music_catalog.valid_track_id(x)
+                for x in exclude):
+            return JSONResponse({"error": "exclude must be a list of "
+                                          "track ids"}, status_code=400)
+        now = time.time()
+        p = player()
+        with p.lock:
+            if track_id is not None:
+                row = seed_track_row(p.conn, track_id)
+                if row is None:
+                    return JSONResponse({"error": "unknown track"},
+                                        status_code=404)
+                engine_seed = {"track": row}
+            else:
+                engine_seed = {"artist": artist.strip()}
+            candidates = queue_candidates(p.conn, now)
+        # Production entropy; tests exercise determinism against the pure
+        # engine directly with a seeded RNG.
+        tracks = music_playlist.build_queue(candidates, engine_seed, n,
+                                            random.Random(), now,
+                                            exclude_ids=exclude)
+        print("[music] queue: %s -> %d tracks"
+              % (dict(seed), len(tracks)))
+        return {"tracks": [{k: t.get(k) for k in QUEUE_TRACK_KEYS}
+                           for t in tracks]}
 
     @app.api_route("/stream/{track_id}", methods=["GET", "HEAD"])
     def stream(track_id: str, request: Request):

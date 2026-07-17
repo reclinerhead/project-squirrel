@@ -184,7 +184,8 @@ def rig(tmp_path):
     mc.upsert_track(conn, {
         "id": "b:abc", "title": "Safe And Sound", "artist": "Capital Cities",
         "album": "In A Tidal Wave Of Mystery", "duration_s": 193.0,
-        "format": "m4a", "indexed_at": 1000})
+        "format": "m4a", "indexed_at": 1000, "year": 2013, "genre": "Pop",
+        "bpm": 118.0, "replaygain_db": -9.1, "dynamic_range_db": 5.0})
     mc.upsert_file(conn, {
         "path": str(audio_file), "track_id": "b:abc", "size": len(AUDIO),
         "mtime": 200, "audio_offset": 0, "audio_length": len(AUDIO),
@@ -197,7 +198,9 @@ def rig(tmp_path):
     mc.upsert_track(conn, {"id": "b:odd", "title": "Odd One",
                            "artist": "X", "album": "Y",
                            "duration_s": 100.0, "format": "aac",
-                           "indexed_at": 1000})
+                           "indexed_at": 1000, "year": 2012, "genre": "Pop",
+                           "bpm": 121.0, "replaygain_db": -8.8,
+                           "dynamic_range_db": 5.5})
     mc.upsert_file(conn, {"path": str(odd_file), "track_id": "b:odd",
                           "size": len(AUDIO), "mtime": 200,
                           "audio_offset": 0, "audio_length": len(AUDIO),
@@ -468,3 +471,95 @@ def test_rating_a_track_does_not_touch_playback(rig):
     client.post("/rate", json={"track_id": "b:abc", "value": -2})
     assert renderer.calls == before
     assert client.get("/state").json()["track"]["id"] == "b:abc"
+
+
+# --- POST /queue (issue #139) ----------------------------------------------------
+#
+# The route boundary only: the engine's arithmetic, anti-repetition, and
+# determinism live in test_music_playlist.py. Here: seed validation, the 400s,
+# and the promise that whatever comes back can actually stream.
+
+def test_queue_from_a_track_seed_returns_streamable_tracks(rig):
+    client, conn, _ = rig
+    r = client.post("/queue", json={"seed": {"track_id": "b:abc"}})
+    assert r.status_code == 200
+    tracks = r.json()["tracks"]
+    assert tracks, "two candidates minus the seed leaves one"
+    for t in tracks:
+        assert set(t) == set(md.QUEUE_TRACK_KEYS)  # the GUI's TrackRow shape
+        assert mc.file_for_track(conn, t["id"]) is not None
+    # radio from a song must not open by replaying it
+    assert "b:abc" not in [t["id"] for t in tracks]
+
+
+def test_queue_from_an_artist_seed_works(rig):
+    client, _, _ = rig
+    r = client.post("/queue", json={"seed": {"artist": "X"}})
+    assert r.status_code == 200
+    assert [t["id"] for t in r.json()["tracks"]]
+
+
+def test_queue_for_an_unknown_artist_is_empty_not_an_error(rig):
+    client, _, _ = rig
+    r = client.post("/queue", json={"seed": {"artist": "Nobody At All"}})
+    assert r.status_code == 200
+    assert r.json()["tracks"] == []
+
+
+def test_queue_respects_n_and_exclude(rig):
+    client, _, _ = rig
+    r = client.post("/queue", json={"seed": {"track_id": "b:abc"},
+                                    "n": 1, "exclude": ["b:odd"]})
+    assert r.status_code == 200
+    assert r.json()["tracks"] == []  # the one candidate was excluded
+
+
+def test_queue_400s_garbage(rig):
+    client, _, _ = rig
+    bad = [
+        {},                                          # no seed at all
+        {"seed": "b:abc"},                           # seed not an object
+        {"seed": {}},                                # neither track nor artist
+        {"seed": {"track_id": "../../etc/passwd"}},  # traversal-shaped id
+        {"seed": {"track_id": 7}},                   # non-string id
+        {"seed": {"artist": ""}},                    # blank artist
+        {"seed": {"artist": "X"}, "n": 0},           # n out of range
+        {"seed": {"artist": "X"}, "n": True},        # bool masquerading as int
+        {"seed": {"artist": "X"}, "n": "lots"},      # n not an integer
+        {"seed": {"artist": "X"}, "exclude": "b:abc"},      # not a list
+        {"seed": {"artist": "X"}, "exclude": ["b abc"]},    # malformed id
+    ]
+    for body in bad:
+        assert client.post("/queue", json=body).status_code == 400, body
+
+
+def test_queue_404s_an_unknown_seed_track(rig):
+    client, _, _ = rig
+    r = client.post("/queue", json={"seed": {"track_id": "b:nope"}})
+    assert r.status_code == 404
+
+
+def test_queue_does_not_touch_playback(rig):
+    """The do-not-change line verbatim: /queue generates lists; it does not
+    start playback or hold queue state. The daemon stays one-track-at-a-time
+    on the transport verbs."""
+    client, _, renderer = rig
+    client.post("/play", json={"track_id": "b:abc", "output": "denon"})
+    before = list(renderer.calls)
+    client.post("/queue", json={"seed": {"track_id": "b:abc"}})
+    assert renderer.calls == before
+    assert client.get("/state").json()["track"]["id"] == "b:abc"
+
+
+def test_queue_excludes_a_track_played_moments_ago(rig):
+    """Anti-repetition against REAL play_history: play b:odd (recorded by the
+    watcher's bookkeeping via /stop), then seed a queue -- b:odd is inside
+    the cooldown window and must be gone."""
+    client, _, renderer = rig
+    renderer.pos = (12.0, 193.0)
+    client.post("/play", json={"track_id": "b:abc", "output": "denon"})
+    client.get("/state")
+    client.post("/stop")  # records the history row for b:abc
+    r = client.post("/queue", json={"seed": {"artist": "X"}})
+    assert r.status_code == 200
+    assert "b:abc" not in [t["id"] for t in r.json()["tracks"]]

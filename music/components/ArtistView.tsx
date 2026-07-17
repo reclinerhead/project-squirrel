@@ -12,11 +12,11 @@ import { coverParams } from "@/lib/cover";
 import { usePlayer } from "@/components/PlayerProvider";
 import { CoverArt } from "@/components/CoverArt";
 import { TrackList } from "@/components/TrackList";
-import { PlayIcon, ShuffleIcon } from "@/components/icons";
+import { PlayIcon, RadioIcon, ShuffleIcon } from "@/components/icons";
 import type { Artist, Track } from "@/lib/types";
 
 export function ArtistView({ artist, topTracks }: { artist: Artist; topTracks: Track[] }) {
-  const { playTracks, toggleShuffle, shuffle } = usePlayer();
+  const { playTracks, startRadio, toggleShuffle, shuffle } = usePlayer();
   const [bioOpen, setBioOpen] = useState(false);
 
   const allTracks = artist.albums.flatMap((al) => al.tracks);
@@ -73,6 +73,15 @@ export function ArtistView({ artist, topTracks }: { artist: Artist; topTracks: T
               className="flex items-center gap-2 rounded-full border border-linebright px-5 py-2 text-sm text-ink transition-colors hover:bg-panel2"
             >
               <ShuffleIcon className="h-4 w-4" /> Shuffle
+            </button>
+            {/* Radio (issue #139): seed the engine with this artist's centroid
+             * and let the queue refill itself. Generated on pearl, no LLM. */}
+            <button
+              type="button"
+              onClick={() => startRadio({ artist: artist.name }, `Radio · ${artist.name}`)}
+              className="flex items-center gap-2 rounded-full border border-linebright px-5 py-2 text-sm text-ink transition-colors hover:bg-panel2"
+            >
+              <RadioIcon className="h-4 w-4" /> Radio
             </button>
           </div>
         </div>
