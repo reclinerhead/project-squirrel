@@ -322,7 +322,7 @@ The music player UI is a **second top-level Next app, `music/`, a peer of `mcc/`
 
 Everything on pearl used to be reached by memorized `IP:port` pairs. Since
 #141 there is **one front door: Caddy on pearl:80**, and the house speaks
-names — `pearl/admin` (Pi-hole), `mcc.lan` (:3000), `music.lan` (:3001).
+names — `pearl/mole` (Pi-hole), `mcc.lan` (:3000), `music.lan` (:3001).
 The names are Pi-hole Local DNS records, and they use the **`.lan` suffix**
 because that's the search domain pearl's DHCP already hands out — so a
 desktop can type `mcc/` and the resolver fills in the rest. (The epic
@@ -332,9 +332,13 @@ both spellings (`http://mcc, http://mcc.lan`) because the browser's Host
 header carries what was typed, not what DNS resolved.
 
 Pi-hole's own web server (v6: embedded in `pihole-FTL`) moved off 80/443 to
-**loopback:8081** to release the ports — Caddy proxies `/admin` *and* `/api`
+**loopback:8081** to release the ports — Caddy proxies `/mole` *and* `/api`
 (the v6 admin is a shell over its API; proxy one without the other and you
-get a login page that can't log in). DNS (:53) and DHCP (:67) were untouched.
+get a login page that can't log in). The `/mole` path is not a Caddy
+rewrite: the UI's own home moved there (`webserver.paths.webhome =
+"/mole/"`, renamed from the stock `/admin/` in #143 to match the Mole
+tile), so the app generates `/mole/...` links itself and the proxy stays
+dumb. `/api` ignores webhome and stays put. DNS (:53) and DHCP (:67) were untouched.
 Plain HTTP, `auto_https off`, nothing on 443: TLS/auth is the epic's
 deferred single-choke-point payoff, not a current feature. The broker's
 WebSocket (:9001) is deliberately *not* proxied — browsers speak MQTT to it

@@ -28,7 +28,7 @@
       "name": "Mole",
       "icon": "mound",
       "color": "#8a7a63",
-      "url": "/admin/",
+      "url": "/mole/",
       "status": "live",
       "description": "the mole hole — where the ads go in and don't come back"
     },
