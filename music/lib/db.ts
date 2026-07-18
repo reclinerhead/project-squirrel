@@ -29,7 +29,7 @@ import {
   type AlbumRow,
   type TrackRow,
 } from "./catalog-rows";
-import type { Album, Artist, Track } from "./types";
+import type { Album, Artist, ArtistBio, Track } from "./types";
 
 export function openDb(): DatabaseSync | null {
   const path = process.env.MERLE_MUSIC_DB;
@@ -219,12 +219,45 @@ export function artistAlbums(entries: AlbumIndexEntry[]): Map<string, AlbumIndex
   return byArtist;
 }
 
+/** Whether `artists` carries the provenance columns yet (issue #170,
+ * migrations v8/v9) -- the hasFocal situation exactly: the table has existed
+ * since Phase 0, so a table-level guard would pass while SELECTing bio_src
+ * on a pre-#170 snapshot throws, and withDb would turn that into an empty
+ * catalog. The fallback is the prose without its stamp, never no prose. */
+function hasBioSrc(db: DatabaseSync): boolean {
+  return !!db
+    .prepare("SELECT 1 FROM pragma_table_info('artists') WHERE name = 'bio_src'")
+    .get();
+}
+
+const bioCols = (db: DatabaseSync) =>
+  hasBioSrc(db) ? "bio, bio_src, bio_url" : "bio, NULL AS bio_src, NULL AS bio_url";
+
+type BioRow = { bio: string | null; bio_src: string | null; bio_url: string | null };
+
+/** One artist's prose and attribution, without hydrating their discography
+ * (issue #170) -- what the album page's About panel needs. Returns null when
+ * there is nothing to show, so the panel is absent rather than empty. */
+export function artistBioFor(db: DatabaseSync, name: string): ArtistBio | null {
+  const row = db
+    .prepare(`SELECT ${bioCols(db)} FROM artists WHERE name = ?`)
+    .get(name) as BioRow | undefined;
+  if (!row?.bio) return null;
+  return {
+    name,
+    id: artistIdOf(name),
+    bio: row.bio,
+    bioSrc: row.bio_src,
+    bioUrl: row.bio_url,
+  };
+}
+
 export function artistFor(db: DatabaseSync, name: string): Artist | null {
   const entries = albumIndex(db).filter((e) => e.artist === name);
   if (entries.length === 0) return null;
   const bio = db
-    .prepare("SELECT bio FROM artists WHERE name = ?")
-    .get(name) as { bio: string | null } | undefined;
+    .prepare(`SELECT ${bioCols(db)} FROM artists WHERE name = ?`)
+    .get(name) as BioRow | undefined;
   const art = hasArt(db)
     ? (db.prepare("SELECT art_hash FROM artist_art WHERE artist = ?").get(name) as
         | { art_hash: string }
@@ -234,6 +267,8 @@ export function artistFor(db: DatabaseSync, name: string): Artist | null {
     id: artistIdOf(name),
     name,
     bio: bio?.bio ?? "",
+    bioSrc: bio?.bio_src ?? null,
+    bioUrl: bio?.bio_url ?? null,
     albums: entries.map((e) => hydrateAlbum(db, e)),
     artHash: art?.art_hash ?? null,
   };

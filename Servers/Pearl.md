@@ -859,6 +859,41 @@ and re-extract. Self-healing, minutes. The pass ends with an UNMAPPED report
 — a new genre tag from a future ingestion shows up there, gets one rules
 line, and a re-run closes the vocabulary again.
 
+### Artist bios (issue #170)
+
+`bio_rules.yaml` (in the repo — it IS the ruleset; edits are commits) drives one
+pass that fills `artists.bio` / `bio_src` / `bio_url` / `mbid` from MusicBrainz
+identity + Wikipedia lead extracts. The venv needs **pyyaml** (present since
+2026-07-18); no other new dependency — the fetch is stdlib `urllib`. This is
+the first pass that touches the network, and it is the SLOW one: MusicBrainz
+throttles to 1 request/second per IP and the do-not-change list forbids
+parallelising it, so a full run over ~720 identities is roughly half an hour,
+once. Worklist-driven — a re-run after ingesting new artists touches only
+those, and full coverage is a seconds-long no-op.
+
+```
+cd ~/project-squirrel && MERLE_MUSIC_DB=/home/todd/project-squirrel/music.db \
+    venv/bin/python -m jukebox.music_bio [--dry-run] [--retry-missing]
+```
+
+Last.fm fallback is OFF unless `MERLE_LASTFM_KEY` is set — the pass prints
+which mode it is in on the first line. Wikipedia-only is a complete pass, not
+a degraded one; register a key and export it in the unit's drop-in only if the
+no-prose count is worth chasing.
+
+Run this AFTER the normalization pass: the worklist keys on the canonical
+`artist_norm` identity, so bios fetched before a casing collapse would strand
+under the old name. The pass ends with an UNRESOLVED report — artists it
+refuses to guess at, printed with their candidate MBIDs and disambiguation
+text. Paste the right MBID into `bio_rules.yaml`'s `pin` section (or add the
+name to `skip`), re-run, and exactly those artists change. Expect the residents
+to be iTunes naming variants (`10.000 Maniacs` with periods, `Ali, Azam`
+inverted) and classical, where album titles genuinely disagree between
+catalogs. A hand-written bio (`bio_src='owner'`) survives every re-run by
+construction — the upsert refuses to touch it — and `--retry-missing` re-probes
+artists a previous run attempted and found nothing for, without ever reopening
+an owner row.
+
 ### Codec backfill (issue #149, one-time)
 
 `format` can't tell ALAC from purchase-AAC inside `.m4a`, and the browser

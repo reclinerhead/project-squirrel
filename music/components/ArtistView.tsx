@@ -11,6 +11,7 @@ import Link from "next/link";
 import { coverParams } from "@/lib/cover";
 import { usePlayer } from "@/components/PlayerProvider";
 import { CoverArt } from "@/components/CoverArt";
+import BioSource from "@/components/BioSource";
 import { TrackList } from "@/components/TrackList";
 import { PlayIcon, RadioIcon, ShuffleIcon } from "@/components/icons";
 import type { Artist, Track } from "@/lib/types";
@@ -72,6 +73,11 @@ export function ArtistView({ artist, topTracks }: { artist: Artist; topTracks: T
               {bioOpen ? "Read less" : "Read more"}
             </button>
           )}
+          {/* Attribution (issue #170). Wikipedia's prose is CC BY-SA, so
+              crediting it is part of using it properly rather than a
+              flourish. Rides the existing stamp idiom; absent entirely when
+              the pass has never run, so a pre-#170 catalog looks unchanged. */}
+          <BioSource bio={artist.bio} src={artist.bioSrc} url={artist.bioUrl} />
           <div className="mt-5 flex items-center gap-3">
             <button
               type="button"

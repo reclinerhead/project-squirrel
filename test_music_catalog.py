@@ -14,6 +14,8 @@
 # nothing.
 # =============================================================================
 
+import sqlite3
+
 import pytest
 
 from jukebox import music_catalog as mc
@@ -47,7 +49,7 @@ def entry(**kw):
 def test_connect_creates_all_tables(conn):
     assert set(mc.counts(conn)) == {
         "tracks", "track_files", "artists", "ratings", "play_history",
-        "album_art", "artist_art", "genre_map"}
+        "album_art", "artist_art", "genre_map", "album_notes"}
 
 
 def test_connect_stamps_user_version(conn):
@@ -577,6 +579,163 @@ def test_owner_artist_art_survives_the_promotion_pass(conn):
                       mc.ART_DERIVED, 500, 500, 2000)
     row = conn.execute("SELECT art_hash FROM artist_art").fetchone()
     assert row["art_hash"] == "todds-photo"
+
+
+def test_a_v7_file_gains_the_bio_columns_by_migration(tmp_path):
+    """The live upgrade path (issue #170): pearl's catalog sits at version 7
+    with an `artists` table born without mbid/bio_url. SCHEMA's CREATE TABLE
+    IF NOT EXISTS is a no-op on it, so the columns can only arrive via the
+    ALTERs -- this is the test that they actually do."""
+    p = str(tmp_path / "v7.db")
+    raw = sqlite3.connect(p)
+    raw.execute("CREATE TABLE tracks (id TEXT PRIMARY KEY, title TEXT)")
+    raw.execute("CREATE TABLE artists (name TEXT PRIMARY KEY, bio TEXT, "
+                "bio_src TEXT, fetched_at INTEGER)")
+    raw.execute("INSERT INTO artists VALUES ('Kept', 'old prose', "
+                "'owner', 5)")
+    raw.execute("PRAGMA user_version=7")
+    raw.commit()
+    raw.close()
+
+    c = mc.connect(p)
+    cols = {r[1] for r in c.execute("PRAGMA table_info(artists)")}
+    assert {"mbid", "bio_url"} <= cols
+    assert c.execute("PRAGMA user_version").fetchone()[0] == mc.SCHEMA_VERSION
+    kept = c.execute("SELECT bio, bio_src FROM artists").fetchone()
+    assert (kept[0], kept[1]) == ("old prose", "owner")
+    c.close()
+
+
+def test_owner_bio_survives_every_automated_source(conn):
+    """The provenance rule a fourth time (issue #170): Todd's own write-up of
+    a band is never replaced by a fetch."""
+    mc.set_artist_bio(conn, "Capital Cities", "Todd's own words.",
+                      mc.BIO_OWNER, None, None, 1000)
+    for src in (mc.BIO_WIKIPEDIA, mc.BIO_LASTFM):
+        mc.set_artist_bio(conn, "Capital Cities", "fetched prose", src,
+                          "http://x", "mbid-1", 2000)
+    row = conn.execute("SELECT bio, bio_src, mbid FROM artists").fetchone()
+    assert row["bio"] == "Todd's own words."
+    assert row["bio_src"] == mc.BIO_OWNER
+    assert row["mbid"] is None
+
+
+def test_a_fetched_bio_refreshes_another_fetched_bio(conn):
+    """Last.fm yielding to Wikipedia is a normal upgrade -- only `owner` is
+    frozen."""
+    mc.set_artist_bio(conn, "A", "lastfm text", mc.BIO_LASTFM, "u1", "m", 1)
+    mc.set_artist_bio(conn, "A", "wiki text", mc.BIO_WIKIPEDIA, "u2", "m", 2)
+    row = conn.execute("SELECT bio, bio_src FROM artists").fetchone()
+    assert (row["bio"], row["bio_src"]) == ("wiki text", mc.BIO_WIKIPEDIA)
+
+
+def test_bio_worklist_skips_attempted_misses_until_retry(conn):
+    """`fetched_at` marks ATTEMPTED, not succeeded: a resolved artist with no
+    article anywhere must not be re-probed every run, and --retry-missing is
+    the deliberate way back."""
+    mc.upsert_track(conn, track(id="b:1", album="One"))
+    mc.upsert_file(conn, entry(path="/m/1.m4a", track_id="b:1"))
+    assert list(mc.artists_missing_bio(conn)) == ["Capital Cities"]
+
+    # Attempted, found nothing -- a real write, with a NULL bio.
+    mc.set_artist_bio(conn, "Capital Cities", None, None, None, "mbid", 1000)
+    assert mc.artists_missing_bio(conn) == {}
+    assert list(mc.artists_missing_bio(conn, retry_missing=True)) == \
+        ["Capital Cities"]
+
+    # Once it has prose, even --retry-missing leaves it alone.
+    mc.set_artist_bio(conn, "Capital Cities", "prose", mc.BIO_WIKIPEDIA,
+                      "u", "mbid", 2000)
+    assert mc.artists_missing_bio(conn, retry_missing=True) == {}
+
+
+def test_retry_missing_never_reopens_an_owner_row(conn):
+    """An owner row with no bio text is still Todd's call, not a miss."""
+    mc.upsert_track(conn, track(id="b:1", album="One"))
+    mc.upsert_file(conn, entry(path="/m/1.m4a", track_id="b:1"))
+    mc.set_artist_bio(conn, "Capital Cities", None, mc.BIO_OWNER, None,
+                      None, 1000)
+    assert mc.artists_missing_bio(conn, retry_missing=True) == {}
+
+
+def test_bio_worklist_carries_the_albums_for_corroboration(conn):
+    """The resolver corroborates a name match against the library's own
+    shelf, so the worklist fetches the albums in one query rather than one
+    per artist (issue #170)."""
+    mc.upsert_track(conn, track(id="b:1", album="One"))
+    mc.upsert_file(conn, entry(path="/m/1.m4a", track_id="b:1"))
+    mc.upsert_track(conn, track(id="b:2", album="Two"))
+    mc.upsert_file(conn, entry(path="/m/2.m4a", track_id="b:2"))
+    assert mc.artists_missing_bio(conn) == {
+        "Capital Cities": ["One", "Two"]}
+
+
+def test_artist_albums_is_the_single_artist_twin(conn):
+    mc.upsert_track(conn, track(id="b:1", album="Two"))
+    mc.upsert_file(conn, entry(path="/m/1.m4a", track_id="b:1"))
+    mc.upsert_track(conn, track(id="b:2", album="One"))
+    mc.upsert_file(conn, entry(path="/m/2.m4a", track_id="b:2"))
+    assert mc.artist_albums(conn, "Capital Cities") == ["One", "Two"]
+    assert mc.artist_albums(conn, "Nobody") == []
+
+
+def test_albums_missing_note_is_the_blurb_worklist(conn):
+    """albums_missing_art's twin (issue #171): an album with a note is off
+    the list, so a re-run after ingesting new albums touches only those."""
+    mc.upsert_track(conn, track(id="b:1", album="One"))
+    mc.upsert_file(conn, entry(path="/m/1.m4a", track_id="b:1"))
+    mc.upsert_track(conn, track(id="b:2", album="Two"))
+    mc.upsert_file(conn, entry(path="/m/2.m4a", track_id="b:2"))
+    assert len(mc.albums_missing_note(conn)) == 2
+    mc.set_album_note(conn, "Capital Cities␟One", "A description.",
+                      "A description.", mc.NOTE_COMMENT, False, 1000)
+    work = mc.albums_missing_note(conn)
+    assert list(work) == ["Capital Cities␟Two"]
+    assert work["Capital Cities␟Two"] == ["/m/2.m4a"]
+
+
+def test_owner_note_survives_every_automated_source(conn):
+    """The provenance rule a third time (issue #171). This one matters more
+    than its siblings: the planned refresh button writes through the same
+    function from a request handler, where "the pass skipped it" reasoning
+    doesn't apply -- only the SQL guard does."""
+    mc.set_album_note(conn, "A␟X", "Todd's own words.", "Todd's own words.",
+                      mc.NOTE_OWNER, False, 1000)
+    for source in (mc.NOTE_COMMENT, mc.NOTE_EXTERNAL):
+        mc.set_album_note(conn, "A␟X", "machine copy", "machine copy",
+                          source, False, 2000)
+    row = conn.execute("SELECT description, source FROM album_notes "
+                       "WHERE album_key = 'A␟X'").fetchone()
+    assert row["description"] == "Todd's own words."
+    assert row["source"] == mc.NOTE_OWNER
+
+
+def test_a_fetched_note_may_supersede_the_comment_tag(conn):
+    """The store copy is a floor, not a ceiling -- a richer fetched source
+    refreshes it, same as folder art yielding to embedded."""
+    mc.set_album_note(conn, "A␟X", "store copy", "store copy",
+                      mc.NOTE_COMMENT, True, 1000)
+    mc.set_album_note(conn, "A␟X", "wikipedia prose", "wikipedia prose",
+                      mc.NOTE_EXTERNAL, False, 2000)
+    row = conn.execute("SELECT description, source, truncated "
+                       "FROM album_notes").fetchone()
+    assert (row["description"], row["source"]) == ("wikipedia prose",
+                                                   mc.NOTE_EXTERNAL)
+    assert row["truncated"] == 0
+
+
+def test_album_paths_is_the_single_album_twin_of_the_worklist(conn):
+    """The refresh button and the bulk pass must read the same files through
+    the same album-key derivation, or a one-off refresh could disagree with
+    what a full run would have produced."""
+    mc.upsert_track(conn, track(id="b:1", album="One"))
+    mc.upsert_file(conn, entry(path="/m/b.m4a", track_id="b:1"))
+    mc.upsert_file(conn, entry(path="/m/a.m4a", track_id="b:1"))
+    mc.upsert_track(conn, track(id="b:2", album="Two"))
+    mc.upsert_file(conn, entry(path="/m/2.m4a", track_id="b:2"))
+    assert mc.album_paths(conn, "Capital Cities␟One") == ["/m/a.m4a",
+                                                          "/m/b.m4a"]
+    assert mc.album_paths(conn, "Capital Cities␟Nope") == []
 
 
 def test_artists_missing_art_scores_by_summed_thumbs(conn):

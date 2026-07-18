@@ -26,10 +26,11 @@ import { CoverArt } from "@/components/CoverArt";
 import { FormatBadge } from "@/components/FormatBadge";
 import { QualityBadge } from "@/components/QualityBadge";
 import { TrackList } from "@/components/TrackList";
+import BioSource from "@/components/BioSource";
 import { PlayIcon, ShuffleIcon } from "@/components/icons";
-import type { Album } from "@/lib/types";
+import type { Album, ArtistBio } from "@/lib/types";
 
-export function AlbumView({ album }: { album: Album }) {
+export function AlbumView({ album, about }: { album: Album; about?: ArtistBio | null }) {
   const { playTracks, toggleShuffle, shuffle } = usePlayer();
   const [lightbox, setLightbox] = useState(false);
 
@@ -156,6 +157,38 @@ export function AlbumView({ album }: { album: Album }) {
           <TrackList tracks={album.tracks} playingFrom={album.title} />
         </div>
       </section>
+
+      {/* About the artist (issue #170) -- the TIDAL/Apple Music idiom, below
+          the tracklist. SERVER-RENDERED: `about` arrives as a prop from the
+          page, already resolved, so the panel is present or absent on first
+          paint with no client pop-in. An artist with no bio renders the page
+          exactly as it did before this shipped -- no empty shell, no
+          reserved gap, nothing to shift. */}
+      {about && (
+        <section className="panel rounded-sm border border-line bg-panel">
+          <div className="flex items-baseline justify-between gap-3 px-4 pb-2 pt-3">
+            <h2 className="text-lg text-ink" style={{ fontFamily: "var(--font-display)" }}>
+              About {about.name}
+            </h2>
+            <Link
+              href={`/artist/${about.id}`}
+              className="stamp text-[10px] text-inkfaint underline decoration-line underline-offset-4 transition-colors hover:decoration-linebright"
+            >
+              artist page
+            </Link>
+          </div>
+          <div className="px-4 pb-4">
+            {/* Clamped to three lines, the artist hero's treatment. No
+                read-more here on purpose: the full prose lives one click
+                away on the artist page, and a second expand-in-place control
+                would grow the page under the reader's cursor. */}
+            <p className="line-clamp-3 max-w-3xl text-sm leading-relaxed text-inkdim">
+              {about.bio}
+            </p>
+            <BioSource bio={about.bio} src={about.bioSrc} url={about.bioUrl} />
+          </div>
+        </section>
+      )}
 
       {lightbox && album.artHash && (
         // The full-size original (issue #155) -- /orig's untouched bytes,

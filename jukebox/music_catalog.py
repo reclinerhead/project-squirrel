@@ -72,7 +72,7 @@ DEFAULT_DB_PATH = "music.db"
 # Bumped whenever MIGRATIONS grows. A fresh file gets SCHEMA (already current)
 # and is stamped straight to this; an existing file replays only the steps
 # above its stored PRAGMA user_version.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 9
 
 # The four-level thumbs (#115's feedback model). Phase 3 reads these as RULES
 # -- strong-down is a hard filter applied BEFORE candidate selection, not an
@@ -124,6 +124,25 @@ GENRE_MAPPED = "mapped"
 GENRE_INHERITED = "inherited"
 GENRE_EXTERNAL = "external"
 GENRE_OWNER = "owner"
+
+# Where an album's description came from (issue #171). Same provenance idea a
+# third time, and for the same reason: `comment-tag` is the iTunes/Amazon store
+# copy lifted out of the files, `external` is reserved for a richer fetched
+# source (a Wikipedia album article via #170's MBIDs) that would supersede it,
+# and `owner` is Todd's own text -- which no automated pass may overwrite,
+# enforced in set_album_note's upsert.
+NOTE_COMMENT = "comment-tag"
+NOTE_EXTERNAL = "external"
+NOTE_OWNER = "owner"
+
+# Where an artist bio came from (issue #170). The provenance idea a fourth
+# time, same owner rule: `wikipedia` is the CC BY-SA lead extract reached
+# through the artist's MusicBrainz entity, `lastfm` the fallback where no
+# Wikipedia article exists, `owner` Todd's own text -- untouchable by any
+# re-fetch, enforced in set_artist_bio's upsert.
+BIO_WIKIPEDIA = "wikipedia"
+BIO_LASTFM = "lastfm"
+BIO_OWNER = "owner"
 
 # THE ALBUM KEY, shared verbatim with the music app. An album's identity is
 # the display pair the GUI derives (lib/catalog-rows.ts albumIdOf, before its
@@ -195,11 +214,19 @@ CREATE TABLE IF NOT EXISTS track_files (
 );
 CREATE INDEX IF NOT EXISTS idx_track_files_track ON track_files(track_id);
 
+-- `fetched_at` marks ATTEMPTED, not succeeded (issue #170): a row with a NULL
+-- bio and a timestamp is "we looked and found nothing", which is why a re-run
+-- skips it and --retry-missing is the deliberate way back. `mbid` is the
+-- MusicBrainz identity the resolver accepted; `bio_url` is the attribution
+-- link, which Wikipedia's CC BY-SA licensing makes part of using the prose
+-- properly rather than a nicety.
 CREATE TABLE IF NOT EXISTS artists (
     name    TEXT PRIMARY KEY,
     bio     TEXT,
     bio_src TEXT,
-    fetched_at INTEGER
+    fetched_at INTEGER,
+    mbid    TEXT,
+    bio_url TEXT
 );
 
 CREATE TABLE IF NOT EXISTS ratings (
@@ -244,6 +271,22 @@ CREATE TABLE IF NOT EXISTS genre_map (
     canonical TEXT NOT NULL,
     source    TEXT NOT NULL DEFAULT 'file'
 );
+
+-- Album descriptions (issue #171). `description` is what a page renders,
+-- `raw` is the untouched tag text -- kept because 49% of these blurbs are
+-- hard-cut at 255 chars mid-word and the trim-to-last-sentence policy throws
+-- away the fragment. Storing both means a future policy change (or a diff
+-- against a fetched source) is a re-run over this table, not another walk of
+-- 26k files. `truncated` flags the 255-char wall so a surface can decide
+-- whether to say so, and so the trim rule stays measurable after the fact.
+CREATE TABLE IF NOT EXISTS album_notes (
+    album_key   TEXT PRIMARY KEY,
+    description TEXT NOT NULL,
+    raw         TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    truncated   INTEGER NOT NULL DEFAULT 0,
+    updated_at  INTEGER
+);
 """
 
 # Ordered, append-only. Index N runs to reach user_version N+1, so a file at
@@ -282,6 +325,11 @@ MIGRATIONS = (
     # display name of COALESCE(album_artist, artist), written by the
     # normalization pass. Raw artist/album_artist stay untouched provenance.
     "ALTER TABLE tracks ADD COLUMN artist_norm TEXT;",
+    # 7 -> 8, 8 -> 9 (issue #170): the MusicBrainz identity the bio fetcher
+    # resolved, and the attribution link for the prose it fetched. Two steps,
+    # one ALTER each -- the focal_y lesson, same reason.
+    "ALTER TABLE artists ADD COLUMN mbid TEXT;",
+    "ALTER TABLE artists ADD COLUMN bio_url TEXT;",
 )
 
 
@@ -740,12 +788,121 @@ def artists_missing_art(conn):
     return [dict(r) for r in rows]
 
 
+def set_album_note(conn, album_key, description, raw, source, truncated, at):
+    """Record an album's description. Same owner rule as set_album_art, in the
+    same place -- the SQL -- so a future per-album refresh button (which will
+    call this from a request handler, not from the pass) cannot forget it
+    (issue #171)."""
+    conn.execute(
+        "INSERT INTO album_notes (album_key, description, raw, source, "
+        "truncated, updated_at) VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(album_key) DO UPDATE SET "
+        "description=excluded.description, raw=excluded.raw, "
+        "source=excluded.source, truncated=excluded.truncated, "
+        "updated_at=excluded.updated_at "
+        "WHERE album_notes.source != ?",
+        (album_key, description, raw, source, int(bool(truncated)), at,
+         NOTE_OWNER))
+
+
+def albums_missing_note(conn):
+    """The blurb pass's worklist: {album_key: [paths]} for every album with no
+    album_notes row -- albums_missing_art's twin, same NOT EXISTS shape and
+    same sorted paths so the comment pick is stable across runs.
+
+    Note the deliberate consequence, inherited from the art pass: an album
+    whose files carry no usable comment writes no row, so it returns here
+    every run. That is ~62% of the catalog re-reading its headers each pass
+    (minutes, not hours) and it is the price of not inventing a "checked,
+    found nothing" row whose staleness nobody would ever invalidate."""
+    rows = conn.execute(
+        f"SELECT {ALBUM_KEY_SQL} AS album_key, f.path "
+        f"FROM tracks t JOIN track_files f ON f.track_id = t.id "
+        f"WHERE NOT EXISTS (SELECT 1 FROM album_notes an "
+        f"                  WHERE an.album_key = {ALBUM_KEY_SQL}) "
+        f"ORDER BY album_key, f.path")
+    out = {}
+    for r in rows:
+        out.setdefault(r["album_key"], []).append(r["path"])
+    return out
+
+
+def album_paths(conn, album_key):
+    """Every file backing one album, sorted -- the single-album twin of the
+    worklist queries. This is what the future "refresh this album" button
+    calls (issue #171): the pass and the button read the same rows through the
+    same album-key derivation, so a one-off refresh can never disagree with
+    what a full run would have produced."""
+    rows = conn.execute(
+        f"SELECT f.path FROM tracks t JOIN track_files f ON f.track_id = t.id "
+        f"WHERE {ALBUM_KEY_SQL} = ? ORDER BY f.path", (album_key,))
+    return [r["path"] for r in rows]
+
+
+def set_artist_bio(conn, name, bio, bio_src, bio_url, mbid, at):
+    """Record one artist's bio. Same owner rule as set_album_art, in the same
+    place -- the SQL (issue #170). `bio` may be None: that is the
+    attempted-and-found-nothing row, and it is deliberately a WRITE, because
+    `fetched_at` is what keeps the next run from re-probing a known miss."""
+    conn.execute(
+        "INSERT INTO artists (name, bio, bio_src, fetched_at, mbid, bio_url) "
+        "VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(name) DO UPDATE SET "
+        "bio=excluded.bio, bio_src=excluded.bio_src, "
+        "fetched_at=excluded.fetched_at, mbid=excluded.mbid, "
+        "bio_url=excluded.bio_url "
+        "WHERE artists.bio_src IS NOT ?",
+        (name, bio, bio_src, at, mbid, bio_url, BIO_OWNER))
+
+
+def artists_missing_bio(conn, retry_missing=False):
+    """The bio pass's worklist: canonical artist identities with no bio row
+    yet, as {name: [album titles]} -- the albums ride along because the
+    resolver corroborates a name match against them (issue #170), and
+    fetching them here means one query instead of one per artist.
+
+    An artist the pass already ATTEMPTED is off the list even if it found
+    nothing, which is what `fetched_at` is for; `retry_missing=True` puts the
+    empty ones back on deliberately. An owner row is never on the list at
+    all -- there is nothing to fetch for an artist Todd has written up."""
+    where = ("WHERE NOT EXISTS (SELECT 1 FROM artists a "
+             "                  WHERE a.name = " + ALBUM_ARTIST_SQL + ")")
+    if retry_missing:
+        # Back on the list: attempted, found nothing, not an owner row.
+        where = ("WHERE NOT EXISTS (SELECT 1 FROM artists a "
+                 "  WHERE a.name = " + ALBUM_ARTIST_SQL +
+                 "    AND (COALESCE(a.bio, '') != '' OR a.bio_src IS ?))")
+    params = (BIO_OWNER,) if retry_missing else ()
+    rows = conn.execute(
+        f"SELECT {ALBUM_ARTIST_SQL} AS artist, t.album AS album "
+        f"FROM tracks t {where} "
+        f"GROUP BY artist, album ORDER BY artist, album", params)
+    out = {}
+    for r in rows:
+        out.setdefault(r["artist"], [])
+        if r["album"]:
+            out[r["artist"]].append(r["album"])
+    return out
+
+
+def artist_albums(conn, name):
+    """One artist's album titles, sorted -- artists_missing_bio's single-item
+    twin, so a per-artist refresh corroborates against exactly the same
+    evidence a full run would have used (issue #170)."""
+    rows = conn.execute(
+        f"SELECT DISTINCT t.album AS album FROM tracks t "
+        f"WHERE {ALBUM_ARTIST_SQL} = ? AND COALESCE(t.album, '') != '' "
+        f"ORDER BY album", (name,))
+    return [r["album"] for r in rows]
+
+
 def counts(conn):
     """Row counts per table -- what the indexer prints when it finishes, and
     what the acceptance criteria are read against."""
     out = {}
     for table in ("tracks", "track_files", "artists", "ratings",
-                  "play_history", "album_art", "artist_art", "genre_map"):
+                  "play_history", "album_art", "artist_art", "genre_map",
+                  "album_notes"):
         out[table] = conn.execute(
             "SELECT COUNT(*) FROM %s" % table).fetchone()[0]
     return out

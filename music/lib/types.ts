@@ -76,12 +76,35 @@ export type Album = {
 export type Artist = {
   id: string;
   name: string;
-  /** Last.fm-style prose; Phase 1's bio-fetcher fills this for real. */
+  /** Encyclopedia prose, filled by the Phase 1b fetcher (issue #170).
+   * Stays `string` with "" for absent -- the contract every other producer
+   * (search, browseArtists) hardcodes, and what the GUI's empty path has
+   * always relied on. */
   bio: string;
+  /** Where the bio came from: "wikipedia" | "lastfm" | "owner" (issue #170).
+   * Optional so pre-#170 shapes -- fixtures, the daemon's payloads -- still
+   * type-check; absent or null renders no source stamp. */
+  bioSrc?: string | null;
+  /** The attribution link for the prose. Wikipedia's CC BY-SA makes this
+   * part of using the text properly, not decoration. */
+  bioUrl?: string | null;
   albums: Album[];
   /** The artist image (issue #153): a promoted album cover today
    * (source='derived'), the owner's own photo once that lands. */
   artHash?: string | null;
+};
+
+/** Just the prose and its attribution (issue #170) -- what the album page's
+ * "About {artist}" panel needs. Deliberately NOT a whole Artist: hydrating
+ * every album of an artist to render one paragraph under a tracklist would
+ * be a query storm for text. */
+export type ArtistBio = {
+  name: string;
+  /** The artist page's URL id, so the panel can link through. */
+  id: string;
+  bio: string;
+  bioSrc?: string | null;
+  bioUrl?: string | null;
 };
 
 /** Four-level feedback (epic #115): -2 hard-filters, +2 boosts. 0 = unrated. */

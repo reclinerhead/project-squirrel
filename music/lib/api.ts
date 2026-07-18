@@ -37,18 +37,27 @@ import {
   libraryTotals,
   recentlyPlayedPairs,
   searchTrackRows,
+  artistBioFor,
   seedPair,
   topTrackRows,
   tracksForAlbum,
   withDb,
   type AlbumIndexEntry,
 } from "./db";
-import type { Album, Artist, Track } from "./types";
+import type { Album, Artist, ArtistBio, Track } from "./types";
 
 export async function getArtist(id: string): Promise<Artist | null> {
   const name = decodeArtistId(id);
   if (name === null) return null;
   return withDb<Artist | null>(null, (db) => artistFor(db, name));
+}
+
+/** The album page's About panel (issue #170). Server-rendered alongside the
+ * album so the panel is present or absent per page load with no client
+ * pop-in -- the no-layout-shift rule. Takes the raw artist NAME, which the
+ * album already carries, rather than re-decoding an id. */
+export async function getArtistBio(name: string): Promise<ArtistBio | null> {
+  return withDb<ArtistBio | null>(null, (db) => artistBioFor(db, name));
 }
 
 export async function getAlbum(id: string): Promise<Album | null> {

@@ -1,0 +1,55 @@
+# =============================================================================
+# project-squirrel -- bio_rules.yaml (issue #170)
+#
+# ARTIST IDENTITY IS DATA, NOT CODE. The bio fetcher resolves a library artist
+# name to a MusicBrainz identity, and a WRONG identity is worse than no bio at
+# all -- it is a page that lies about a band. So the pass auto-accepts only
+# what it can corroborate, reports everything else, and this file is where
+# those judgment calls live. Edit it, re-run `python3 -m jukebox.music_bio`,
+# and exactly the artists you touched change. Rule changes are commits, so
+# every identity call ever made has a diff and a date.
+#
+# A second deployment resolves a different library: point MERLE_MUSIC_BIO_RULES
+# (or --rules) at your own copy. This file is never rewritten by the pass.
+#
+# Sections (both required; may be empty; unknown ones rejected):
+#   skip   artist names that should NEVER get a bio. Compilation buckets and
+#          non-artists, where any match at all would be a wrong one.
+#   pin    artist name -> the MusicBrainz artist MBID that IS them. This is
+#          the review queue's answer key: the pass prints unresolved artists
+#          with their candidate MBIDs and disambiguation text, you paste the
+#          right one here, re-run. A pin SKIPS resolution entirely -- it is
+#          you overruling the resolver, so it is not re-corroborated.
+#   tuning min_score:  the MusicBrainz search score floor (0-100). Their score
+#          is a Lucene relevance number, NOT a confidence: a fuzzy match can
+#          score 100 ("We" -> "We Are Scientists", measured 2026-07-18), which
+#          is exactly why this is a floor under the real gate and never the
+#          gate itself.
+#
+# Matching is case-insensitive on the canonical (artist_norm-led) identity --
+# the same string the art pass and `artistFor` key on.
+# =============================================================================
+
+skip:
+  # Compilation and placeholder buckets. Every one of these would match SOME
+  # MusicBrainz artist, and all of those matches would be wrong.
+  - Various Artists
+  - Various
+  - VA
+  - Unknown Artist
+  - Soundtrack
+  - Original Soundtrack
+  - Various Composers
+
+pin:
+  # name: mbid   # disambiguation, so a future reader knows WHY this pin
+  #
+  # The library's "We" is the measured cautionary tale (2026-07-18): the only
+  # exact-name match on MusicBrainz is a Norwegian hardrock band whose twelve
+  # release groups share nothing with the two albums here, so corroboration
+  # correctly refuses it. Left unpinned deliberately -- an empty slot is the
+  # honest answer until someone identifies the actual band.
+  {}
+
+tuning:
+  min_score: 90

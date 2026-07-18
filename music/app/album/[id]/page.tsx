@@ -4,12 +4,17 @@
 // usePlayer() is client-only -- one component can't be both.
 
 import Link from "next/link";
-import { getAlbum } from "@/lib/api";
+import { getAlbum, getArtistBio } from "@/lib/api";
 import { AlbumView } from "@/components/AlbumView";
 
 export default async function AlbumPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const album = await getAlbum(decodeURIComponent(id));
+  // The About panel's prose (issue #170), resolved HERE rather than in the
+  // client view so the panel is part of the first paint -- no pop-in, no
+  // layout shift. Sequential after getAlbum because it needs the artist
+  // name; it is one indexed point read, not a second traversal.
+  const about = album ? await getArtistBio(album.artist) : null;
 
   if (!album) {
     return (
@@ -23,5 +28,5 @@ export default async function AlbumPage({ params }: { params: Promise<{ id: stri
     );
   }
 
-  return <AlbumView album={album} />;
+  return <AlbumView album={album} about={about} />;
 }
