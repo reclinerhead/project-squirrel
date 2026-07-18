@@ -704,6 +704,30 @@ provenance rule that protects a hand-picked photo forever. The retention
 pass never prunes the `species/` shelf (portraits are a permanent
 collection, not a rolling window).
 
+**The field-notes pass** (issue #186): writes the two prose blocks per
+species (`species_analysis` in `earl.db`) from our own visit record joined
+with our own weather archive. Statistics are computed in Python and the LLM
+only narrates them, so this needs both stores plus Ollama:
+
+```
+cd ~/project-squirrel
+MERLE_EARL_DB=/home/todd/project-squirrel/earl.db \
+MERLE_WEATHER_DB=/home/todd/project-squirrel/weather.db \
+MERLE_OLLAMA=<the ollama host> MERLE_OLLAMA_MODEL=gemma3:12b \
+venv/bin/python -m listener.species_analysis
+```
+
+Worklist is species with no notes yet, or **20+ new visits since their last
+write** — so re-running is a no-op until a bird has something new to say.
+`--refresh "<scientific name>"` forces one species; `--dry-run` prints the
+computed findings and calls no model at all (the fastest way to see what the
+prose was written from). **`MERLE_OLLAMA` unset means stats only, no
+writes** — the narrator's kill switch, same semantics; a model that is down
+or slow leaves existing notes standing and the species on the worklist.
+Expect ~1-2 minutes per species on CPU (two calls each). The MCC reads the
+table through `/aviary/analysis/<species>` and **never generates anything at
+render time**.
+
 **Serving the Aviary** (issue #183): the same pattern again, two files over.
 The unit carries `MERLE_EARL_DB` matching the `earl-sightings` unit's value
 (`/home/todd/project-squirrel/earl.db`) — the `/aviary/roster` and
