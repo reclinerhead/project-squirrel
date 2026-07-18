@@ -441,12 +441,23 @@ mkdir -p /srv/media-cache/earl    # no sudo: todd owns /srv/media-cache
 First run downloads the BirdNET acoustic (77 MB) + geo (46 MB) models to
 `~/.cache`; the geo download has flaked mid-transfer once — Earl retries and
 runs unmasked (loudly) if it can't load, so a bad first day is a noisy day,
-not a dead one. The YAMNet gate model (~17 MB) caches the same way
+not a dead one. The YAMNet model (~17 MB) caches the same way
 (`~/.cache/tfhub_modules`); if it can't load, Earl runs **ungated** — every
 window straight to BirdNET, the Phase 1 posture — and says so at startup
-and in every `gate stats` line. Gate knob: `MERLE_EARL_GATE_FLOOR`
-(default 0.3) on the earl-listener unit; the speech floor is deliberately
-not configurable.
+and in every `gate stats` line. `MERLE_EARL_GATE_FLOOR` (default 0.3)
+governs **sound events only**; the speech floor is deliberately not
+configurable, and nothing but speech withholds a window from BirdNET
+(issue #174's correction — the first version vetoed BirdNET and ate two
+thirds of the yard's confirmed detections in an afternoon).
+
+**Reading `gate stats`.** `listen` should dominate on a live yard; a
+`speech-killed` count that climbs while nobody is outside means something
+in the class map is over-firing (trim `SPEECH_CLASSES`, don't raise the
+floor). If detections stop entirely while `gate stats` keeps printing,
+compare against the archive before assuming the yard went quiet:
+`~/earl-venv/bin/python` a script that replays clips from `earl.db`
+through `gate.route()` — a confirmed detection that doesn't reach BirdNET
+is a bug, and that exact test is what caught the original gate.
 
 `earl-listener.service` (the Merle-unit pattern, two deviations: the venv
 path, and `ExecStart` must use Earl's python):
