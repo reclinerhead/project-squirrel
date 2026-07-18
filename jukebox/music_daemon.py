@@ -95,7 +95,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 import bus
-from jukebox import music_cache, music_catalog, music_playlist
+from jukebox import music_cache, music_catalog, music_genre, music_playlist
 
 STREAM_CHUNK = 1 << 20
 
@@ -613,6 +613,25 @@ QUEUE_TRACK_KEYS = ("id", "title", "artist", "album", "album_artist",
                     "track_no", "duration_s", "format", "bitrate",
                     "samplerate", "rating")
 
+# The playlist engine's genre families, from the rules file (issue #163) --
+# loaded once, at first use. A missing or invalid rules file falls back to
+# the engine's built-in raw-tag default with one log line: the daemon's job
+# is playing music, and a YAML typo must degrade affinity, not playback.
+_engine_clusters = None
+
+
+def engine_clusters():
+    global _engine_clusters
+    if _engine_clusters is None:
+        try:
+            rules = music_genre.load_rules(music_genre.rules_path())
+            _engine_clusters = music_genre.engine_clusters(rules)
+        except Exception as e:
+            print("[music] genre rules unavailable (%s) -- affinity falls "
+                  "back to built-in clusters" % e)
+            _engine_clusters = music_playlist.GENRE_CLUSTERS
+    return _engine_clusters
+
 
 def queue_candidates(conn, now):
     """Every track the engine may consider, as plain dicts. THE HARD FILTERS
@@ -630,7 +649,8 @@ def queue_candidates(conn, now):
     rows = conn.execute(
         "SELECT t.id, t.title, t.artist, t.album, t.album_artist, "
         "t.track_no, t.duration_s, t.format, t.bitrate, t.samplerate, "
-        "t.bpm, t.replaygain_db, t.dynamic_range_db, t.year, t.genre, "
+        "t.bpm, t.replaygain_db, t.dynamic_range_db, t.year, "
+        "t.genre_norm AS genre, "  # canonical since #163; NULL is neutral
         "r.value AS rating "
         "FROM tracks t LEFT JOIN ratings r ON r.track_id = t.id "
         "WHERE t.bpm IS NOT NULL "
@@ -648,8 +668,9 @@ def seed_track_row(conn, track_id):
     now, which the cooldown just excluded. Its features are still the target;
     it just can't be in the queue (resolve_seed excludes it)."""
     row = conn.execute(
-        "SELECT id, bpm, replaygain_db, dynamic_range_db, year, genre "
-        "FROM tracks WHERE id = ?", (track_id,)).fetchone()
+        "SELECT id, bpm, replaygain_db, dynamic_range_db, year, "
+        "genre_norm AS genre FROM tracks WHERE id = ?",
+        (track_id,)).fetchone()
     return dict(row) if row else None
 
 
@@ -932,7 +953,8 @@ def create_app(conn=None, renderer=None, stream_base=None,
         # engine directly with a seeded RNG.
         tracks = music_playlist.build_queue(candidates, engine_seed, n,
                                             random.Random(), now,
-                                            exclude_ids=exclude)
+                                            exclude_ids=exclude,
+                                            clusters=engine_clusters())
         print("[music] queue: %s -> %d tracks"
               % (dict(seed), len(tracks)))
         return {"tracks": [{k: t.get(k) for k in QUEUE_TRACK_KEYS}

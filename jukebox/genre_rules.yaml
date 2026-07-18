@@ -1,0 +1,291 @@
+# =============================================================================
+# project-squirrel -- genre_rules.yaml (issue #163)
+#
+# THE GENRE VOCABULARY IS DATA, NOT CODE. This file is the owner's live
+# ruleset: the canonical tags the whole app speaks, the mapping from the
+# library's 178 feral iTunes strings into them (measured complete against
+# the live catalog, 2026-07-18), and the playlist engine's genre families. Edit it, re-run `python3 -m jukebox.music_genre`, and every
+# non-owner row remaps under the new rules -- that IS the backfill job; there
+# is no other tool. Rule changes are commits, so every genre opinion ever
+# revised has a diff and a date.
+#
+# A second deployment (a friend's metal-heavy library wanting six metal
+# subgenres and two electronica buckets) is a DIFFERENT FILE, never a code
+# change: point MERLE_MUSIC_GENRE_RULES (or --rules) at your own copy.
+#
+# Sections (all five required; the loader rejects unknown ones):
+#   vocabulary        the canonical tag list. Nothing else may hardcode it.
+#   map               canonical tag -> the raw strings that mean it. A raw
+#                     string may appear ONCE across the whole map.
+#   artist_overrides  artist -> canonical, for judgment calls no string map
+#                     can express. Beats the string map. This is also where
+#                     the future curation of the ~116 unresolved artists
+#                     lands -- rules, not one-off DB writes.
+#   clusters          genre FAMILIES for playlist affinity (music_playlist).
+#                     A custom vocabulary needs custom families, so they
+#                     travel together.
+#   tuning            inherit_threshold: the artist-majority bar for tracks
+#                     whose raw tag maps nowhere. triage: raw strings KNOWN
+#                     to be unmappable junk drawers -- kept out of the
+#                     unmapped report, left NULL for the bulk-metadata
+#                     backfill (they are deferred, not forgotten).
+#
+# Raw strings with backslashes are single-quoted -- YAML double quotes would
+# treat \T as an escape. Two-space gaps (`DUBSTEP  GRIME`) are real: the
+# indexer's norm_tag() trims ends but preserves inner spacing, and matching
+# is exact.
+# =============================================================================
+
+vocabulary:
+  - Rock
+  - Classic Rock
+  - Progressive Rock
+  - Alternative
+  - Indie
+  - Punk
+  - Metal
+  - Industrial
+  - Pop
+  - Electronic
+  - Downtempo
+  - Dance
+  - Hip-Hop
+  - R&B/Soul
+  - Jazz
+  - Blues
+  - Classical
+  - Country
+  - Folk
+  - World
+  - Reggae
+  - Soundtrack
+
+map:
+  Rock:
+    - Rock
+    - 'Rock\Hard'
+    - Rock/Hard
+    - Hard Rock
+    - Rock & Roll
+    - Rock/Stoner
+    - 'Rock\Stoner'
+    - Psychedelic Rock
+    - 'Rock\Blues'      # Gov't Mule territory -- blues-rock is rock
+    - Rock/Blues
+  Classic Rock:
+    - 'Rock\Classic'
+    - Rock/Classic
+    - MFSL              # not a genre, a label -- Mobile Fidelity's Bob Seger rip
+  Progressive Rock:
+    - 'Rock\Progressive'
+    - Rock/Progressive
+  Alternative:
+    - Alternative
+    - 'Rock\Alternative'
+    - Rock/Alternative
+    - Rock / Alternative
+    - Alternative Rock
+    - Alternative-Rock
+    - Alt. Rock
+    - Alt Rock
+    - General Alternative Rock
+    - Pop Alternative
+    - Grunge
+    - New Wave
+    - Post-Punk
+    - Alternatief en Indië       # Lykke Li, tagged in Dutch
+    - Unknown genre              # Gorillaz
+    - Unknown                    # Street Sweeper Social Club
+    - Misc                       # Portugal. The Man, Son Lux
+  Indie:
+    - Indie
+    - Indie Rock
+    - Indie Pop
+    - 'Rock\Indie'
+    - 'Indie \ Alternative'
+    - Indie / Alternative
+    - 'Indie \ Rock \ Alternative'
+    - Indie Electronic
+  Punk:
+    - Punk
+    - Rock/Punk
+    - Post Hardcore
+    - Post-Hardcore
+  Metal:
+    - Metal
+    - Metal/Progressive
+    - 'Metal\Progressive'
+    - 'Metal\Heavy'
+    - Metal/Heavy
+    - 'Metal\Death'
+    - Metal/Metalcore
+    - 'Metal\Metalcore'
+    - 'Metal\Power'
+    - 'Metal\Thrash'
+    - 'Metal\Symphonic'
+    - Metal / Black
+    - Metal/Rock
+    - Alt. Metal
+    - Rock/metal
+    - Progressive                # Demons & Wizards (Iced Earth x Blind Guardian)
+  Industrial:
+    - Industrial
+    - 'Electronica\Industrial'
+    - Industrial Jungle Pussy Punk   # Mindless Self Indulgence's own coinage
+  Pop:
+    - Pop
+    - Synthpop
+    - Synth-pop
+    - Pop Rock
+    - 'Rock\Pop'                 # Nelly Furtado, Duran Duran
+    - Rock / Pop
+    - Pop Female Singer-Songwriter
+    - like no other              # Imogen Heap
+    - Electronic, Pop
+    - 'Electronica\Pop'          # Ladytron, Hot Chip -- synth-pop end of the pool
+    - 'Pop\Electronic'
+    - Electronic/Pop
+    - Electronic Pop Rock
+  Electronic:
+    - Electronica
+    - Electronic
+    - Electro
+    - 'Electronica\DJ'
+    - Electronica/DJ
+    - 'Experimental\Electronic'
+    - Electronic, Alternative
+    - Electronic, Experimental
+    - 'SYNTHWAVE \ ELECTRO'
+    - FLAC                       # not a genre, a codec -- it's Burial
+    - Experimental               # Son Lux
+    - Avantgarde
+  Downtempo:
+    - Electronica/Trip-Hop
+    - 'Electronica\Trip-Hop'
+    - Electronica / Lounge
+    - 'Electronica\Lounge'
+    - 'Electronica\Chill'
+    - Trip-Hop
+    - Lounge
+    - Downtempo
+    - Ambient
+    - 'Electronica\Dub'
+    - Ambient, Downtempo, Experimental
+    - 'Ambient\Downtempo\Drone'
+    - Beats, Trip Hop
+    - 'Electronica\Jazz'         # Fort Knox Five -- funky breaks, not jazz
+    - Electronica / World        # Buddha Bar, Gotan Project
+    - 'Electronica\Minimalist'
+    - 'Electronica\Vocal'
+    - 'Electronica\Experimental'
+    - Easy Listening
+    - Elektronisk &Amp           # Blue Foundation, tag mangled by an encoder
+    - New Age                    # Enya
+    - 'Electronica\Turntable & Minimalist'
+  Dance:
+    - Electronica / Dance
+    - 'Electronica\Dance'
+    - Electronica / Techno
+    - Techno
+    - House
+    - Trance
+    - 'Electronica\Trance'
+    - 'Electronica\PsyTrance'
+    - Psychedelic                # Juno Reactor -- Goa/psytrance
+    - Electronica / Psychedelic
+    - Dance
+    - Dance & DJ
+    - Club
+    - Disco
+    - 'Disco \ Dance'
+    - Electronica / Dubstep
+    - 'Electronica\Dubstep'
+    - Dubstep
+    - 'DUBSTEP  GRIME'
+    - 'Electronic|Dubstep\Electronica'
+    - Electronica / Drum & Bass
+    - 'Electronica\Drum & Bass'
+    - Breakbeat, Techno, Big Beat
+    - 'Leftfield\Techno\Electro\Dubstep'
+    - Electro Swing
+    - Electro House
+    - Trance (ogólnie)           # Juno Reactor again, tagged in Polish
+    - Electronic, House, Funk, Soul, Electronica
+    - Electronic, Pop, Progressive House
+  Hip-Hop:
+    - Rap & Hip-Hop
+    - Hip-Hop
+    - Rap
+    - Hip Hop
+    - Hip-Hop/Rap
+    - 'Hip-Hop\Rap'
+    - Rap/R&B
+    - Horrorcore                 # Tech N9ne
+  R&B/Soul:
+    - R&B
+    - Soul And R&B
+    - 'R&B\Pop'
+    - Funk
+    - Rhythmic Soul
+  Jazz:
+    - Jazz
+    - Jazz-Rock
+  Blues:
+    - Blues
+  Classical:
+    - Classical
+    - Opera
+  Country:
+    - Country
+  Folk:
+    - Folk
+    - Irish Folk
+    - 'Folk\Rock'
+    - Folk Rock; Pop
+    - Pop-Folk
+    - Acoustic                   # 42 tracks of Dead Can Dance; arguably World
+  World:
+    - World
+    - 'World\Latin'
+    - World/Latin
+    - World/Brazil
+    - 'World\Tango'
+    - World/Tango
+    - World/Africa
+  Reggae:
+    - Reggae
+  Soundtrack:
+    - Soundtrack
+
+# Artist-level judgment calls. Empty today -- the string map plus inheritance
+# covers the current library, and the ~116 artists neither can reach are the
+# bulk-metadata pass's worklist. When that curation happens, it lands HERE:
+#   artist_overrides:
+#     Supertramp: Classic Rock
+#     Iron & Wine: Folk
+artist_overrides: {}
+
+# Playlist-affinity families over the CANONICAL vocabulary (music_playlist's
+# cluster bonus; injected by the daemon so a custom vocabulary brings its own
+# families). The first family is the measured electronic/hip-hop cluster that
+# fixed Queensryche-at-#2 for a Stereo MC's seed, restated in canonical terms;
+# the rock family is its obvious sibling now that the vocabulary can name one.
+clusters:
+  - [Electronic, Downtempo, Dance, Industrial, Hip-Hop, R&B/Soul]
+  - [Rock, Classic Rock, Progressive Rock, Alternative, Indie, Punk]
+
+tuning:
+  # A track whose raw tag maps nowhere inherits its artist's genre when at
+  # least this share of the artist's MAPPED tracks agree (measured: 0.6
+  # resolves 1,521 of the 3,410 triage tracks with no wrong calls sampled).
+  inherit_threshold: 0.6
+  # Junk drawers that must never be string-mapped: Pop\Rock is AllMusic's
+  # catch-all (Violent Femmes / Skinny Puppy / Fear Factory / Prince side by
+  # side), the rest are import artifacts. Known and deferred -- excluded from
+  # the unmapped report, left NULL for the bulk-metadata backfill.
+  triage:
+    - 'Pop\Rock'
+    - Pop/Rock
+    - Styles
+    - Popular
+    - Other

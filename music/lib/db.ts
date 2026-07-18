@@ -98,6 +98,20 @@ function hasFocal(db: DatabaseSync): boolean {
 // cover's interest lives vertically, for the album page's backdrop crop.
 const FOCAL_SUB = `(SELECT focal_y FROM album_art WHERE album_key = ${ALBUM_KEY})`;
 
+/** Whether tracks carries genre_norm yet (issue #163, migration v5) -- the
+ * hasFocal situation exactly: SELECTing a missing column throws, and withDb
+ * would turn that into an empty catalog. The fallback is NULL, not raw
+ * t.genre, on purpose: the UI's contract since #163 is canonical tags only,
+ * so a pre-normalization snapshot degrades to Uncategorized-heavy shelves --
+ * never to the feral taxonomy leaking back into the pills. */
+function hasGenreNorm(db: DatabaseSync): boolean {
+  return !!db
+    .prepare("SELECT 1 FROM pragma_table_info('tracks') WHERE name = 'genre_norm'")
+    .get();
+}
+
+const genreCol = (db: DatabaseSync) => (hasGenreNorm(db) ? "t.genre_norm" : "NULL");
+
 // The rating rides along on every track the app hands out (issue #135). A
 // persisted thumb that doesn't come back on load is indistinguishable from a
 // lost one, so hydration is not a separate feature -- it's the other half of
@@ -129,7 +143,7 @@ export function albumIndex(db: DatabaseSync): AlbumIndexEntry[] {
     .prepare(
       `SELECT ${ALBUM_ARTIST} AS artist,
               COALESCE(NULLIF(t.album, ''), 'Unknown Album') AS album,
-              t.genre AS genre, COUNT(*) AS n,
+              ${genreCol(db)} AS genre, COUNT(*) AS n,
               MAX(t.year) AS year, MAX(f.mtime) AS added,
               ${art} AS art_hash, ${focal} AS focal_y
        FROM tracks t JOIN track_files f ON f.track_id = t.id
@@ -240,7 +254,7 @@ export function recentlyPlayedPairs(db: DatabaseSync, cap: number): AlbumRow[] {
     .prepare(
       `SELECT ${ALBUM_ARTIST} AS artist,
               COALESCE(NULLIF(t.album, ''), 'Unknown Album') AS album,
-              MAX(t.year) AS year, MAX(t.genre) AS genre,
+              MAX(t.year) AS year, MAX(${genreCol(db)}) AS genre,
               MAX(ph.played_at) AS latest,
               ${art} AS art_hash
        FROM play_history ph JOIN tracks t ON t.id = ph.track_id

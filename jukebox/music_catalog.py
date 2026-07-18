@@ -72,7 +72,7 @@ DEFAULT_DB_PATH = "music.db"
 # Bumped whenever MIGRATIONS grows. A fresh file gets SCHEMA (already current)
 # and is stamped straight to this; an existing file replays only the steps
 # above its stored PRAGMA user_version.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 # The four-level thumbs (#115's feedback model). Phase 3 reads these as RULES
 # -- strong-down is a hard filter applied BEFORE candidate selection, not an
@@ -112,6 +112,18 @@ ART_EMBEDDED = "embedded"
 ART_FOLDER = "folder"
 ART_DERIVED = "derived"
 ART_OWNER = "owner"
+
+# Where a normalized genre came from (issue #163) -- the art tables' provenance
+# idea applied to a column. `mapped` is the rules file's string map or artist
+# override; `inherited` is the artist-majority guess for tracks whose raw tag
+# maps nowhere; `external` is reserved for the bulk-metadata backfill
+# (MusicBrainz/Last.fm); `owner` is the listener's own hand-set value, which
+# NO automated pass may overwrite -- enforced in the pass's UPDATE, same as
+# set_album_art's upsert, so the rule can't be forgotten at a call site.
+GENRE_MAPPED = "mapped"
+GENRE_INHERITED = "inherited"
+GENRE_EXTERNAL = "external"
+GENRE_OWNER = "owner"
 
 # THE ALBUM KEY, shared verbatim with the music app. An album's identity is
 # the display pair the GUI derives (lib/catalog-rows.ts albumIdOf, before its
@@ -158,7 +170,9 @@ CREATE TABLE IF NOT EXISTS tracks (
     replaygain_db    REAL,
     dynamic_range_db REAL,
     needs_attention TEXT,
-    indexed_at   INTEGER
+    indexed_at   INTEGER,
+    genre_norm        TEXT,
+    genre_norm_source TEXT
 );
 
 CREATE TABLE IF NOT EXISTS track_files (
@@ -215,6 +229,12 @@ CREATE TABLE IF NOT EXISTS artist_art (
     updated_at INTEGER,
     focal_y    REAL
 );
+
+CREATE TABLE IF NOT EXISTS genre_map (
+    raw       TEXT PRIMARY KEY,
+    canonical TEXT NOT NULL,
+    source    TEXT NOT NULL DEFAULT 'file'
+);
 """
 
 # Ordered, append-only. Index N runs to reach user_version N+1, so a file at
@@ -245,6 +265,10 @@ MIGRATIONS = (
     # script whose first line already landed would skip its second forever.
     "ALTER TABLE album_art ADD COLUMN focal_y REAL;",
     "ALTER TABLE artist_art ADD COLUMN focal_y REAL;",
+    # 4 -> 5, 5 -> 6 (issue #163): the normalized genre and its provenance.
+    # Two steps, one ALTER each -- the focal_y lesson, same reason.
+    "ALTER TABLE tracks ADD COLUMN genre_norm TEXT;",
+    "ALTER TABLE tracks ADD COLUMN genre_norm_source TEXT;",
 )
 
 
@@ -710,7 +734,7 @@ def counts(conn):
     what the acceptance criteria are read against."""
     out = {}
     for table in ("tracks", "track_files", "artists", "ratings",
-                  "play_history", "album_art", "artist_art"):
+                  "play_history", "album_art", "artist_art", "genre_map"):
         out[table] = conn.execute(
             "SELECT COUNT(*) FROM %s" % table).fetchone()[0]
     return out

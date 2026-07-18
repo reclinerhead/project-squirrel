@@ -46,9 +46,10 @@ export type Album = {
   artistId: string;
   artist: string;
   year: number;
-  /** One genre per album at the UI seam (issue #118). The real catalog tags
-   * genre per track; the seam will derive an album's genre from its tracks'
-   * dominant tag once Phase 0/1's normalization exists. */
+  /** One genre per album at the UI seam (issue #118): the dominant tag
+   * across the album's tracks. CANONICAL since #163 -- the seam reads
+   * genre_norm (genre_rules.yaml's small vocabulary), never the raw iTunes
+   * taxonomy; tracks the pass hasn't placed surface as "Uncategorized". */
   genre: string;
   tracks: Track[];
   /** Real cover art's content hash (issue #153), or null/absent for the
