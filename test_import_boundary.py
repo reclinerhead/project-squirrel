@@ -91,6 +91,19 @@ def test_bus_imports_without_any_vision_dep():
     assert ok, "bus's import graph reached a vision dep:\n%s" % out
 
 
+def test_listener_imports_without_heavy_deps():
+    """The listener package's version of the same contract (issue #172):
+    sightings.py runs from the lean repo venv like frame_archiver (paho only),
+    and earl.py's heavy deps (numpy via birdnet's TensorFlow) are imported
+    LAZILY inside the worker functions -- module scope must stay importable
+    with the vision set poisoned, or the sightings unit dies reaching for a
+    library only Earl's separate py3.11 venv carries."""
+    for target in ("listener", "listener.gate", "listener.earl",
+                   "listener.sightings"):
+        ok, out = _import_under_poison(target)
+        assert ok, "%s's import graph reached a heavy dep:\n%s" % (target, out)
+
+
 def test_narration_package_import_is_clean():
     """Importing the PACKAGE must not drag in the world either. This is the
     #110 trap stated directly: a convenience re-export in narration/__init__.py

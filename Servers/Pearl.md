@@ -23,6 +23,8 @@ outage brings her back without anyone going downstairs.
 | MCC       | `mcc-dashboard`   | 3000 (HTTP)                    | The Merle dashboard, production build (`next start`)           |
 | Music     | `music-daemon`    | 8090 (HTTP)                    | Playback daemon (issue #129): streams the catalog, drives the Denon over DLNA, writes `play_history` |
 | Jukebox   | `music-app`       | 3001 (HTTP)                    | The music player UI (issue #131), production build (`next start`) — http://192.168.1.64:3001 |
+| Earl      | `earl-listener`   | —                              | The ears (issue #172): BirdNET over the yard's mics, publishes `audio/*` — runs from its OWN venv (`~/earl-venv`), not the repo one |
+| Sightings | `earl-sightings`  | —                              | The bird record (issue #172): subscribes `audio/events`, writes sightings + the life list to `earl.db` |
 | Deploys   | `merle-autodeploy`| —                              | Deploy watcher (issue #95): polls origin/main, pulls + restarts the Merle units on merge |
 | Caddy     | `caddy`           | 80 (HTTP)                      | The front door (issue #141): named URLs instead of ports — `pearl/mole` → Pi-hole, `mcc.lan` → :3000, `music.lan` → :3001 |
 | Pi-hole   | `pihole-FTL`      | 53, 67 (DHCP), web on 127.0.0.1:8081 | Household DNS + DHCP; admin UI reached through Caddy at `pearl/mole` |
@@ -411,6 +413,81 @@ Quick health check — count today's filings:
 ```
 ls ~/project-squirrel/frames | wc -l
 ```
+
+---
+
+## The listener (Earl) and the bird record (issue #172)
+
+Units: `/etc/systemd/system/earl-listener.service`, `/etc/systemd/system/earl-sightings.service`
+Code: `/home/todd/project-squirrel/listener/`
+**Venv: `~/earl-venv` for Earl — NOT the repo venv.** BirdNET rides TensorFlow,
+and TF has no wheels for the repo venv's Python; Earl gets a `uv`-managed
+Python 3.11 of his own. The sightings unit needs only paho and runs from the
+repo venv like `frame-archiver`.
+
+One-time setup (repeatable — the onboarding rule):
+
+```
+pip3 install --user --break-system-packages uv     # once; lands in ~/.local/bin
+~/.local/bin/uv venv --python 3.11 ~/earl-venv
+~/.local/bin/uv pip install --python ~/earl-venv/bin/python birdnet paho-mqtt
+sudo mkdir -p /srv/media-cache/earl && sudo chown todd:todd /srv/media-cache/earl
+```
+
+First run downloads the BirdNET acoustic (77 MB) + geo (46 MB) models to
+`~/.cache`; the geo download has flaked mid-transfer once — Earl retries and
+runs unmasked (loudly) if it can't load, so a bad first day is a noisy day,
+not a dead one.
+
+`earl-listener.service` (the Merle-unit pattern, two deviations: the venv
+path, and `ExecStart` must use Earl's python):
+
+```
+[Unit]
+Description=Earl -- the ears of the house (issue #172)
+After=network-online.target mosquitto.service
+
+[Service]
+User=todd
+WorkingDirectory=/home/todd/project-squirrel
+ExecStart=/home/todd/earl-venv/bin/python -m listener.earl
+Restart=on-failure
+Environment=PYTHONUNBUFFERED=1
+Environment=MERLE_MQTT=localhost:1883
+Environment=MERLE_LATLON=42.29,-85.59
+Environment=MERLE_RTSP_PASS=<the camera password>
+Environment=MERLE_EARL_SOURCES=amcrest
+Environment=MERLE_EARL_CLIPS=/srv/media-cache/earl
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`earl-sightings.service` is the same skeleton with
+`ExecStart=/home/todd/project-squirrel/venv/bin/python -m listener.sightings`,
+`Environment=MERLE_EARL_DB=/home/todd/project-squirrel/earl.db`, and only
+`MERLE_MQTT` besides. Then the usual:
+`sudo systemctl daemon-reload && sudo systemctl enable --now earl-listener earl-sightings`.
+
+Adding the rover as a second source (when pearl→merle keys exist:
+`ssh-keygen` as todd, `ssh-copy-id todd@merle`, `BatchMode` must work):
+set `Environment=MERLE_EARL_SOURCES=amcrest,rover` in the unit. A rover
+that's off or unreachable is just a dark entry on `audio/sources` cycling
+its restart backoff — that's the designed steady state, not a problem.
+
+Watching Earl work:
+
+```
+journalctl -u earl-listener -f            # detections + source state changes
+mosquitto_sub -h localhost -v -t 'audio/#'  # what the bus sees
+sqlite3 is not installed here -- query earl.db via python3 (the music.db note)
+```
+
+**`earl.db` is irreplaceable** (the weather.db honor, third member: after
+`weather.db` and `music.db`'s ratings): the life list's first-heard dates
+cannot be re-derived. `/srv/media-cache/earl` clips are semi-precious — a
+lifer's `first_clip` points there. Back up `earl.db` the same way as the
+others (see Backups: sqlite3 .backup, never cp on a live WAL db).
 
 ---
 
