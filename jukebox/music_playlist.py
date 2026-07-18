@@ -80,6 +80,12 @@ SAME_CLUSTER_BONUS = -1.8
 # Queensryche-at-#2 draft. A tuple of frozensets so the next family is an
 # append, but no family is invented ahead of a seed that proves the need.
 # Members are HEAD TOKENS (lowercased, first segment before \ or /).
+#
+# Since #163 this is the DEFAULT, not the truth: the daemon injects the
+# families from genre_rules.yaml (music_genre.engine_clusters), stated over
+# the canonical vocabulary, because a deployment's custom vocabulary needs
+# custom families. This raw-tag set survives as the fallback for callers
+# with no rules file -- and for a catalog whose genre_norm predates the pass.
 GENRE_CLUSTERS = (
     frozenset({
         "electronic", "electronica", "dance", "house", "techno", "trance",
@@ -139,18 +145,20 @@ def genre_head(genre):
     return head or None
 
 
-def genre_affinity(genre, target_genre):
+def genre_affinity(genre, target_genre, clusters=GENRE_CLUSTERS):
     """The bonus (negative penalty) two genre tags earn each other. Same head
     token is the strongest signal the taxonomy can give; same cluster catches
     the family resemblance exact tags miss (ELECTRONICA\\DUBSTEP vs
     Electronic). Anything else -- including a missing tag on either side --
-    is zero: never a filter, never fatal."""
+    is zero: never a filter, never fatal. `clusters` is injected like the
+    candidates and the RNG (#163: the daemon passes the rules file's
+    families); the module constant is only the no-rules default."""
     a, b = genre_head(genre), genre_head(target_genre)
     if a is None or b is None:
         return 0.0
     if a == b:
         return SAME_HEAD_BONUS
-    for cluster in GENRE_CLUSTERS:
+    for cluster in clusters:
         if a in cluster and b in cluster:
             return SAME_CLUSTER_BONUS
     return 0.0
@@ -191,7 +199,7 @@ def _axis(value, target, weight):
     return weight * abs(value - target)
 
 
-def score_track(track, target):
+def score_track(track, target, clusters=GENRE_CLUSTERS):
     """One candidate against the seed target: penalty-based, lower is better.
     The rating adjustment reads the four-thumb rules -- .get() with a 0.0
     default is what makes an EMPTY ratings table indistinguishable from "no
@@ -202,16 +210,16 @@ def score_track(track, target):
     score += _axis(track.get("replaygain_db"),
                    target.get("replaygain_db"), GAIN_WEIGHT)
     score += era_penalty(track.get("year"), target.get("year"))
-    score += genre_affinity(track.get("genre"), target.get("genre"))
+    score += genre_affinity(track.get("genre"), target.get("genre"), clusters)
     score += RATING_ADJUST.get(track.get("rating"), 0.0)
     return score
 
 
-def rank_candidates(candidates, target):
+def rank_candidates(candidates, target, clusters=GENRE_CLUSTERS):
     """Every candidate scored and sorted, best first, as (score, track)
     pairs. Ties break on track id -- scores tie CONSTANTLY (the lattice), and
     a ranking that depended on input order would make determinism a lie."""
-    scored = [(score_track(t, target), t) for t in candidates]
+    scored = [(score_track(t, target, clusters), t) for t in candidates]
     scored.sort(key=lambda pair: (pair[0], pair[1].get("id") or ""))
     return scored
 
@@ -307,7 +315,8 @@ def _weighted_pick(pool, rng):
     return pool[-1][1]  # float dust: r landed on the far edge
 
 
-def build_queue(candidates, seed, n, rng, now, exclude_ids=()):
+def build_queue(candidates, seed, n, rng, now, exclude_ids=(),
+                clusters=GENRE_CLUSTERS):
     """The engine's whole job: an ordered list of up to n tracks like the
     seed, from the injected candidate set. Cooldown reads each candidate's
     `last_played_at` against the injected clock; `exclude_ids` is the
@@ -321,7 +330,7 @@ def build_queue(candidates, seed, n, rng, now, exclude_ids=()):
     eligible = [t for t in candidates
                 if t.get("id") not in banned
                 and not too_soon(t.get("last_played_at"), now)]
-    ranked = rank_candidates(eligible, target)
+    ranked = rank_candidates(eligible, target, clusters)
 
     picked = []
     picked_ids = set()

@@ -47,7 +47,7 @@ def entry(**kw):
 def test_connect_creates_all_tables(conn):
     assert set(mc.counts(conn)) == {
         "tracks", "track_files", "artists", "ratings", "play_history",
-        "album_art", "artist_art"}
+        "album_art", "artist_art", "genre_map"}
 
 
 def test_connect_stamps_user_version(conn):
