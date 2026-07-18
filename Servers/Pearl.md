@@ -673,6 +673,20 @@ no native build on pearl). It needs Node ≥ 23.4 to be unflagged; pearl runs
 24.x, so it just works. If pearl's Node is ever downgraded below that, this
 route is the thing that breaks.
 
+**Serving the Aviary** (issue #183): the same pattern again, two files over.
+The unit carries `MERLE_EARL_DB` matching the `earl-sightings` unit's value
+(`/home/todd/project-squirrel/earl.db`) — the `/aviary/roster` and
+`/aviary/recent` routes read the bird record that service writes — and
+`MERLE_EARL_CLIPS` matching the `earl-listener`/`earl-sightings` value
+(`/srv/media-cache/earl`) — the `/clips/[...path]` route serves the visit
+recordings Earl writes there. **Both as absolute paths**, the
+`MERLE_WEATHER_DB` reasoning verbatim (this unit's `WorkingDirectory` is
+`mcc/`; the routes have no defaults for exactly that reason). Unset, the
+aviary quietly renders empty and clips 404 to the "faded" stamp; nothing
+else cares. Adding them is two `Environment=` lines in the unit +
+`daemon-reload` + restart (or just merge and let autodeploy restart after
+the lines are in place).
+
 **Reaching the daemon**: the dashboard proxies to the perception daemon on
 bluejay (`MERLE_DAEMON_URL` in the unit). For that to work the daemon on
 bluejay must bind the LAN, not loopback — `python -m uvicorn vision.merle_daemon:app
