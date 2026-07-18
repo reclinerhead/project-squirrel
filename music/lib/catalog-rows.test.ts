@@ -112,6 +112,14 @@ describe("trackFromRow", () => {
     expect(decodeAlbumId(t.albumId)?.artist).toBe("Various Artists");
   });
 
+  it("carries the tagged year, null when untagged (issue #167)", () => {
+    // Search assembles album stubs from track rows -- before the year rode
+    // along, every album in the overlay wore a hardcoded "· 0".
+    expect(trackFromRow(row({ year: 2001 })).year).toBe(2001);
+    expect(trackFromRow(row({ year: null })).year).toBeNull();
+    expect(trackFromRow(row()).year).toBeNull(); // pre-#167 wire shape
+  });
+
   it("carries the raw container and believes the codec column (issue #157)", () => {
     const t = trackFromRow(row({ codec: "aac", bitrate: 900_000 }));
     expect(t.container).toBe("m4a"); // the raw format column, for the pill

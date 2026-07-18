@@ -110,7 +110,8 @@ export function AlbumView({ album }: { album: Album }) {
               </Link>
             </p>
             <p className="stamp mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-inkfaint">
-              <span>{album.year}</span>
+              {/* year 0 = unknown (issue #167): omit rather than stamp "0" */}
+              {album.year ? <span>{album.year}</span> : null}
               <span>
                 {album.tracks.length} tracks ({formatTotalDuration(totalS)})
               </span>
