@@ -688,6 +688,14 @@ MERLE_EARL_CLIPS=/srv/media-cache/earl \
 venv/bin/python -m listener.species_profile
 ```
 
+**After deploying #185, run it once more**: that release added `image_w`/
+`image_h` (so the GUI can frame portrait-orientation birds without cropping
+their heads off), and the pass's worklist grew a **backfill arm** — rows with
+a fetched photo but no dimensions come back automatically, so one ordinary
+re-run heals the whole life list. Until it runs, portraits simply keep the
+old centered crop; nothing breaks. Owner rows are excluded from the backfill
+in the SQL itself, so they can't be spent a request on.
+
 Run it **once after deploying #184** (deploy does not run passes), and again
 whenever the life list has grown and you want the new arrivals dressed —
 or `--refresh "Cardinalis cardinalis"` to re-fetch one species. **A row
