@@ -673,6 +673,29 @@ no native build on pearl). It needs Node ≥ 23.4 to be unflagged; pearl runs
 24.x, so it just works. If pearl's Node is ever downgraded below that, this
 route is the thing that breaks.
 
+**The species enrichment pass** (issue #184): fills `species_profile` in
+`earl.db` (descriptions + portraits from Wikipedia, keyed by the life list's
+scientific names) and downloads portraits to
+`/srv/media-cache/earl/species/`. Not a unit — a pass you run by hand from
+the repo venv, worklist-driven and idempotent (re-runs touch only species
+without a profile row; a species with no usable Wikipedia page stays on the
+worklist and keeps its placeholder):
+
+```
+cd ~/project-squirrel
+MERLE_EARL_DB=/home/todd/project-squirrel/earl.db \
+MERLE_EARL_CLIPS=/srv/media-cache/earl \
+venv/bin/python -m listener.species_profile
+```
+
+Run it **once after deploying #184** (deploy does not run passes), and again
+whenever the life list has grown and you want the new arrivals dressed —
+or `--refresh "Cardinalis cardinalis"` to re-fetch one species. **A row
+whose `image_source` is `owner` is never touched by any run** — that's the
+provenance rule that protects a hand-picked photo forever. The retention
+pass never prunes the `species/` shelf (portraits are a permanent
+collection, not a rolling window).
+
 **Serving the Aviary** (issue #183): the same pattern again, two files over.
 The unit carries `MERLE_EARL_DB` matching the `earl-sightings` unit's value
 (`/home/todd/project-squirrel/earl.db`) — the `/aviary/roster` and
