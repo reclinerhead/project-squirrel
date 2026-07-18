@@ -72,7 +72,7 @@ DEFAULT_DB_PATH = "music.db"
 # Bumped whenever MIGRATIONS grows. A fresh file gets SCHEMA (already current)
 # and is stamped straight to this; an existing file replays only the steps
 # above its stored PRAGMA user_version.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # The four-level thumbs (#115's feedback model). Phase 3 reads these as RULES
 # -- strong-down is a hard filter applied BEFORE candidate selection, not an
@@ -131,9 +131,17 @@ GENRE_OWNER = "owner"
 # derivation, and music/lib/db.ts carries its twin -- the paired fixture
 # tests on both sides are what keep them from drifting. U+241F (symbol for
 # unit separator) because no album title contains it.
+#
+# artist_norm leads the artist half since #152: the pass's case-collapsed
+# canonical identity, so `Gwar` and `GWAR` mint ONE key and art can't strand
+# under a minority casing. NULL (pass not run) falls through to the raw
+# derivation -- exactly the pre-#152 key, so a stale catalog degrades to
+# case-split albums, never to broken art.
+ALBUM_ARTIST_SQL = ("COALESCE(NULLIF(t.artist_norm, ''), "
+                    "NULLIF(t.album_artist, ''), t.artist, 'Unknown Artist')")
 ALBUM_KEY_SQL = (
-    "COALESCE(NULLIF(t.album_artist, ''), t.artist, 'Unknown Artist') || "
-    "'␟' || COALESCE(NULLIF(t.album, ''), 'Unknown Album')"
+    ALBUM_ARTIST_SQL +
+    " || '␟' || COALESCE(NULLIF(t.album, ''), 'Unknown Album')"
 )
 
 # `id` is the audio-stream hash: stable across a tag edit AND across a move.
@@ -172,7 +180,8 @@ CREATE TABLE IF NOT EXISTS tracks (
     needs_attention TEXT,
     indexed_at   INTEGER,
     genre_norm        TEXT,
-    genre_norm_source TEXT
+    genre_norm_source TEXT,
+    artist_norm       TEXT
 );
 
 CREATE TABLE IF NOT EXISTS track_files (
@@ -269,6 +278,10 @@ MIGRATIONS = (
     # Two steps, one ALTER each -- the focal_y lesson, same reason.
     "ALTER TABLE tracks ADD COLUMN genre_norm TEXT;",
     "ALTER TABLE tracks ADD COLUMN genre_norm_source TEXT;",
+    # 6 -> 7 (issue #152): the canonical artist identity -- the case-collapsed
+    # display name of COALESCE(album_artist, artist), written by the
+    # normalization pass. Raw artist/album_artist stay untouched provenance.
+    "ALTER TABLE tracks ADD COLUMN artist_norm TEXT;",
 )
 
 
@@ -714,8 +727,7 @@ def artists_missing_art(conn):
     score, tie-break lowest album_key: deterministic across runs, the
     issue's contract)."""
     rows = conn.execute(
-        f"SELECT COALESCE(NULLIF(t.album_artist, ''), t.artist, "
-        f"       'Unknown Artist') AS artist, "
+        f"SELECT {ALBUM_ARTIST_SQL} AS artist, "
         f"       {ALBUM_KEY_SQL} AS album_key, "
         f"       aa.art_hash, aa.w, aa.h, aa.focal_y, "
         f"       COALESCE(SUM(r.value), 0) AS score "
@@ -723,8 +735,7 @@ def artists_missing_art(conn):
         f"JOIN album_art aa ON aa.album_key = {ALBUM_KEY_SQL} "
         f"LEFT JOIN ratings r ON r.track_id = t.id "
         f"WHERE NOT EXISTS (SELECT 1 FROM artist_art x WHERE x.artist = "
-        f"      COALESCE(NULLIF(t.album_artist, ''), t.artist, "
-        f"               'Unknown Artist')) "
+        f"      {ALBUM_ARTIST_SQL}) "
         f"GROUP BY artist, album_key")
     return [dict(r) for r in rows]
 

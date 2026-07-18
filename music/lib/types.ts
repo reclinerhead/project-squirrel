@@ -11,6 +11,13 @@ export type Track = {
   title: string;
   artistId: string;
   artist: string;
+  /** The album-level artist identity the ids derive from -- canonical
+   * casing since #152 (`artist_norm`), and the name the search overlay
+   * shows for an artist row. Differs from `artist` on compilations (the
+   * performer credit) and on tracks tagged with a minority casing.
+   * Optional so pre-#152 shapes (fixtures, the daemon's /queue payload)
+   * type-check untouched; absent falls back to `artist`. */
+  albumArtist?: string;
   albumId: string;
   album: string;
   trackNo: number;

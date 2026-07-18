@@ -521,9 +521,16 @@ def test_album_key_sql_matches_the_gui_derivation(conn):
     mc.upsert_track(conn, track(id="b:3", artist=None, album_artist=None,
                                 album=None, title="Mystery"))
     mc.upsert_file(conn, entry(path="/m/c.m4a", track_id="b:3"))
+    # The canonical identity leads the key when the pass has run (#152):
+    # a minority-cased tag mints the CANONICAL key, so art cannot strand.
+    mc.upsert_track(conn, track(id="b:4", artist="Gwar",
+                                album="Scumdogs of the Universe"))
+    mc.upsert_file(conn, entry(path="/m/d.m4a", track_id="b:4"))
+    conn.execute("UPDATE tracks SET artist_norm = 'GWAR' WHERE id = 'b:4'")
     keys = sorted(mc.albums_missing_art(conn))
     assert keys == [
         "Capital Cities␟In A Tidal Wave Of Mystery",
+        "GWAR␟Scumdogs of the Universe",
         "Unknown Artist␟Unknown Album",
         "Various Artists␟Now That's Music",
     ]

@@ -57,21 +57,39 @@ export function withDb<T>(empty: T, fn: (db: DatabaseSync) => T): T {
 // COALESCE(album_artist, artist) everywhere an ALBUM is grouped or named:
 // compilations carry album_artist "Various Artists" with per-track artists,
 // and grouping by track artist would explode one album into twenty.
-const ALBUM_ARTIST = "COALESCE(NULLIF(t.album_artist, ''), t.artist, 'Unknown Artist')";
+//
+// artist_norm leads the chain since #152: the normalization pass's
+// case-collapsed canonical identity, so `Gwar` and `GWAR` group as one
+// artist and mint one album key. The raw chain survives as the fallback for
+// a snapshot the pass hasn't touched -- grouping degrades to today's
+// case-split behavior, never to a missing-column throw (the hasFocal
+// situation exactly, so these are functions of the db, not constants).
+const ALBUM_ARTIST_RAW = "COALESCE(NULLIF(t.album_artist, ''), t.artist, 'Unknown Artist')";
+const ALBUM_ARTIST_NORM =
+  "COALESCE(NULLIF(t.artist_norm, ''), NULLIF(t.album_artist, ''), t.artist, 'Unknown Artist')";
+
+function hasArtistNorm(db: DatabaseSync): boolean {
+  return !!db
+    .prepare("SELECT 1 FROM pragma_table_info('tracks') WHERE name = 'artist_norm'")
+    .get();
+}
+
+const albumArtistCol = (db: DatabaseSync) =>
+  hasArtistNorm(db) ? ALBUM_ARTIST_NORM : ALBUM_ARTIST_RAW;
 
 // THE ALBUM KEY (issue #153): the U+241F pair the art tables are keyed on.
 // This derivation is albumIdOf's input, verbatim -- and it has a Python twin
 // (music_catalog.ALBUM_KEY_SQL) that the extractor writes with. The paired
 // fixture tests (catalog-rows.test.ts / test_music_catalog.py) are what keep
 // the two implementations from drifting.
-const ALBUM_KEY =
-  ALBUM_ARTIST + " || '␟' || COALESCE(NULLIF(t.album, ''), 'Unknown Album')";
+const albumKeyCol = (db: DatabaseSync) =>
+  albumArtistCol(db) + " || '␟' || COALESCE(NULLIF(t.album, ''), 'Unknown Album')";
 
 // The art scalar subquery, same shape as the rating's and for the same
 // reason: TRACK_COLS splices into GROUP BY queries where a join's column
 // would need grouping; album_art is PK-probed per row over a window.
-const ART_HASH_SUB =
-  `(SELECT art_hash FROM album_art WHERE album_key = ${ALBUM_KEY})`;
+const artHashSub = (db: DatabaseSync) =>
+  `(SELECT art_hash FROM album_art WHERE album_key = ${albumKeyCol(db)})`;
 
 /** Whether this catalog has the art tables yet (issue #153). A music.db
  * snapshot from before the art pass -- or a pearl mid-deploy where the app
@@ -94,9 +112,10 @@ function hasFocal(db: DatabaseSync): boolean {
   );
 }
 
-// Focal's scalar subquery, ART_HASH_SUB's twin (issue #159): where the
+// Focal's scalar subquery, artHashSub's twin (issue #159): where the
 // cover's interest lives vertically, for the album page's backdrop crop.
-const FOCAL_SUB = `(SELECT focal_y FROM album_art WHERE album_key = ${ALBUM_KEY})`;
+const focalSub = (db: DatabaseSync) =>
+  `(SELECT focal_y FROM album_art WHERE album_key = ${albumKeyCol(db)})`;
 
 /** Whether tracks carries genre_norm yet (issue #163, migration v5) -- the
  * hasFocal situation exactly: SELECTing a missing column throws, and withDb
@@ -121,11 +140,12 @@ const genreCol = (db: DatabaseSync) => (hasGenreNorm(db) ? "t.genre_norm" : "NUL
 // queries including topTracks' COUNT(ph.id) GROUP BY, where a joined column
 // would have to be grouped too. ratings is keyed by track_id (PK), so this is
 // an index probe per row over a window of tracks, never the catalog.
-const trackCols = (art: boolean) =>
+const trackCols = (db: DatabaseSync) =>
   "t.id, t.title, t.artist, t.album, t.album_artist, t.track_no, " +
   "t.duration_s, t.format, t.codec, t.bitrate, t.samplerate, " +
+  (hasArtistNorm(db) ? "t.artist_norm" : "NULL") + " AS artist_norm, " +
   "(SELECT value FROM ratings WHERE track_id = t.id) AS rating, " +
-  (art ? ART_HASH_SUB : "NULL") + " AS art_hash";
+  (hasArt(db) ? artHashSub(db) : "NULL") + " AS art_hash";
 
 /** One row per album: name pair + year + dominant genre + newest file mtime
  * (the "added" proxy until the catalog has ingest dates). Dominant genre is
@@ -137,11 +157,11 @@ export function albumIndex(db: DatabaseSync): AlbumIndexEntry[] {
   // The art subquery re-derives the key from t.* inside a grouped query --
   // safe because every row in a (artist, album, genre) group derives the
   // same key, so SQLite's any-row semantics can't pick differently.
-  const art = hasArt(db) ? ART_HASH_SUB : "NULL";
-  const focal = hasFocal(db) ? FOCAL_SUB : "NULL";
+  const art = hasArt(db) ? artHashSub(db) : "NULL";
+  const focal = hasFocal(db) ? focalSub(db) : "NULL";
   const rows = db
     .prepare(
-      `SELECT ${ALBUM_ARTIST} AS artist,
+      `SELECT ${albumArtistCol(db)} AS artist,
               COALESCE(NULLIF(t.album, ''), 'Unknown Album') AS album,
               ${genreCol(db)} AS genre, COUNT(*) AS n,
               MAX(t.year) AS year, MAX(f.mtime) AS added,
@@ -172,9 +192,9 @@ export function albumIndex(db: DatabaseSync): AlbumIndexEntry[] {
 export function tracksForAlbum(db: DatabaseSync, artist: string, album: string): Track[] {
   const rows = db
     .prepare(
-      `SELECT ${trackCols(hasArt(db))}
+      `SELECT ${trackCols(db)}
        FROM tracks t
-       WHERE ${ALBUM_ARTIST} = ? AND COALESCE(NULLIF(t.album, ''), 'Unknown Album') = ?
+       WHERE ${albumArtistCol(db)} = ? AND COALESCE(NULLIF(t.album, ''), 'Unknown Album') = ?
        ORDER BY COALESCE(t.disc_no, 1), COALESCE(t.track_no, 0), t.title`,
     )
     .all(artist, album) as TrackRow[];
@@ -238,7 +258,7 @@ export function searchTrackRows(db: DatabaseSync, q: string, cap = 400): TrackRo
   const like = "%" + q.replace(/[%_]/g, "") + "%";
   return db
     .prepare(
-      `SELECT ${trackCols(hasArt(db))}
+      `SELECT ${trackCols(db)}
        FROM tracks t
        WHERE t.title LIKE ? OR t.artist LIKE ? OR t.album LIKE ?
        LIMIT ?`,
@@ -249,10 +269,10 @@ export function searchTrackRows(db: DatabaseSync, q: string, cap = 400): TrackRo
 /** Album ids most recently played, newest first -- real play_history, the
  * thing Phase 2a exists to start collecting. */
 export function recentlyPlayedPairs(db: DatabaseSync, cap: number): AlbumRow[] {
-  const art = hasArt(db) ? ART_HASH_SUB : "NULL";
+  const art = hasArt(db) ? artHashSub(db) : "NULL";
   return db
     .prepare(
-      `SELECT ${ALBUM_ARTIST} AS artist,
+      `SELECT ${albumArtistCol(db)} AS artist,
               COALESCE(NULLIF(t.album, ''), 'Unknown Album') AS album,
               MAX(t.year) AS year, MAX(${genreCol(db)}) AS genre,
               MAX(ph.played_at) AS latest,
@@ -268,9 +288,9 @@ export function recentlyPlayedPairs(db: DatabaseSync, cap: number): AlbumRow[] {
 export function topTrackRows(db: DatabaseSync, artist: string, cap = 5): TrackRow[] {
   return db
     .prepare(
-      `SELECT ${trackCols(hasArt(db))}, COUNT(ph.id) AS plays
+      `SELECT ${trackCols(db)}, COUNT(ph.id) AS plays
        FROM play_history ph JOIN tracks t ON t.id = ph.track_id
-       WHERE ${ALBUM_ARTIST} = ?
+       WHERE ${albumArtistCol(db)} = ?
        GROUP BY t.id ORDER BY plays DESC, t.title LIMIT ?`,
     )
     .all(artist, cap) as TrackRow[];
@@ -282,7 +302,7 @@ export function topTrackRows(db: DatabaseSync, artist: string, cap = 5): TrackRo
 export function seedPair(db: DatabaseSync): { artist: string; album: string; trackId: string | null } | null {
   const last = db
     .prepare(
-      `SELECT ${ALBUM_ARTIST} AS artist,
+      `SELECT ${albumArtistCol(db)} AS artist,
               COALESCE(NULLIF(t.album, ''), 'Unknown Album') AS album,
               t.id AS trackId
        FROM play_history ph JOIN tracks t ON t.id = ph.track_id
@@ -292,7 +312,7 @@ export function seedPair(db: DatabaseSync): { artist: string; album: string; tra
   if (last) return last;
   const newest = db
     .prepare(
-      `SELECT ${ALBUM_ARTIST} AS artist,
+      `SELECT ${albumArtistCol(db)} AS artist,
               COALESCE(NULLIF(t.album, ''), 'Unknown Album') AS album,
               MAX(f.mtime) AS added
        FROM tracks t JOIN track_files f ON f.track_id = t.id

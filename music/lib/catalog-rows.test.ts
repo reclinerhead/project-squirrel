@@ -206,6 +206,38 @@ describe153("albumIdOf matches the extractor's album_key (issue #153)", () => {
       b64url("Unknown Artist␟Unknown Album"),
     );
   });
+  it153("the canonical identity leads the key when the pass has run (#152)", () => {
+    // Python twin: test_album_key_sql_matches_the_gui_derivation's b:4 --
+    // a track tagged `Gwar` with artist_norm `GWAR` mints the CANONICAL key.
+    const t = trackFromRow({
+      id: "b:4", title: "T", artist: "Gwar", album: "Scumdogs of the Universe",
+      album_artist: null, artist_norm: "GWAR", track_no: 1, duration_s: 1,
+      format: "mp3", bitrate: 128000, samplerate: 44100, rating: null,
+    });
+    expect153(t.albumId).toBe(b64url("GWAR␟Scumdogs of the Universe"));
+    expect153(t.artistId).toBe(b64url("GWAR"));
+  });
+});
+
+describe153("case-split artists collapse through artist_norm (#152)", () => {
+  const row = (id: string, artist: string) => ({
+    id, title: "T", artist, album: "Al", album_artist: null,
+    artist_norm: "GWAR", track_no: 1, duration_s: 1, format: "mp3",
+    bitrate: 128000, samplerate: 44100, rating: null,
+  });
+  it153("two casings mint one artistId, one albumId, one identity name", () => {
+    const a = trackFromRow(row("b:1", "Gwar"));
+    const b = trackFromRow(row("b:2", "GWAR"));
+    expect153(a.artistId).toBe(b.artistId);
+    expect153(a.albumId).toBe(b.albumId);
+    expect153(a.albumArtist).toBe("GWAR");
+    expect153(a.artist).toBe("Gwar"); // the raw per-track credit survives
+  });
+  it153("absent artist_norm falls back to the raw derivation", () => {
+    const t = trackFromRow({ ...row("b:3", "Gwar"), artist_norm: null });
+    expect153(t.artistId).toBe(b64url("Gwar"));
+    expect153(t.albumArtist).toBe("Gwar");
+  });
 });
 
 describe153("art rides the row mappers (issue #153)", () => {

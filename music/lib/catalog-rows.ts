@@ -111,6 +111,11 @@ export type TrackRow = {
   artist: string | null;
   album: string | null;
   album_artist: string | null;
+  // The normalization pass's case-collapsed artist identity (issue #152) --
+  // when present it IS the album-level artist, so `Gwar` and `GWAR` rows
+  // mint one artistId/albumId. Optional: pre-#152 shapes (the daemon's
+  // /queue payload, older snapshots) fall back to the raw derivation.
+  artist_norm?: string | null;
   track_no: number | null;
   duration_s: number | null;
   format: string | null;
@@ -130,7 +135,8 @@ export type TrackRow = {
 };
 
 export function trackFromRow(row: TrackRow): Track {
-  const albumArtist = row.album_artist || row.artist || "Unknown Artist";
+  const albumArtist =
+    row.artist_norm || row.album_artist || row.artist || "Unknown Artist";
   const artist = row.artist || albumArtist;
   const album = row.album || "Unknown Album";
   const format = formatFromCatalog(row.format, row.bitrate, row.codec);
@@ -140,6 +146,7 @@ export function trackFromRow(row: TrackRow): Track {
     title: row.title || "Untitled",
     artistId: artistIdOf(albumArtist),
     artist,
+    albumArtist,
     albumId: albumIdOf(albumArtist, album),
     album,
     trackNo: row.track_no ?? 0,

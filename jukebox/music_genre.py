@@ -1,9 +1,32 @@
 # =============================================================================
 # project-squirrel -- music_genre.py
 #
-# The genre-normalization pass (issue #163): the library's 178 feral iTunes
+# The catalog normalization pass: genres (issue #163) and artist identity
+# (issue #152), one job, one command, one chain position for future
+# ingestion.
+#
+# THE ARTIST STAGE (#152) runs first: the library tags one band under
+# several casings (`Panic! at the Disco` / `Panic! At the Disco` -- 26
+# fold-collisions measured across 748 identities), and since an artist IS
+# its name string, every casing split into its own browse card, page, and
+# stranded art row. The stage folds each track's artist identity
+# (COALESCE(album_artist, artist), trimmed + Unicode-lowercased), tallies
+# casing frequency, and writes the winner to `tracks.artist_norm` -- the
+# #163 materialization move applied to a second column, so every consumer
+# reads a dumb column and NO folding exists downstream (three lowercase
+# implementations that must never drift was the rejected alternative).
+# Tie-break, deterministic: most tracks, then a casing seen in album_artist
+# beats one only seen in track artist, then lexicographic. The rules file's
+# `artist_display` section is the taste veto (`GWAR`, not `Gwar`) and the
+# pin against a future import flipping a winner. The fold is str.lower(),
+# NOT casefold(): simple lowercase is what a TS twin could implement
+# identically if ever needed; casefold's extra mappings couldn't be.
+#
+# THE GENRE STAGE (#163): the library's 178 feral iTunes
 # genre strings -> a small canonical vocabulary, per track, in
-# `tracks.genre_norm`. THE RULES ARE DATA -- genre_rules.yaml holds the
+# `tracks.genre_norm`. It keys its artist arithmetic (overrides, majority
+# inheritance) on the artist stage's output, so case-split artists tally
+# as one. THE RULES ARE DATA -- genre_rules.yaml holds the
 # vocabulary, the string map, artist overrides, the playlist-affinity
 # families, and the tuning knobs. Edit the file, re-run this module: that IS
 # the "reprocess under my new rules" job. A second deployment customizes by
@@ -73,15 +96,11 @@ from jukebox import music_catalog
 
 RULES_SECTIONS = {"vocabulary", "map", "artist_overrides", "clusters",
                   "tuning"}
+OPTIONAL_SECTIONS = {"artist_display"}
 TUNING_KEYS = {"inherit_threshold", "triage"}
 
 DEFAULT_RULES_PATH = os.path.join(os.path.dirname(__file__),
                                   "genre_rules.yaml")
-
-# The artist a track inherits from / is overridden by: the ALBUM artist when
-# there is one, else the track artist -- the same COALESCE every album-shaped
-# query uses, so a compilation's per-track guests don't fragment the majority.
-ARTIST_KEY_SQL = "COALESCE(NULLIF(album_artist, ''), artist)"
 
 
 def rules_path():
@@ -98,6 +117,16 @@ def rules_path():
 class RulesError(ValueError):
     """A rules file that must not be applied. Every message names what and
     where -- the file is hand-edited, so the error IS the user interface."""
+
+
+def fold_artist(name):
+    """An artist name -> its case-insensitive identity key: trimmed, Unicode
+    simple lowercase. str.lower(), NOT casefold(), on purpose (#152): simple
+    lowercase is what a TS twin could implement identically if one is ever
+    needed; casefold's extra mappings (ss for sharp s) could not be -- and
+    none of the measured collisions want them. Internal whitespace is kept:
+    broader name normalization is explicitly out of #152's scope."""
+    return name.strip().lower()
 
 
 def parse_rules(text):
@@ -118,7 +147,7 @@ def parse_rules(text):
         raise RulesError("rules file must be a mapping of sections, got %s"
                          % type(data).__name__)
 
-    unknown = set(data) - RULES_SECTIONS
+    unknown = set(data) - RULES_SECTIONS - OPTIONAL_SECTIONS
     if unknown:
         raise RulesError("unknown section(s): %s -- the loader rejects what "
                          "it would silently ignore" % ", ".join(sorted(unknown)))
@@ -157,10 +186,15 @@ def parse_rules(text):
         overrides = {}
     if not isinstance(overrides, dict):
         raise RulesError("artist_overrides must be artist -> canonical tag")
+    seen_folds = set()
     for artist, canonical in overrides.items():
         if canonical not in vocab_set:
             raise RulesError("artist_overrides[%r] -> %r is not in vocabulary"
                              % (artist, canonical))
+        if fold_artist(artist) in seen_folds:
+            raise RulesError("artist_overrides lists %r twice (matching is "
+                             "case-insensitive since #152)" % artist)
+        seen_folds.add(fold_artist(artist))
 
     clusters = data["clusters"]
     if not isinstance(clusters, list):
@@ -192,6 +226,24 @@ def parse_rules(text):
                          "is mapped or deferred, never both"
                          % ", ".join(map(repr, overlap)))
 
+    display = data.get("artist_display") or {}
+    if not isinstance(display, dict):
+        raise RulesError("artist_display must be artist -> display casing")
+    display_by_fold = {}
+    for key, want in display.items():
+        if not isinstance(key, str) or not isinstance(want, str) \
+                or not key.strip() or not want.strip():
+            raise RulesError("artist_display entries must be non-empty "
+                             "strings, got %r: %r" % (key, want))
+        if fold_artist(key) != fold_artist(want):
+            raise RulesError("artist_display[%r] -> %r is a DIFFERENT artist "
+                             "-- this section picks a casing, never renames"
+                             % (key, want))
+        if fold_artist(key) in display_by_fold:
+            raise RulesError("artist_display lists %r twice (case-"
+                             "insensitively)" % key)
+        display_by_fold[fold_artist(key)] = want.strip()
+
     return {
         "vocabulary": list(vocab),
         "map": raw_map,
@@ -199,6 +251,7 @@ def parse_rules(text):
         "clusters": tuple(families),
         "inherit_threshold": float(threshold),
         "triage": set(triage),
+        "artist_display": display_by_fold,
     }
 
 
@@ -221,6 +274,45 @@ def engine_clusters(rules):
     from jukebox import music_playlist
     return tuple(frozenset(music_playlist.genre_head(m) for m in members)
                  for members in rules["clusters"])
+
+
+def artist_identity(artist, album_artist):
+    """One track's artist identity, pre-normalization: the album artist when
+    there is one, else the track artist -- the COALESCE every album-shaped
+    query speaks, so a compilation's per-track guests don't fragment
+    anything. Trimmed for display; 'Unknown Artist' is the nameless tail's
+    display fallback, same as the GUI's."""
+    for name in (album_artist, artist):
+        if name is not None and str(name).strip():
+            return str(name).strip()
+    return "Unknown Artist"
+
+
+def canonical_artists(pairs, display_overrides=None):
+    """[(artist, album_artist)] per track -> {fold: canonical display name}.
+    Most-frequent casing wins; ties break deterministically (#152, and the
+    catalog has a live one -- Run DMC 12 tracks vs Run Dmc 12): a casing
+    seen in album_artist beats one only seen in track artist, then
+    lexicographic by code point. display_overrides ({fold: display}, the
+    rules file's taste veto) replaces the winner outright."""
+    votes = {}
+    in_album_artist = set()
+    for artist, album_artist in pairs:
+        name = artist_identity(artist, album_artist)
+        fold = fold_artist(name)
+        votes.setdefault(fold, Counter())[name] += 1
+        if album_artist is not None and str(album_artist).strip():
+            in_album_artist.add(name)
+    out = {}
+    for fold, casings in votes.items():
+        out[fold] = min(casings,
+                        key=lambda name: (-casings[name],
+                                          name not in in_album_artist, name))
+    if display_overrides:
+        for fold, want in display_overrides.items():
+            if fold in out:
+                out[fold] = want
+    return out
 
 
 def artist_majorities(pairs, threshold):
@@ -249,7 +341,11 @@ def expected_norm(raw, artist_key, rulemap, overrides, majorities):
     """One track's expected (genre_norm, genre_norm_source), by precedence:
     artist override > string map > artist majority > (None, None). The
     'owner' level isn't here -- it's the UPDATE's WHERE clause, structural
-    like the art store's, not a branch someone could forget."""
+    like the art store's, not a branch someone could forget.
+
+    artist_key is the FOLD of the canonical identity since #152, and
+    overrides/majorities are fold-keyed -- case-split artists answer as
+    one."""
     if artist_key in overrides:
         return overrides[artist_key], music_catalog.GENRE_MAPPED
     if raw is not None and raw in rulemap:
@@ -316,25 +412,48 @@ def normalize(conn, rules, dry_run=False):
     overrides = rules["artist_overrides"]
 
     tracks = conn.execute(
-        f"SELECT id, genre, {ARTIST_KEY_SQL} AS artist_key, "
-        f"genre_norm, genre_norm_source FROM tracks").fetchall()
+        "SELECT id, genre, artist, album_artist, artist_norm, "
+        "genre_norm, genre_norm_source FROM tracks").fetchall()
 
-    mapped_pairs = []
+    # --- artist stage (#152): the canonical identity every later step keys on
+    canon = canonical_artists(
+        [(t["artist"], t["album_artist"]) for t in tracks],
+        rules["artist_display"])
+    folds = {}
+    artist_updates = []
     for t in tracks:
-        if t["artist_key"] in overrides:
-            mapped_pairs.append((t["artist_key"],
-                                 overrides[t["artist_key"]]))
+        name = artist_identity(t["artist"], t["album_artist"])
+        fold = fold_artist(name)
+        folds.setdefault(fold, set()).add(name)
+        want_artist = canon[fold]
+        if t["artist_norm"] != want_artist:
+            artist_updates.append((want_artist, t["id"]))
+    collapsed = sum(1 for names in folds.values() if len(names) > 1)
+    if artist_updates and not dry_run:
+        conn.executemany(
+            "UPDATE tracks SET artist_norm = ? WHERE id = ?", artist_updates)
+        conn.commit()
+
+    # --- genre stage (#163), fold-keyed so case-split artists tally as one
+    overrides_f = {fold_artist(name): tag for name, tag in overrides.items()}
+    track_folds = [fold_artist(artist_identity(t["artist"],
+                                               t["album_artist"]))
+                   for t in tracks]
+    mapped_pairs = []
+    for t, fold in zip(tracks, track_folds):
+        if fold in overrides_f:
+            mapped_pairs.append((fold, overrides_f[fold]))
         elif t["genre"] is not None and t["genre"] in rulemap:
-            mapped_pairs.append((t["artist_key"], rulemap[t["genre"]]))
+            mapped_pairs.append((fold, rulemap[t["genre"]]))
     majorities = artist_majorities(mapped_pairs, rules["inherit_threshold"])
 
     updates = []
     owner_kept = 0
     unmapped = Counter()
     tally = Counter()
-    for t in tracks:
-        want, source = expected_norm(t["genre"], t["artist_key"], rulemap,
-                                     overrides, majorities)
+    for t, fold in zip(tracks, track_folds):
+        want, source = expected_norm(t["genre"], fold, rulemap,
+                                     overrides_f, majorities)
         # A raw string with no rule is reported even when inheritance
         # covered this track -- the STRING is what wants a rules line, and
         # the next track wearing it may have no majority to lean on.
@@ -380,13 +499,18 @@ def normalize(conn, rules, dry_run=False):
         "unmapped": dict(unmapped),
         "rules_upserted": upserted,
         "rules_pruned": pruned,
+        "artist_written": 0 if dry_run else len(artist_updates),
+        "artist_would_write": len(artist_updates) if dry_run else 0,
+        "artists_collapsed": collapsed,
+        "artist_identities": len(folds),
     }
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="python3 -m jukebox.music_genre",
-        description="Normalize tracks.genre_norm from the genre rules file.")
+        description="Normalize tracks.artist_norm and tracks.genre_norm "
+                    "from the rules file (issues #152 / #163).")
     ap.add_argument("--rules", default=None,
                     help="rules file (default: MERLE_MUSIC_GENRE_RULES or "
                          "the repo's genre_rules.yaml)")
@@ -410,6 +534,10 @@ def main(argv=None):
     print("[genre] rules synced: %d upserted, %d stale pruned"
           % (report["rules_upserted"], report["rules_pruned"]))
     verb = "would write" if args.dry_run else "written"
+    print("[genre] artists: %d identities, %d case-collapsed -- "
+          "artist_norm %s on %d tracks"
+          % (report["artist_identities"], report["artists_collapsed"],
+             verb, report["artist_would_write"] or report["artist_written"]))
     print("[genre] %s: %d of %d tracks (owner rows kept: %d)"
           % (verb, report["would_write"] or report["written"],
              report["total"], report["owner_kept"]))

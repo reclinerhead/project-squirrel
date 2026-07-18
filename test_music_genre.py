@@ -53,6 +53,11 @@ def add_track(conn, tid, genre=None, artist="A", album_artist=None,
     conn.commit()
 
 
+def artist_norm_of(conn, tid):
+    return conn.execute("SELECT artist_norm FROM tracks WHERE id = ?",
+                        (tid,)).fetchone()["artist_norm"]
+
+
 def norm_of(conn, tid):
     r = conn.execute("SELECT genre_norm, genre_norm_source FROM tracks "
                      "WHERE id = ?", (tid,)).fetchone()
@@ -122,6 +127,7 @@ def test_the_shipped_rules_file_is_valid():
     assert len(r["map"]) == 173
     assert r["triage"] == {"Pop\\Rock", "Pop/Rock", "Styles", "Popular",
                            "Other"}
+    assert r["artist_display"] == {}  # empty until the library has bad taste
 
 
 def test_engine_clusters_speak_head_tokens():
@@ -131,6 +137,70 @@ def test_engine_clusters_speak_head_tokens():
                                  "vocabulary: [Rock, Electronic, Folk, R&B/Soul]")
               .replace("[Rock, Electronic]", "[Electronic, R&B/Soul]"))
     assert mg.engine_clusters(r) == (frozenset({"electronic", "r&b"}),)
+
+
+# --- artist canonicalization (#152) -----------------------------------------------
+
+def test_fold_is_trim_plus_simple_lowercase():
+    assert mg.fold_artist("  Panic! At the Disco ") == "panic! at the disco"
+    assert mg.fold_artist("AC/DC") == "ac/dc"  # id-safety chars untouched
+    assert mg.fold_artist("Gwar") == mg.fold_artist("GWAR")
+
+
+def test_most_frequent_casing_wins():
+    canon = mg.canonical_artists(
+        [("Gwar", None)] * 3 + [("GWAR", None)] * 2)
+    assert canon == {"gwar": "Gwar"}
+
+
+def test_tie_prefers_a_casing_seen_in_album_artist():
+    """Run DMC vs Run Dmc, 12-12 in the live catalog -- the tie-break is a
+    real case, not theory."""
+    canon = mg.canonical_artists(
+        [("Run Dmc", None), (None, "Run DMC")])
+    assert canon["run dmc"] == "Run DMC"
+
+
+def test_final_tie_breaks_lexicographically():
+    canon = mg.canonical_artists([("The XX", None), ("The xx", None)])
+    assert canon["the xx"] == "The XX"  # code-point order, deterministic
+
+
+def test_surrounding_whitespace_collapses_into_the_identity():
+    canon = mg.canonical_artists([(" Gwar ", None), ("Gwar", None)])
+    assert canon == {"gwar": "Gwar"}
+
+
+def test_display_override_beats_frequency():
+    canon = mg.canonical_artists(
+        [("Gwar", None)] * 3 + [("GWAR", None)],
+        display_overrides={"gwar": "GWAR"})
+    assert canon["gwar"] == "GWAR"
+
+
+def test_display_override_may_pick_a_casing_never_renames():
+    with pytest.raises(mg.RulesError, match="never renames"):
+        rules(MINI_RULES.replace(
+            "artist_overrides: {}",
+            "artist_overrides: {}\nartist_display: {Gwar: Gwar Inc}"))
+
+
+def test_display_override_folds_are_unique():
+    with pytest.raises(mg.RulesError, match="twice"):
+        rules(MINI_RULES.replace(
+            "artist_overrides: {}",
+            "artist_overrides: {}\nartist_display: {Gwar: GWAR, GWAR: Gwar}"))
+
+
+def test_genre_artist_overrides_reject_case_duplicate_keys():
+    with pytest.raises(mg.RulesError, match="case-insensitive"):
+        rules(MINI_RULES.replace(
+            "artist_overrides: {}",
+            "artist_overrides: {Enya: Folk, ENYA: Rock}"))
+
+
+def test_artist_display_is_optional_and_defaults_empty():
+    assert rules()["artist_display"] == {}
 
 
 # --- inheritance arithmetic -------------------------------------------------------
@@ -257,7 +327,58 @@ def test_the_same_run_twice_writes_nothing():
     add_track(conn, "b:1", genre="Rock", artist="A")
     add_track(conn, "b:2", genre="Weird", artist="A")
     assert mg.normalize(conn, rules())["written"] == 2
-    assert mg.normalize(conn, rules())["written"] == 0
+    second = mg.normalize(conn, rules())
+    assert second["written"] == 0
+    assert second["artist_written"] == 0  # the artist stage is diff-writing too
+
+
+def test_case_split_artists_collapse_to_one_artist_norm():
+    conn = catalog()
+    add_track(conn, "b:1", genre="Electronica", artist="Panic! At the Disco")
+    add_track(conn, "b:2", genre="Electronica", artist="Panic! At the Disco")
+    add_track(conn, "b:3", genre="Electronica", artist="Panic! at the Disco")
+    report = mg.normalize(conn, rules())
+    assert artist_norm_of(conn, "b:1") == "Panic! At the Disco"
+    assert artist_norm_of(conn, "b:3") == "Panic! At the Disco"
+    assert report["artists_collapsed"] == 1
+    assert report["artist_written"] == 3
+
+
+def test_genre_inheritance_pools_across_casings():
+    """The synergy #152 buys #163: a majority split across two casings of
+    one artist still counts as one artist's majority."""
+    conn = catalog()
+    add_track(conn, "b:1", genre="Electronica", artist="Gwar")
+    add_track(conn, "b:2", genre="Electronica", artist="GWAR")
+    add_track(conn, "b:3", genre="Mystery Tag", artist="gwar")
+    mg.normalize(conn, rules())
+    assert norm_of(conn, "b:3") == ("Electronic", "inherited")
+
+
+def test_artist_display_override_lands_in_artist_norm():
+    conn = catalog()
+    add_track(conn, "b:1", genre="Rock", artist="Gwar")
+    add_track(conn, "b:2", genre="Rock", artist="Gwar")
+    add_track(conn, "b:3", genre="Rock", artist="GWAR")
+    edited = rules(MINI_RULES.replace(
+        "artist_overrides: {}",
+        "artist_overrides: {}\nartist_display: {GWAR: GWAR}"))
+    mg.normalize(conn, edited)
+    assert artist_norm_of(conn, "b:1") == "GWAR"
+    # Removing the override re-runs back to the frequency winner.
+    mg.normalize(conn, rules())
+    assert artist_norm_of(conn, "b:1") == "Gwar"
+
+
+def test_compilations_keep_the_album_artist_identity():
+    conn = catalog()
+    add_track(conn, "b:1", genre="Electronica", artist="Guest One",
+              album_artist="Various Artists")
+    add_track(conn, "b:2", genre="Electronica", artist="Guest Two",
+              album_artist="various artists")
+    mg.normalize(conn, rules())
+    assert artist_norm_of(conn, "b:1") == "Various Artists"
+    assert artist_norm_of(conn, "b:2") == "Various Artists"
 
 
 def test_a_rules_edit_remaps_non_owner_rows():

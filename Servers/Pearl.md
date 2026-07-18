@@ -762,6 +762,26 @@ MERLE_MUSIC_DB=/home/todd/project-squirrel/music.db \
 Owner-picked art (`source='owner'` rows in `album_art`/`artist_art`)
 survives every re-run by construction — the upsert refuses to touch it.
 
+### Catalog normalization (issues #163 genre, #152 artist)
+
+`genre_rules.yaml` (in the repo — it IS the ruleset; edits are commits) drives
+one pass that fills `tracks.genre_norm` (22-tag canonical vocabulary) and
+`tracks.artist_norm` (case-collapsed artist identity). Idempotent and
+diff-writing: re-run after any rules edit or ingestion; `--dry-run` previews
+with zero writes. The venv needs **pyyaml** (present since 2026-07-18).
+
+```
+cd ~/project-squirrel && MERLE_MUSIC_DB=/home/todd/project-squirrel/music.db \
+    venv/bin/python -m jukebox.music_genre [--dry-run]
+```
+
+After the FIRST artist-normalizing run on a populated catalog, run the art
+pass (above) once more: art keys are minted from the canonical identity now,
+so albums that were filed under a minority casing re-enter the art worklist
+and re-extract. Self-healing, minutes. The pass ends with an UNMAPPED report
+— a new genre tag from a future ingestion shows up there, gets one rules
+line, and a re-run closes the vocabulary again.
+
 ### Codec backfill (issue #149, one-time)
 
 `format` can't tell ALAC from purchase-AAC inside `.m4a`, and the browser
