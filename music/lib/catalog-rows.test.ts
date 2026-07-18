@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   albumFromRow,
   albumIdOf,
+  albumKeyOf,
   artistIdOf,
   decodeAlbumId,
   decodeArtistId,
@@ -22,6 +23,22 @@ describe("the id codec", () => {
                         "10,000 Maniacs", "❦ odd unicode ❦"]) {
       expect(decodeArtistId(artistIdOf(name))).toBe(name);
     }
+  });
+
+  it("mints the raw album key the python side keys its side tables on", () => {
+    // The cross-language contract (music_catalog.ALBUM_KEY_SQL): canonical
+    // artist + U+241F + title. album_art and album_notes are both keyed on
+    // this exact string, so a drift here strands art AND descriptions.
+    expect(albumKeyOf("Air", "Moon Safari")).toBe("Air␟Moon Safari");
+  });
+
+  it("builds album ids from the same key, never a second derivation", () => {
+    // If albumIdOf ever stops agreeing with albumKeyOf, a page's URL and its
+    // description lookup would disagree about what album this is.
+    const id = albumIdOf("Air", "Moon Safari");
+    expect(decodeAlbumId(id)).toEqual({ artist: "Air", album: "Moon Safari" });
+    const pair = decodeAlbumId(id)!;
+    expect(albumKeyOf(pair.artist, pair.album)).toBe(albumKeyOf("Air", "Moon Safari"));
   });
 
   it("round-trips album pairs, including separators-looking titles", () => {

@@ -71,6 +71,13 @@ export type Album = {
    * cropped backdrop band; null/absent = center, exactly the pre-focal
    * behavior. */
   artFocalY?: number | null;
+  /** Editorial copy about this record (issue #171), lifted from the files'
+   * comment tags and trimmed back to whole sentences. Present for ~20% of
+   * albums; null/absent renders no panel at all. Optional so pre-#171
+   * shapes -- fixtures, the daemon's payloads -- type-check untouched. */
+  description?: string | null;
+  /** Where that copy came from: "comment-tag" | "external" | "owner". */
+  descriptionSrc?: string | null;
 };
 
 export type Artist = {
