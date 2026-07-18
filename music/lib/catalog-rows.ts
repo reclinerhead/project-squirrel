@@ -47,8 +47,18 @@ export function decodeArtistId(id: string): string | null {
   }
 }
 
+/** THE ALBUM KEY, raw -- the exact string `music_catalog.ALBUM_KEY_SQL` mints
+ * and every album-scoped side table (`album_art`, `album_notes`) is keyed on.
+ * Exported because SQL-side lookups need the key itself, not its base64 id,
+ * and the guide's rule is that this derivation lives in ONE place per
+ * language: a second `artist + "␟" + album` spelled out at a call site is
+ * exactly how the two sides drift. */
+export function albumKeyOf(artist: string, album: string): string {
+  return artist + SEP + album;
+}
+
 export function albumIdOf(artist: string, album: string): string {
-  return b64(new TextEncoder().encode(artist + SEP + album));
+  return b64(new TextEncoder().encode(albumKeyOf(artist, album)));
 }
 
 export function decodeAlbumId(id: string): { artist: string; album: string } | null {

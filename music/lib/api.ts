@@ -37,6 +37,7 @@ import {
   libraryTotals,
   recentlyPlayedPairs,
   searchTrackRows,
+  albumNoteFor,
   artistBioFor,
   seedPair,
   topTrackRows,
@@ -69,6 +70,7 @@ export async function getAlbum(id: string): Promise<Album | null> {
     const meta = albumIndex(db).find(
       (e) => e.artist === pair.artist && e.album === pair.album,
     );
+    const note = albumNoteFor(db, pair.artist, pair.album);
     return {
       id,
       title: pair.album,
@@ -83,6 +85,10 @@ export async function getAlbum(id: string): Promise<Album | null> {
       // The backdrop's crop anchor (issue #159) rides the index entry only
       // -- tracks don't carry it, and null honestly means "center".
       artFocalY: meta?.focal_y ?? null,
+      // The album's own copy (issue #171). Resolved on the server half with
+      // everything else, so the panel is part of the first paint.
+      description: note?.description ?? null,
+      descriptionSrc: note?.source ?? null,
     };
   });
 }

@@ -24,6 +24,7 @@
 import { DatabaseSync } from "node:sqlite";
 import {
   albumFromRow,
+  albumKeyOf,
   artistIdOf,
   trackFromRow,
   type AlbumRow,
@@ -217,6 +218,40 @@ export function artistAlbums(entries: AlbumIndexEntry[]): Map<string, AlbumIndex
     else byArtist.set(e.artist, [e]);
   }
   return byArtist;
+}
+
+/** Whether this catalog has the album-notes table yet (issue #171). A
+ * snapshot from before the blurb pass -- or a pearl mid-deploy -- degrades to
+ * "no descriptions", never to withDb's catch emptying the catalog. Table-level
+ * is enough here: unlike `artists`, the table itself is the new thing. */
+function hasNotes(db: DatabaseSync): boolean {
+  return !!db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'album_notes'")
+    .get();
+}
+
+/** One album's description, or null when it has none (issue #171).
+ *
+ * Keyed on the album key the python side minted -- canonical artist + U+241F
+ * + title -- which is exactly what `decodeAlbumId` hands back, so the caller
+ * passes the pair rather than re-deriving a string that already exists.
+ *
+ * Only ~20% of albums have one, and that is the normal case rather than a
+ * gap to apologise for: the text comes from whatever store copy happened to
+ * ride the files' comment tags. */
+export function albumNoteFor(
+  db: DatabaseSync,
+  artist: string,
+  album: string,
+): { description: string; source: string } | null {
+  if (!hasNotes(db)) return null;
+  const row = db
+    .prepare("SELECT description, source FROM album_notes WHERE album_key = ?")
+    .get(albumKeyOf(artist, album)) as
+    | { description: string | null; source: string | null }
+    | undefined;
+  if (!row?.description) return null;
+  return { description: row.description, source: row.source ?? "" };
 }
 
 /** Whether `artists` carries the provenance columns yet (issue #170,

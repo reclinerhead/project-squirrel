@@ -26,13 +26,14 @@ import { CoverArt } from "@/components/CoverArt";
 import { FormatBadge } from "@/components/FormatBadge";
 import { QualityBadge } from "@/components/QualityBadge";
 import { TrackList } from "@/components/TrackList";
-import BioSource from "@/components/BioSource";
+import SourceStamp from "@/components/SourceStamp";
 import { PlayIcon, ShuffleIcon } from "@/components/icons";
 import type { Album, ArtistBio } from "@/lib/types";
 
 export function AlbumView({ album, about }: { album: Album; about?: ArtistBio | null }) {
   const { playTracks, toggleShuffle, shuffle } = usePlayer();
   const [lightbox, setLightbox] = useState(false);
+  const [descOpen, setDescOpen] = useState(false);
 
   // Escape closes the lightbox -- bound only while it's open, so the page's
   // ordinary keys are untouched the rest of the time.
@@ -185,7 +186,44 @@ export function AlbumView({ album, about }: { album: Album; about?: ArtistBio | 
             <p className="line-clamp-3 max-w-3xl text-sm leading-relaxed text-inkdim">
               {about.bio}
             </p>
-            <BioSource bio={about.bio} src={about.bioSrc} url={about.bioUrl} />
+            <SourceStamp text={about.bio} src={about.bioSrc} url={about.bioUrl} />
+          </div>
+        </section>
+      )}
+
+      {/* The album's own copy (issue #171), below the artist panel because
+          that is the order the issue specifies. Worth revisiting: album-first
+          then artist-context reads more naturally, and it is a one-line swap.
+          Absent entirely for the ~80% of albums whose tags carried nothing --
+          no empty shell, nothing to shift. */}
+      {album.description && (
+        <section className="panel rounded-sm border border-line bg-panel">
+          <div className="flex items-baseline justify-between gap-3 px-4 pb-2 pt-3">
+            <h2 className="text-lg text-ink" style={{ fontFamily: "var(--font-display)" }}>
+              About this album
+            </h2>
+          </div>
+          <div className="px-4 pb-4">
+            <p
+              className={`max-w-3xl text-sm leading-relaxed text-inkdim ${
+                descOpen ? "" : "line-clamp-3"
+              }`}
+            >
+              {album.description}
+            </p>
+            {/* Read-more only when there is more (the artist hero's 260-char
+                threshold). Expanding is user-initiated, so it does not
+                violate the nothing-moves-on-its-own rule. */}
+            {album.description.length > 260 && (
+              <button
+                type="button"
+                onClick={() => setDescOpen((o) => !o)}
+                className="mt-1 text-sm text-ink underline decoration-line underline-offset-4 transition-colors hover:decoration-linebright"
+              >
+                {descOpen ? "Read less" : "Read more"}
+              </button>
+            )}
+            <SourceStamp text={album.description} src={album.descriptionSrc} />
           </div>
         </section>
       )}
