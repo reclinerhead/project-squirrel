@@ -99,14 +99,17 @@ export async function search(query: string): Promise<SearchResults> {
     for (const t of tracks) {
       let a = artists.get(t.artistId);
       if (!a) {
-        a = { id: t.artistId, name: t.artist, bio: "", albums: [],
-              artHash: artistArt.get(t.artist) ?? null };
+        // The identity name, not the per-track credit (#152): two casings
+        // share one artistId now, and the row must wear the canonical one.
+        const name = t.albumArtist ?? t.artist;
+        a = { id: t.artistId, name, bio: "", albums: [],
+              artHash: artistArt.get(name) ?? null };
         artists.set(t.artistId, a);
       }
       let al = a.albums.find((x) => x.id === t.albumId);
       if (!al) {
         al = { id: t.albumId, title: t.album, artistId: t.artistId,
-               artist: t.artist, year: 0, genre: "", tracks: [],
+               artist: t.albumArtist ?? t.artist, year: 0, genre: "", tracks: [],
                artHash: t.artHash ?? null };
         a.albums.push(al);
       }

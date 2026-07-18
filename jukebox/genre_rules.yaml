@@ -13,14 +13,15 @@
 # subgenres and two electronica buckets) is a DIFFERENT FILE, never a code
 # change: point MERLE_MUSIC_GENRE_RULES (or --rules) at your own copy.
 #
-# Sections (all five required; the loader rejects unknown ones):
+# Sections (five required; artist_display optional; unknown ones rejected):
 #   vocabulary        the canonical tag list. Nothing else may hardcode it.
 #   map               canonical tag -> the raw strings that mean it. A raw
 #                     string may appear ONCE across the whole map.
 #   artist_overrides  artist -> canonical, for judgment calls no string map
 #                     can express. Beats the string map. This is also where
 #                     the future curation of the ~116 unresolved artists
-#                     lands -- rules, not one-off DB writes.
+#                     lands -- rules, not one-off DB writes. Matched
+#                     case-insensitively since #152.
 #   clusters          genre FAMILIES for playlist affinity (music_playlist).
 #                     A custom vocabulary needs custom families, so they
 #                     travel together.
@@ -29,6 +30,13 @@
 #                     to be unmappable junk drawers -- kept out of the
 #                     unmapped report, left NULL for the bulk-metadata
 #                     backfill (they are deferred, not forgotten).
+#   artist_display    artist -> the display casing you want (issue #152).
+#                     The pass collapses case-duplicate artists to their
+#                     most-frequent casing automatically; this section is
+#                     the taste veto (the library says `Gwar` 106-32, the
+#                     band says GWAR) and the pin against a future import
+#                     flipping a winner. The override must be the SAME
+#                     artist (case-insensitively) as its key.
 #
 # Raw strings with backslashes are single-quoted -- YAML double quotes would
 # treat \T as an escape. Two-space gaps (`DUBSTEP  GRIME`) are real: the
@@ -273,6 +281,12 @@ artist_overrides: {}
 clusters:
   - [Electronic, Downtempo, Dance, Industrial, Hip-Hop, R&B/Soul]
   - [Rock, Classic Rock, Progressive Rock, Alternative, Indie, Punk]
+
+# Display-casing vetoes (issue #152). Empty means "most frequent casing
+# wins" everywhere -- add a line when the library's majority has bad taste:
+#   artist_display:
+#     GWAR: GWAR            # the library says Gwar 106-32; the band disagrees
+artist_display: {}
 
 tuning:
   # A track whose raw tag maps nowhere inherits its artist's genre when at
