@@ -431,7 +431,7 @@ One-time setup (repeatable — the onboarding rule):
 pip3 install --user --break-system-packages uv     # once; lands in ~/.local/bin
 ~/.local/bin/uv venv --python 3.11 ~/earl-venv
 ~/.local/bin/uv pip install --python ~/earl-venv/bin/python birdnet paho-mqtt
-sudo mkdir -p /srv/media-cache/earl && sudo chown todd:todd /srv/media-cache/earl
+mkdir -p /srv/media-cache/earl    # no sudo: todd owns /srv/media-cache
 ```
 
 First run downloads the BirdNET acoustic (77 MB) + geo (46 MB) models to
@@ -465,15 +465,23 @@ WantedBy=multi-user.target
 
 `earl-sightings.service` is the same skeleton with
 `ExecStart=/home/todd/project-squirrel/venv/bin/python -m listener.sightings`,
-`Environment=MERLE_EARL_DB=/home/todd/project-squirrel/earl.db`, and only
-`MERLE_MQTT` besides. Then the usual:
+`Environment=MERLE_EARL_DB=/home/todd/project-squirrel/earl.db`,
+`Environment=MERLE_EARL_CLIPS=/srv/media-cache/earl` (issue #175: the
+sightings unit owns clip retention, so it needs Earl's clip dir), and
+`MERLE_MQTT` besides. Optional knob: `MERLE_EARL_CLIPS_KEEP_DAYS`
+(default 90). Then the usual:
 `sudo systemctl daemon-reload && sudo systemctl enable --now earl-listener earl-sightings`.
 
-Adding the rover as a second source (when pearl→merle keys exist:
-`ssh-keygen` as todd, `ssh-copy-id todd@merle`, `BatchMode` must work):
-set `Environment=MERLE_EARL_SOURCES=amcrest,rover` in the unit. A rover
-that's off or unreachable is just a dark entry on `audio/sources` cycling
-its restart backoff — that's the designed steady state, not a problem.
+**The rover is enabled as a drop-in** (installed 2026-07-18, the
+music-daemon `cache.conf` pattern):
+`/etc/systemd/system/earl-listener.service.d/rover.conf` sets
+`Environment=MERLE_EARL_SOURCES=amcrest,rover`, so the base unit stays
+exactly what's documented above and dropping the rover again is one `rm` +
+`daemon-reload` + restart. It rides pearl→merle ssh keys (todd's
+`~/.ssh/id_ed25519`, comment `pearl-earl-rover`, installed the same day —
+`BatchMode` must keep working). A rover that's off or unreachable is just a
+dark entry on `audio/sources` cycling its restart backoff — that's the
+designed steady state, not a problem.
 
 Watching Earl work:
 
@@ -485,9 +493,35 @@ sqlite3 is not installed here -- query earl.db via python3 (the music.db note)
 
 **`earl.db` is irreplaceable** (the weather.db honor, third member: after
 `weather.db` and `music.db`'s ratings): the life list's first-heard dates
-cannot be re-derived. `/srv/media-cache/earl` clips are semi-precious — a
-lifer's `first_clip` points there. Back up `earl.db` the same way as the
-others (see Backups: sqlite3 .backup, never cp on a live WAL db).
+cannot be re-derived. Back up `earl.db` the same way as the others (see
+Backups: sqlite3 .backup, never cp on a live WAL db).
+
+**Clips are a rolling window with one permanent shelf** (issue #175): the
+sightings unit prunes `/srv/media-cache/earl` hourly past
+`MERLE_EARL_CLIPS_KEEP_DAYS` (default 90 — roughly 20 GB steady-state at
+the post-debounce rate), **except every clip named in
+`life_list.first_clip`, which survives forever** — a lifer's first
+recording is part of the permanent record. A sightings row whose clip has
+been pruned keeps its path; the missing file is an honest gap (the Field
+Journal's pruned-thumbnail precedent).
+
+If a hand-run Earl ever needs killing, target the process group or match
+`earl-venv` — never `pkill -f listener.earl`, which kills only the parent
+and orphans the non-daemonic workers (they'll hold microphones forever;
+this happened). `systemctl` stop/restart is always safe: the cgroup owns
+the whole tree.
+
+And never hand-run Earl with a command line identical to the unit's — a
+cleanup pattern that matches both WILL eventually kill production (this
+also happened; SIGTERM from outside reads as a clean stop, so
+`Restart=on-failure` deliberately stays down). Run desk instances through
+a distinctly named interpreter symlink instead — `ln -sf
+~/earl-venv/bin/python ~/earl-venv/bin/earl-desktest`, then launch with
+`~/earl-venv/bin/earl-desktest -m listener.earl` — so `pgrep`/`pkill` can
+target `earl-deskte[s]t` and nothing else. (`exec -a` does NOT work:
+renaming argv[0] breaks CPython's venv prefix discovery.) Interrupt a desk
+instance with `pkill -INT`, not TERM — SIGINT runs Earl's cleanup, which
+terminates the workers.
 
 ---
 
