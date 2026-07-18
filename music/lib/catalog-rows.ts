@@ -125,6 +125,10 @@ export type TrackRow = {
   codec?: string | null;
   bitrate: number | null;
   samplerate: number | null;
+  // The track's tagged release year (issue #167): search assembles album
+  // stubs from track rows, and without this every album in the overlay wore
+  // a hardcoded year 0. Optional -- pre-#167 wire shapes omit it.
+  year?: number | null;
   // The catalog stores only real opinions (-2/-1/+1/+2); an unrated track has
   // no ratings row at all, so this arrives null and maps to 0 = unrated.
   rating: number | null;
@@ -157,6 +161,7 @@ export function trackFromRow(row: TrackRow): Track {
     // the quality badge treats lossless-with-unknown-depth as plain lossless.
     bitDepth: null,
     sampleRateHz: row.samplerate ?? null,
+    year: row.year ?? null,
     bitrateKbps: lossy && row.bitrate ? Math.round(row.bitrate / 1000) : null,
     rating: ratingFromRow(row.rating),
     artHash: row.art_hash ?? null,

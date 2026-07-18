@@ -130,7 +130,9 @@ export function ArtistView({ artist, topTracks }: { artist: Artist; topTracks: T
                   <CoverArt id={al.id} title={al.title} artHash={al.artHash} />
                 </span>
                 <span className="mt-2 block truncate text-sm text-ink">{al.title}</span>
-                <span className="block text-xs text-inkfaint">{al.year}</span>
+                {/* year 0 = unknown (issue #167): an nbsp keeps the line so
+                    cards in the grid stay height-aligned (rule #1) */}
+                <span className="block text-xs text-inkfaint">{al.year || " "}</span>
               </Link>
             ))}
         </div>

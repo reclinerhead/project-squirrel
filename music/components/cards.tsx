@@ -15,7 +15,9 @@ export function AlbumCard({ album }: { album: Album }) {
       </span>
       <span className="mt-2 block truncate text-sm text-ink">{album.title}</span>
       <span className="block truncate text-xs text-inkfaint">
-        {album.artist} · {album.year}
+        {/* year 0 = unknown (issue #167): the artist stands alone, no "· 0" */}
+        {album.artist}
+        {album.year ? ` · ${album.year}` : ""}
       </span>
     </Link>
   );

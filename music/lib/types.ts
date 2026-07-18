@@ -32,6 +32,10 @@ export type Track = {
   /** null for lossy formats -- bit depth is a lossless concept. */
   bitDepth: number | null;
   sampleRateHz: number | null;
+  /** The tagged release year (issue #167) -- rides the track so search's
+   * album stubs can wear a real year. Optional/null on pre-#167 shapes
+   * (fixtures, the daemon's /queue payload); null = unknown. */
+  year?: number | null;
   /** null for lossless -- bitrate is how lossy files brag. */
   bitrateKbps: number | null;
   /** The listener's thumb as the catalog holds it, 0 when unrated (issue

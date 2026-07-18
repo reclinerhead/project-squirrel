@@ -158,7 +158,9 @@ export function Chrome() {
                     <span className="min-w-0 flex-1">
                       <span className="block truncate">{al.title}</span>
                       <span className="block truncate text-xs text-inkfaint">
-                        {al.artist} · {al.year}
+                        {/* year 0 = unknown (issue #167): say nothing, not "0" */}
+                        {al.artist}
+                        {al.year ? ` · ${al.year}` : ""}
                       </span>
                     </span>
                   </Link>

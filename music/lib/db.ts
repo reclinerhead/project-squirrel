@@ -142,7 +142,7 @@ const genreCol = (db: DatabaseSync) => (hasGenreNorm(db) ? "t.genre_norm" : "NUL
 // an index probe per row over a window of tracks, never the catalog.
 const trackCols = (db: DatabaseSync) =>
   "t.id, t.title, t.artist, t.album, t.album_artist, t.track_no, " +
-  "t.duration_s, t.format, t.codec, t.bitrate, t.samplerate, " +
+  "t.duration_s, t.format, t.codec, t.bitrate, t.samplerate, t.year, " +
   (hasArtistNorm(db) ? "t.artist_norm" : "NULL") + " AS artist_norm, " +
   "(SELECT value FROM ratings WHERE track_id = t.id) AS rating, " +
   (hasArt(db) ? artHashSub(db) : "NULL") + " AS art_hash";

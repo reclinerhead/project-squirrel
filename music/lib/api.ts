@@ -109,7 +109,10 @@ export async function search(query: string): Promise<SearchResults> {
       let al = a.albums.find((x) => x.id === t.albumId);
       if (!al) {
         al = { id: t.albumId, title: t.album, artistId: t.artistId,
-               artist: t.albumArtist ?? t.artist, year: 0, genre: "", tracks: [],
+               // The track's tagged year (issue #167) -- hardcoded 0 here is
+               // why every album in the overlay read "Artist · 0". 0 still
+               // means "unknown", which the surfaces now render as nothing.
+               artist: t.albumArtist ?? t.artist, year: t.year ?? 0, genre: "", tracks: [],
                artHash: t.artHash ?? null };
         a.albums.push(al);
       }
