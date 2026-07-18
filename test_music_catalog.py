@@ -47,7 +47,7 @@ def entry(**kw):
 def test_connect_creates_all_tables(conn):
     assert set(mc.counts(conn)) == {
         "tracks", "track_files", "artists", "ratings", "play_history",
-        "album_art", "artist_art", "genre_map"}
+        "album_art", "artist_art", "genre_map", "album_notes"}
 
 
 def test_connect_stamps_user_version(conn):
@@ -577,6 +577,65 @@ def test_owner_artist_art_survives_the_promotion_pass(conn):
                       mc.ART_DERIVED, 500, 500, 2000)
     row = conn.execute("SELECT art_hash FROM artist_art").fetchone()
     assert row["art_hash"] == "todds-photo"
+
+
+def test_albums_missing_note_is_the_blurb_worklist(conn):
+    """albums_missing_art's twin (issue #171): an album with a note is off
+    the list, so a re-run after ingesting new albums touches only those."""
+    mc.upsert_track(conn, track(id="b:1", album="One"))
+    mc.upsert_file(conn, entry(path="/m/1.m4a", track_id="b:1"))
+    mc.upsert_track(conn, track(id="b:2", album="Two"))
+    mc.upsert_file(conn, entry(path="/m/2.m4a", track_id="b:2"))
+    assert len(mc.albums_missing_note(conn)) == 2
+    mc.set_album_note(conn, "Capital Cities␟One", "A description.",
+                      "A description.", mc.NOTE_COMMENT, False, 1000)
+    work = mc.albums_missing_note(conn)
+    assert list(work) == ["Capital Cities␟Two"]
+    assert work["Capital Cities␟Two"] == ["/m/2.m4a"]
+
+
+def test_owner_note_survives_every_automated_source(conn):
+    """The provenance rule a third time (issue #171). This one matters more
+    than its siblings: the planned refresh button writes through the same
+    function from a request handler, where "the pass skipped it" reasoning
+    doesn't apply -- only the SQL guard does."""
+    mc.set_album_note(conn, "A␟X", "Todd's own words.", "Todd's own words.",
+                      mc.NOTE_OWNER, False, 1000)
+    for source in (mc.NOTE_COMMENT, mc.NOTE_EXTERNAL):
+        mc.set_album_note(conn, "A␟X", "machine copy", "machine copy",
+                          source, False, 2000)
+    row = conn.execute("SELECT description, source FROM album_notes "
+                       "WHERE album_key = 'A␟X'").fetchone()
+    assert row["description"] == "Todd's own words."
+    assert row["source"] == mc.NOTE_OWNER
+
+
+def test_a_fetched_note_may_supersede_the_comment_tag(conn):
+    """The store copy is a floor, not a ceiling -- a richer fetched source
+    refreshes it, same as folder art yielding to embedded."""
+    mc.set_album_note(conn, "A␟X", "store copy", "store copy",
+                      mc.NOTE_COMMENT, True, 1000)
+    mc.set_album_note(conn, "A␟X", "wikipedia prose", "wikipedia prose",
+                      mc.NOTE_EXTERNAL, False, 2000)
+    row = conn.execute("SELECT description, source, truncated "
+                       "FROM album_notes").fetchone()
+    assert (row["description"], row["source"]) == ("wikipedia prose",
+                                                   mc.NOTE_EXTERNAL)
+    assert row["truncated"] == 0
+
+
+def test_album_paths_is_the_single_album_twin_of_the_worklist(conn):
+    """The refresh button and the bulk pass must read the same files through
+    the same album-key derivation, or a one-off refresh could disagree with
+    what a full run would have produced."""
+    mc.upsert_track(conn, track(id="b:1", album="One"))
+    mc.upsert_file(conn, entry(path="/m/b.m4a", track_id="b:1"))
+    mc.upsert_file(conn, entry(path="/m/a.m4a", track_id="b:1"))
+    mc.upsert_track(conn, track(id="b:2", album="Two"))
+    mc.upsert_file(conn, entry(path="/m/2.m4a", track_id="b:2"))
+    assert mc.album_paths(conn, "Capital Cities␟One") == ["/m/a.m4a",
+                                                          "/m/b.m4a"]
+    assert mc.album_paths(conn, "Capital Cities␟Nope") == []
 
 
 def test_artists_missing_art_scores_by_summed_thumbs(conn):

@@ -125,6 +125,16 @@ GENRE_INHERITED = "inherited"
 GENRE_EXTERNAL = "external"
 GENRE_OWNER = "owner"
 
+# Where an album's description came from (issue #171). Same provenance idea a
+# third time, and for the same reason: `comment-tag` is the iTunes/Amazon store
+# copy lifted out of the files, `external` is reserved for a richer fetched
+# source (a Wikipedia album article via #170's MBIDs) that would supersede it,
+# and `owner` is Todd's own text -- which no automated pass may overwrite,
+# enforced in set_album_note's upsert.
+NOTE_COMMENT = "comment-tag"
+NOTE_EXTERNAL = "external"
+NOTE_OWNER = "owner"
+
 # THE ALBUM KEY, shared verbatim with the music app. An album's identity is
 # the display pair the GUI derives (lib/catalog-rows.ts albumIdOf, before its
 # base64url): COALESCE'd artist + U+241F + COALESCE'd title. This SQL is that
@@ -243,6 +253,22 @@ CREATE TABLE IF NOT EXISTS genre_map (
     raw       TEXT PRIMARY KEY,
     canonical TEXT NOT NULL,
     source    TEXT NOT NULL DEFAULT 'file'
+);
+
+-- Album descriptions (issue #171). `description` is what a page renders,
+-- `raw` is the untouched tag text -- kept because 49% of these blurbs are
+-- hard-cut at 255 chars mid-word and the trim-to-last-sentence policy throws
+-- away the fragment. Storing both means a future policy change (or a diff
+-- against a fetched source) is a re-run over this table, not another walk of
+-- 26k files. `truncated` flags the 255-char wall so a surface can decide
+-- whether to say so, and so the trim rule stays measurable after the fact.
+CREATE TABLE IF NOT EXISTS album_notes (
+    album_key   TEXT PRIMARY KEY,
+    description TEXT NOT NULL,
+    raw         TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    truncated   INTEGER NOT NULL DEFAULT 0,
+    updated_at  INTEGER
 );
 """
 
@@ -740,12 +766,64 @@ def artists_missing_art(conn):
     return [dict(r) for r in rows]
 
 
+def set_album_note(conn, album_key, description, raw, source, truncated, at):
+    """Record an album's description. Same owner rule as set_album_art, in the
+    same place -- the SQL -- so a future per-album refresh button (which will
+    call this from a request handler, not from the pass) cannot forget it
+    (issue #171)."""
+    conn.execute(
+        "INSERT INTO album_notes (album_key, description, raw, source, "
+        "truncated, updated_at) VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(album_key) DO UPDATE SET "
+        "description=excluded.description, raw=excluded.raw, "
+        "source=excluded.source, truncated=excluded.truncated, "
+        "updated_at=excluded.updated_at "
+        "WHERE album_notes.source != ?",
+        (album_key, description, raw, source, int(bool(truncated)), at,
+         NOTE_OWNER))
+
+
+def albums_missing_note(conn):
+    """The blurb pass's worklist: {album_key: [paths]} for every album with no
+    album_notes row -- albums_missing_art's twin, same NOT EXISTS shape and
+    same sorted paths so the comment pick is stable across runs.
+
+    Note the deliberate consequence, inherited from the art pass: an album
+    whose files carry no usable comment writes no row, so it returns here
+    every run. That is ~62% of the catalog re-reading its headers each pass
+    (minutes, not hours) and it is the price of not inventing a "checked,
+    found nothing" row whose staleness nobody would ever invalidate."""
+    rows = conn.execute(
+        f"SELECT {ALBUM_KEY_SQL} AS album_key, f.path "
+        f"FROM tracks t JOIN track_files f ON f.track_id = t.id "
+        f"WHERE NOT EXISTS (SELECT 1 FROM album_notes an "
+        f"                  WHERE an.album_key = {ALBUM_KEY_SQL}) "
+        f"ORDER BY album_key, f.path")
+    out = {}
+    for r in rows:
+        out.setdefault(r["album_key"], []).append(r["path"])
+    return out
+
+
+def album_paths(conn, album_key):
+    """Every file backing one album, sorted -- the single-album twin of the
+    worklist queries. This is what the future "refresh this album" button
+    calls (issue #171): the pass and the button read the same rows through the
+    same album-key derivation, so a one-off refresh can never disagree with
+    what a full run would have produced."""
+    rows = conn.execute(
+        f"SELECT f.path FROM tracks t JOIN track_files f ON f.track_id = t.id "
+        f"WHERE {ALBUM_KEY_SQL} = ? ORDER BY f.path", (album_key,))
+    return [r["path"] for r in rows]
+
+
 def counts(conn):
     """Row counts per table -- what the indexer prints when it finishes, and
     what the acceptance criteria are read against."""
     out = {}
     for table in ("tracks", "track_files", "artists", "ratings",
-                  "play_history", "album_art", "artist_art", "genre_map"):
+                  "play_history", "album_art", "artist_art", "genre_map",
+                  "album_notes"):
         out[table] = conn.execute(
             "SELECT COUNT(*) FROM %s" % table).fetchone()[0]
     return out
