@@ -120,7 +120,13 @@ export function PlayerBar() {
     <>
       {queueOpen && <QueuePanel onClose={() => setQueueOpen(false)} />}
       <div className="fixed inset-x-0 bottom-0 z-30 border-t border-line bg-panel/95 backdrop-blur">
-        <div className="grid h-[84px] grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-3 sm:h-[76px] sm:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_minmax(0,1fr)] sm:gap-4 sm:px-4">
+        {/* THREE columns at every width (issue #161): the bar has three
+            children, and the old two-column mobile grid auto-placed the
+            utilities into an implicit second row -- which then overflowed
+            the fixed height and shoved the pause button up over the seek
+            hairline. The squeeze lands on the now-playing text, which
+            truncates; the icon clusters are the part worth keeping whole. */}
+        <div className="grid h-[84px] grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2 px-3 sm:h-[76px] sm:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_minmax(0,1fr)] sm:gap-4 sm:px-4">
           {/* left: now playing -- skeleton keeps the exact box when idle */}
           <div className="flex min-w-0 items-center gap-3">
             <div className="relative h-12 w-12 shrink-0 overflow-hidden rounded-sm border border-line bg-panel2">
@@ -135,15 +141,18 @@ export function PlayerBar() {
                 {track ? track.album : " "}
               </div>
             </div>
-            {track ? (
-              <RatingControl
-                rating={ratingFor(track)}
-                onRate={(c) => rate(track, c)}
-                className="hidden shrink-0 sm:inline-flex"
-              />
-            ) : (
-              <span className="hidden w-[68px] shrink-0 sm:inline-flex" aria-hidden />
-            )}
+            {/* Visibility lives on a WRAPPER (issue #161): passing `hidden`
+                into RatingControl collides with its own base `inline-flex`
+                -- same specificity, stylesheet order wins, and inline-flex
+                wins it, so the thumbs never actually hid on phones and ate
+                the title's width. A wrapper's display can't be fought. */}
+            <span className="hidden shrink-0 sm:block">
+              {track ? (
+                <RatingControl rating={ratingFor(track)} onRate={(c) => rate(track, c)} />
+              ) : (
+                <span className="inline-flex w-[68px]" aria-hidden />
+              )}
+            </span>
           </div>
 
           {/* center: transport + seek */}
