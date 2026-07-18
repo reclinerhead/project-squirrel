@@ -588,10 +588,16 @@ class Ollama:
         self.url = f"http://{host}:{port}/api/generate"
         self.model = model
 
-    def complete(self, system, prompt, num_predict=120, temperature=0.9):
+    def complete(self, system, prompt, num_predict=120, temperature=0.9,
+                 timeout=None):
         """Raw model text for one system+prompt pair, or None on any failure.
         num_predict caps a model that ignores the length rules; the
-        temperature keeps repeat prompts from producing repeat prose."""
+        temperature keeps repeat prompts from producing repeat prose.
+
+        `timeout` defaults to OLLAMA_TIMEOUT_S, which is a LIVE-SHOW pacing
+        number -- the narrator would rather drop a line than stall the pacing
+        loop. Batch callers with no show to hold up (the Aviary's analysis
+        pass, issue #186) pass their own patient ceiling."""
         payload = {
             "model": self.model,
             "system": system,
@@ -606,7 +612,8 @@ class Ollama:
             self.url, data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"})
         try:
-            with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT_S) as resp:
+            with urllib.request.urlopen(
+                    req, timeout=timeout or OLLAMA_TIMEOUT_S) as resp:
                 reply = json.load(resp)
         except Exception as e:   # any failure at all -> the caller's fallback
             print(f"[ollama] {type(e).__name__}: {e} -- generation skipped")
