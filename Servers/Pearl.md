@@ -504,6 +504,14 @@ a loud journal line and **no restart**: the old build keeps serving until a
 good merge lands. A dirty checkout is skipped loudly, never clobbered —
 clean it and the next tick deploys.
 
+**The watcher deploys CODE. It never runs an enrichment pass.** A merge whose
+visible payoff comes from a pass — art, normalization, album descriptions,
+artist bios — ships as code that changes nothing until the pass is run by
+hand (see the music sections below for each command). This bit once, on
+#170/#171: the deploy was correct, both pages looked untouched, and the
+answer was that `artists` and `album_notes` were still empty. If a merge adds
+a pass, run it; if a merge adds a column, check whether it needs a backfill.
+
 It's a **loop service, not a systemd timer** (a timer's start/finish lines
 every minute are the #35 journal-spam disease), so the journal reads as a
 deploy history: quiet polls log nothing, deploys log what restarted.
@@ -877,9 +885,24 @@ cd ~/project-squirrel && MERLE_MUSIC_DB=/home/todd/project-squirrel/music.db \
 ```
 
 Last.fm fallback is OFF unless `MERLE_LASTFM_KEY` is set — the pass prints
-which mode it is in on the first line. Wikipedia-only is a complete pass, not
-a degraded one; register a key and export it in the unit's drop-in only if the
-no-prose count is worth chasing.
+which mode it is in on its first line (`Last.fm fallback enabled` / `OFF
+(MERLE_LASTFM_KEY unset)`). Wikipedia-only is a complete pass, not a degraded
+one; a key is only worth chasing if the no-prose count bothers you.
+
+**The key belongs in the SHELL, not in a unit.** This pass is hand-run, not a
+service — no systemd unit reads `MERLE_LASTFM_KEY`, so putting it in
+`music-daemon.service` (or any drop-in) is dead config that silently does
+nothing. Set it user-level, the `MERLE_RTSP_PASS` convention:
+
+```
+echo 'export MERLE_LASTFM_KEY=<key>' >> ~/.profile && source ~/.profile
+```
+
+Apply for the key at `https://www.last.fm/api/account/create` — that page is
+**not reachable from the logged-in Last.fm site navigation**, only by direct
+URL; existing keys are at `https://www.last.fm/api/accounts`. Prefer
+`~/.profile` over a unit file for the ordinary reason too: `/etc/systemd/
+system/*.service` is world-readable.
 
 Run this AFTER the normalization pass: the worklist keys on the canonical
 `artist_norm` identity, so bios fetched before a casing collapse would strand
