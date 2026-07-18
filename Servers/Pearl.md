@@ -431,13 +431,22 @@ One-time setup (repeatable — the onboarding rule):
 pip3 install --user --break-system-packages uv     # once; lands in ~/.local/bin
 ~/.local/bin/uv venv --python 3.11 ~/earl-venv
 ~/.local/bin/uv pip install --python ~/earl-venv/bin/python birdnet paho-mqtt
+# The YAMNet front gate (issue #174): hub for the model, and setuptools
+# pinned <81 because tensorflow-hub still imports pkg_resources, which
+# newer setuptools removed.
+~/.local/bin/uv pip install --python ~/earl-venv/bin/python tensorflow-hub 'setuptools<81'
 mkdir -p /srv/media-cache/earl    # no sudo: todd owns /srv/media-cache
 ```
 
 First run downloads the BirdNET acoustic (77 MB) + geo (46 MB) models to
 `~/.cache`; the geo download has flaked mid-transfer once — Earl retries and
 runs unmasked (loudly) if it can't load, so a bad first day is a noisy day,
-not a dead one.
+not a dead one. The YAMNet gate model (~17 MB) caches the same way
+(`~/.cache/tfhub_modules`); if it can't load, Earl runs **ungated** — every
+window straight to BirdNET, the Phase 1 posture — and says so at startup
+and in every `gate stats` line. Gate knob: `MERLE_EARL_GATE_FLOOR`
+(default 0.3) on the earl-listener unit; the speech floor is deliberately
+not configurable.
 
 `earl-listener.service` (the Merle-unit pattern, two deviations: the venv
 path, and `ExecStart` must use Earl's python):
