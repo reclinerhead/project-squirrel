@@ -39,6 +39,25 @@ const POLL_MS = 2000;
 const RADIO_FILL_N = 25;
 const RADIO_REFILL_AT = 3;
 
+// The remembered sound output (issue #169). Per-browser on purpose: "this
+// browser" is itself a per-browser output, so a server-side preference would
+// be lying the moment a second device opened the app. Read in the state
+// initializer rather than a mount effect -- nothing rendered depends on
+// outputId (the picker only mounts on click), so there's no hydration
+// mismatch to dodge, and starting on the stored value means no window where
+// the provider believes it's on the Denon.
+const OUTPUT_KEY = "music.outputId";
+
+function storedOutputId(): string {
+  // Storage can throw outright (Safari private mode, blocked third-party
+  // contexts) -- an unreadable preference is just an absent one.
+  try {
+    return window.localStorage.getItem(OUTPUT_KEY) || "denon";
+  } catch {
+    return "denon";
+  }
+}
+
 /** What the engine can be seeded with today; mood/weather are Phase 5's. */
 export type RadioSeed = { track_id: string } | { artist: string };
 
@@ -140,7 +159,9 @@ export function PlayerProvider({
   const [elapsedS, setElapsedS] = useState(0);
   const [shuffle, setShuffle] = useState(false);
   const [repeat, setRepeat] = useState<"off" | "all" | "one">("off");
-  const [outputId, setOutputIdState] = useState("denon");
+  const [outputId, setOutputIdState] = useState(() =>
+    typeof window === "undefined" ? "denon" : storedOutputId(),
+  );
   // The browser transport (issue #149): the hidden element, the daemon's
   // stream base (fetched once, on first need), and which track the element
   // currently holds -- the outgoing session that gets a skip report when
@@ -478,6 +499,14 @@ export function PlayerProvider({
         setElapsedS(0);
       }
       setOutputIdState(id);
+      // Remembered for the next session (issue #169). Written on the way out
+      // of a real switch, so a stored id that no longer exists self-heals the
+      // next time the listener picks something.
+      try {
+        window.localStorage.setItem(OUTPUT_KEY, id);
+      } catch {
+        // A browser that won't store it still switches -- just not stickily.
+      }
     },
   };
 
