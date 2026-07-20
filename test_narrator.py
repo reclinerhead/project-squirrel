@@ -917,3 +917,35 @@ def test_env_float_default_and_override(monkeypatch):
     assert narrator.env_float("MERLE_NARRATE_STABLE_S", 20.0) == 20.0
     monkeypatch.setenv("MERLE_NARRATE_STABLE_S", "45")
     assert narrator.env_float("MERLE_NARRATE_STABLE_S", 20.0) == 45.0
+
+
+# --- the ollama candidate list (issue #217) -----------------------------------
+
+def test_ollama_candidates_back_compat_with_a_single_host(monkeypatch):
+    # Today's value, byte for byte -- one entry, port default applied.
+    monkeypatch.setenv("MERLE_OLLAMA", "192.168.1.79:11434")
+    assert narrator.ollama_candidates() == [("192.168.1.79", 11434)]
+    monkeypatch.setenv("MERLE_OLLAMA", "bluejay")
+    assert narrator.ollama_candidates() == [("bluejay", 11434)]
+
+
+def test_ollama_candidates_preserve_preference_order(monkeypatch):
+    monkeypatch.setenv("MERLE_OLLAMA", " basement:11434 , 192.168.1.79 ,")
+    assert narrator.ollama_candidates() == [("basement", 11434),
+                                            ("192.168.1.79", 11434)]
+
+
+def test_ollama_candidates_unset_is_the_kill_switch(monkeypatch):
+    monkeypatch.delenv("MERLE_OLLAMA", raising=False)
+    assert narrator.ollama_candidates() == []
+    assert narrator.ollama_address() is None
+    monkeypatch.setenv("MERLE_OLLAMA", "  ")
+    assert narrator.ollama_candidates() == []
+
+
+def test_ollama_address_is_the_first_candidate(monkeypatch):
+    # The live show's contract: ONE address, immediately, never a probe.
+    monkeypatch.setenv("MERLE_OLLAMA", "basement,192.168.1.79:11434")
+    assert narrator.ollama_address() == ("basement", 11434)
+    monkeypatch.setenv("MERLE_OLLAMA", "bluejay:9999")
+    assert narrator.ollama_address() == ("bluejay", 9999)
