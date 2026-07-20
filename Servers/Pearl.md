@@ -25,6 +25,7 @@ outage brings her back without anyone going downstairs.
 | Jukebox   | `music-app`       | 3001 (HTTP)                    | The music player UI (issue #131), production build (`next start`) — http://192.168.1.64:3001 |
 | Earl      | `earl-listener`   | —                              | The ears (issue #172): BirdNET over the yard's mics, publishes `audio/*` — runs from its OWN venv (`~/earl-venv`), not the repo one |
 | Sightings | `earl-sightings`  | —                              | The bird record (issue #172): subscribes `audio/events`, writes sightings + the life list to `earl.db` |
+| Enrichment| `earl-enrichment` | —                              | The Aviary tends itself (issue #217): loop that fetches Wikipedia profiles for new lifers and drains the field-notes worklist whenever an Ollama host answers |
 | Deploys   | `merle-autodeploy`| —                              | Deploy watcher (issue #95): polls origin/main, pulls + restarts the Merle units on merge |
 | Caddy     | `caddy`           | 80 (HTTP)                      | The front door (issue #141): named URLs instead of ports — `pearl/mole` → Pi-hole, `mcc.lan` → :3000, `music.lan` → :3001 |
 | Pi-hole   | `pihole-FTL`      | 53, 67 (DHCP), web on 127.0.0.1:8081 | Household DNS + DHCP; admin UI reached through Caddy at `pearl/mole` |
@@ -545,6 +546,88 @@ terminates the workers.
 
 ---
 
+## The enrichment loop (earl-enrichment, issue #217)
+
+Unit: `/etc/systemd/system/earl-enrichment.service`
+Code: `/home/todd/project-squirrel/listener/enrichment_loop.py` (repo venv —
+stdlib HTTP only, like the passes it cranks)
+
+The Aviary tends itself: one loop ticking every ~15 minutes that runs both
+enrichment worklists, each whenever its dependency is available. **Profile
+pass first** (Wikipedia — needs only the network): a new lifer gets its
+portrait and description within one tick of landing on the life list.
+**Field-notes pass second**: probe the `MERLE_OLLAMA` candidates in
+preference order via `/api/tags`, first answering host wins, drain a
+bounded slice of the notes worklist. The order is deliberate — the note's
+prompt carries the description the profile pass just wrote, so a lifer gets
+background *and* notes in the same tick.
+
+**Scheduled by opportunity, not by clock**: Ollama lives on bluejay, a
+workstation that's off overnight and busy some afternoons. A tick with no
+host answering is a quiet no-op — bluejay coming back at breakfast is the
+same code path, and notes fill in within a tick of it. A loop service, not
+a systemd timer (the #35 journal-spam disease): quiet ticks log nothing,
+so the journal reads as a history of actual work.
+
+```ini
+[Unit]
+Description=Earl enrichment -- the Aviary tends itself (issue #217)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=todd
+WorkingDirectory=/home/todd/project-squirrel
+ExecStart=/home/todd/project-squirrel/venv/bin/python -m listener.enrichment_loop
+Restart=on-failure
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
+Environment=MERLE_EARL_DB=/home/todd/project-squirrel/earl.db
+Environment=MERLE_WEATHER_DB=/home/todd/project-squirrel/weather.db
+Environment=MERLE_EARL_CLIPS=/srv/media-cache/earl
+Environment=MERLE_OLLAMA=192.168.1.79:11434
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then the usual: `sudo systemctl daemon-reload && sudo systemctl enable --now
+earl-enrichment`. All paths absolute (the two-WorkingDirectories lesson).
+When the basement box exists, prepend it:
+`MERLE_OLLAMA=basement:11434,192.168.1.79:11434` — candidates are probed in
+order, best first, and nothing else changes.
+
+Optional knobs: `MERLE_ENRICH_INTERVAL_S` (default 900);
+`MERLE_ENRICH_CAP` — field-note generations per tick per host, one number
+for all or a comma list matching `MERLE_OLLAMA`'s order, `0` = never
+generate on that host (default 3, conservative because bluejay is a
+workstation someone is sitting at); `MERLE_MODEL_RANK` — override the
+model preference order (comma-separated, best first) without a deploy.
+
+**Is it working?**
+
+```
+journalctl -u earl-enrichment -f       # [enrich] lines only when work happened
+systemctl status earl-enrichment       # the loop-up line shows the candidates
+```
+
+A silent journal is the healthy steady state: it means every species is
+settled and/or no model host is up. To see the gates decide in real time,
+watch a tick after a new lifer, or force one species through by hand with
+the passes' `--refresh` (below) — the loop and the CLIs share the same
+per-species functions, so nothing can drift between them.
+
+What it will never do: regenerate a note whose inputs haven't changed (the
+stats fingerprint gate — no LLM call is even made), let a lower-ranked
+model overwrite a higher-ranked row (regeneration only triggers *upward*,
+so two hosts settle instead of thrashing), touch a profile row whose
+`image_source` is `owner`, hammer Wikipedia over a species with no article
+(no-page species retry ~daily via the `profile_attempts` stamps, not per
+tick), or write anything at all when its dependencies are down — a dead
+model or a dead wiki leaves every existing row standing.
+
+---
+
 ## The deploy watcher (merle-autodeploy)
 
 Unit: `/etc/systemd/system/merle-autodeploy.service`
@@ -676,10 +759,11 @@ route is the thing that breaks.
 **The species enrichment pass** (issue #184): fills `species_profile` in
 `earl.db` (descriptions + portraits from Wikipedia, keyed by the life list's
 scientific names) and downloads portraits to
-`/srv/media-cache/earl/species/`. Not a unit — a pass you run by hand from
-the repo venv, worklist-driven and idempotent (re-runs touch only species
-without a profile row; a species with no usable Wikipedia page stays on the
-worklist and keeps its placeholder):
+`/srv/media-cache/earl/species/`. **Since #217 the `earl-enrichment` loop
+runs this automatically** — a new lifer is dressed within one tick, and a
+species with no usable Wikipedia page is retried ~daily (the
+`profile_attempts` stamps), not per tick. The hand run still works and
+still gets its look for free (the CLI never consults the stamps):
 
 ```
 cd ~/project-squirrel
@@ -688,45 +772,42 @@ MERLE_EARL_CLIPS=/srv/media-cache/earl \
 venv/bin/python -m listener.species_profile
 ```
 
-**After deploying #185, run it once more**: that release added `image_w`/
-`image_h` (so the GUI can frame portrait-orientation birds without cropping
-their heads off), and the pass's worklist grew a **backfill arm** — rows with
-a fetched photo but no dimensions come back automatically, so one ordinary
-re-run heals the whole life list. Until it runs, portraits simply keep the
-old centered crop; nothing breaks. Owner rows are excluded from the backfill
-in the SQL itself, so they can't be spent a request on.
-
-Run it **once after deploying #184** (deploy does not run passes), and again
-whenever the life list has grown and you want the new arrivals dressed —
-or `--refresh "Cardinalis cardinalis"` to re-fetch one species. **A row
-whose `image_source` is `owner` is never touched by any run** — that's the
-provenance rule that protects a hand-picked photo forever. The retention
-pass never prunes the `species/` shelf (portraits are a permanent
+`--refresh "Cardinalis cardinalis"` re-fetches one species. **A row whose
+`image_source` is `owner` is never touched by any run, loop or hand** —
+that's the provenance rule that protects a hand-picked photo forever. The
+retention pass never prunes the `species/` shelf (portraits are a permanent
 collection, not a rolling window).
 
 **The field-notes pass** (issue #186): writes the two prose blocks per
 species (`species_analysis` in `earl.db`) from our own visit record joined
 with our own weather archive. Statistics are computed in Python and the LLM
-only narrates them, so this needs both stores plus Ollama:
+only narrates them, so this needs both stores plus Ollama. **Since #217 the
+`earl-enrichment` loop runs this automatically too**, whenever a
+`MERLE_OLLAMA` candidate answers its probe; the hand run remains for
+forcing and inspecting:
 
 ```
 cd ~/project-squirrel
 MERLE_EARL_DB=/home/todd/project-squirrel/earl.db \
 MERLE_WEATHER_DB=/home/todd/project-squirrel/weather.db \
-MERLE_OLLAMA=<the ollama host> MERLE_OLLAMA_MODEL=gemma3:12b \
+MERLE_OLLAMA=192.168.1.79:11434 MERLE_OLLAMA_MODEL=gemma3:12b \
 venv/bin/python -m listener.species_analysis
 ```
 
-Worklist is species with no notes yet, or **20+ new visits since their last
-write** — so re-running is a no-op until a bird has something new to say.
-`--refresh "<scientific name>"` forces one species; `--dry-run` prints the
-computed findings and calls no model at all (the fastest way to see what the
-prose was written from). **`MERLE_OLLAMA` unset means stats only, no
-writes** — the narrator's kill switch, same semantics; a model that is down
-or slow leaves existing notes standing and the species on the worklist.
-Expect ~1-2 minutes per species on CPU (two calls each). The MCC reads the
-table through `/aviary/analysis/<species>` and **never generates anything at
-render time**.
+Worklist (#217's two-stage gate, stage one): species with no notes yet,
+**5+ new visits since their last write**, a `PROMPT_VERSION` bump, a stored
+model outranked by the one on offer, or a profile touched since the note.
+Stage two, before any LLM call: the **stats fingerprint** — unchanged
+inputs mean no generation at all, so re-running is a no-op until a bird has
+something new to say. `--refresh "<scientific name>"` forces one species
+past every gate; `--dry-run` prints the computed findings and calls no
+model at all (the fastest way to see what the prose was written from).
+**`MERLE_OLLAMA` unset means stats only, no writes** — the narrator's kill
+switch, same semantics; a model that is down or slow leaves existing notes
+standing and the species on the worklist. Expect ~1-2 minutes per species
+on CPU (two calls each). The MCC reads the table through
+`/aviary/analysis/<species>` and **never generates anything at render
+time**.
 
 **Serving the Aviary** (issue #183): the same pattern again, two files over.
 The unit carries `MERLE_EARL_DB` matching the `earl-sightings` unit's value

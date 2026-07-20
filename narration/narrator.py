@@ -368,15 +368,32 @@ LINE_RULES = (
 )
 
 
+def ollama_candidates():
+    """MERLE_OLLAMA as a preference-ordered candidate list (issue #217):
+    comma-separated "host[:port]" entries, best first. Today the list holds
+    one entry; when the basement box exists it is prepended and nothing else
+    changes. The enrichment loop probes these in order; the live show never
+    does (see ollama_address). Unset means an empty list -- the kill switch,
+    unchanged."""
+    raw = os.environ.get("MERLE_OLLAMA", "").strip()
+    out = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        host, _, port = entry.partition(":")
+        out.append((host, int(port) if port else OLLAMA_DEFAULT_PORT))
+    return out
+
+
 def ollama_address():
     """Ollama endpoint from MERLE_OLLAMA ("host" or "host:port"). OPTIONAL,
     unlike MERLE_MQTT -- unset simply means the LLM tier is off, which is both
-    the kill switch and what keeps a bare dev checkout working."""
-    raw = os.environ.get("MERLE_OLLAMA", "").strip()
-    if not raw:
-        return None
-    host, _, port = raw.partition(":")
-    return host, int(port) if port else OLLAMA_DEFAULT_PORT
+    the kill switch and what keeps a bare dev checkout working. With a #217
+    candidate list set this is the FIRST (most preferred) entry: the live
+    show wants one address immediately, never a probe loop."""
+    candidates = ollama_candidates()
+    return candidates[0] if candidates else None
 
 
 # A weather/current report older than this is ignored: the weather service
