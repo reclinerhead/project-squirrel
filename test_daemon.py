@@ -487,3 +487,132 @@ def test_hard_frames_by_day_counts_mtimes(tmp_path):
 def test_hard_frames_by_day_survives_missing_folder():
     trend = merle_daemon.hard_frames_by_day(2, "2026-07-07", folder="does/not/exist")
     assert trend == [{"date": "2026-07-06", "n": 0}, {"date": "2026-07-07", "n": 0}]
+
+
+# --- source switching (issue #236) -------------------------------------------
+# The switch mechanic is source-agnostic, so it's proven here with a registry
+# of two synthetic factories -- no camera, no model, no rover. The real
+# driveway/rover constructions are covered by test_frames.py's URL tests and
+# verified against hardware.
+
+
+def _switch_app(conn=None, registry=None, publisher=None):
+    """An app in the switchable world: registry 'a' active, 'b' waiting."""
+    registry = registry or {"a": SyntheticFrameSource, "b": SyntheticFrameSource}
+    return merle_daemon.create_app(
+        None, conn or storage.connect(":memory:"),
+        publisher=publisher or _FakePublisher(),
+        sources=registry, active="a"), registry
+
+
+def _wait_for(c, pred, tries=100):
+    for _ in range(tries):
+        body = c.get("/state").json()
+        if pred(body):
+            return body
+        time.sleep(0.02)
+    raise AssertionError("condition never became true")
+
+
+def test_state_advertises_source_roster():
+    app, _ = _switch_app()
+    with TestClient(app) as c:
+        body = c.get("/state").json()
+        assert body["source"] == "a"
+        assert body["sources"] == ["a", "b"]
+
+
+def test_single_source_world_advertises_nothing_to_toggle(client):
+    # The default (registry-free) world: /state says so honestly, and
+    # set_source has nothing to switch.
+    body = client.get("/state").json()
+    assert body["source"] is None
+    assert body["sources"] == []
+    r = client.post("/control", json={"action": "set_source", "source": "a"})
+    assert r.status_code == 422
+
+
+def test_set_source_switches_and_mints_a_new_session():
+    conn = storage.connect(":memory:")
+    app, _ = _switch_app(conn=conn)
+    with TestClient(app) as c:
+        _wait_for_first_frame(c)
+        time.sleep(0.2)   # bank a few sightings under the boot session
+        before = c.get("/state").json()
+        r = c.post("/control", json={"action": "set_source", "source": "b"})
+        assert r.status_code == 200
+        body = _wait_for(c, lambda b: b["source"] == "b")
+        # A fresh source restarts ByteTrack ids at 1, so the swap MUST mint a
+        # new session -- reusing the old one would upsert into existing rows.
+        assert body["session_id"] != before["session_id"]
+        # A camera switch is not a departure: the presence debounce resets
+        # quietly, and the only new event is the switch itself.
+        kinds = [e["kind"] for e in body["recent_events"]]
+        assert "departure" not in kinds
+        changed = [e for e in body["recent_events"] if e["kind"] == "source_changed"]
+        assert changed and changed[0]["details"] == {"from": "a", "to": "b"}
+        # Sightings recorded after the switch land under the new session.
+        _wait_for(c, lambda b: b["live"]["counts"].get("squirrel") == 2)
+        time.sleep(0.2)
+        sessions = {row[0] for row in conn.execute(
+            "SELECT DISTINCT session_id FROM sightings").fetchall()}
+        assert body["session_id"] in sessions
+
+
+def test_set_source_rejects_unknown_and_noops_on_active():
+    app, _ = _switch_app()
+    with TestClient(app) as c:
+        _wait_for_first_frame(c)
+        assert c.post("/control",
+                      json={"action": "set_source", "source": "nope"}).status_code == 422
+        assert c.post("/control",
+                      json={"action": "set_source"}).status_code == 422
+        before = c.get("/state").json()["session_id"]
+        r = c.post("/control", json={"action": "set_source", "source": "a"})
+        assert r.status_code == 200 and r.json()["source"] == "a"
+        time.sleep(0.1)
+        after = c.get("/state").json()
+        # Switching to the already-active source is an honest no-op: same
+        # session, no source_changed event.
+        assert after["session_id"] == before
+        assert "source_changed" not in [e["kind"] for e in after["recent_events"]]
+
+
+def test_failed_swap_stays_on_the_old_source():
+    def _explodes():
+        raise RuntimeError("rover is off sulking")
+
+    app, _ = _switch_app(registry={"a": SyntheticFrameSource, "bad": _explodes})
+    with TestClient(app) as c:
+        _wait_for_first_frame(c)
+        before = c.get("/state").json()["session_id"]
+        assert c.post("/control",
+                      json={"action": "set_source", "source": "bad"}).status_code == 200
+        body = _wait_for(
+            c, lambda b: "source_change_failed" in
+            [e["kind"] for e in b["recent_events"]])
+        # Still on 'a', same session, and still perceiving -- a dead target
+        # never takes the running feed down with it.
+        assert body["source"] == "a"
+        assert body["session_id"] == before
+        failed = [e for e in body["recent_events"]
+                  if e["kind"] == "source_change_failed"][0]
+        assert failed["details"]["to"] == "bad"
+        assert "sulking" in failed["details"]["error"]
+        _wait_for(c, lambda b: b["live"]["counts"].get("squirrel") == 2)
+
+
+def test_switch_finalizes_an_open_recording(tmp_path, monkeypatch):
+    # Recording rides across a switch as TWO clips: the writer can't survive a
+    # resolution change, so the open clip is finalized at the swap and a fresh
+    # one starts on the new source (control.recording stays on).
+    monkeypatch.chdir(tmp_path)   # debug_frames/ lands here, not in the repo
+    app, _ = _switch_app()
+    with TestClient(app) as c:
+        _wait_for_first_frame(c)
+        c.post("/control", json={"action": "record_on"})
+        time.sleep(0.3)   # let the writer open and take some frames
+        c.post("/control", json={"action": "set_source", "source": "b"})
+        body = _wait_for(c, lambda b: b["source"] == "b")
+        assert "clip_recorded" in [e["kind"] for e in body["recent_events"]]
+        assert body["recording"] is True   # recording continues on the new source

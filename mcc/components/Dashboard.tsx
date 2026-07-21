@@ -14,6 +14,7 @@ import {
   fetchState,
   rosterCounts,
   sendControl,
+  setSource,
 } from "@/lib/daemon";
 import {
   JournalEntry,
@@ -232,6 +233,36 @@ export default function Dashboard() {
     [control],
   );
 
+  // The source switch (issue #236): pendingSource holds the clicked target
+  // until /state reports the daemon actually swapped -- the row disables
+  // meanwhile so a slow open can't collect a click queue. A failed swap never
+  // flips /state's source, so the timeout simply re-enables the row with the
+  // old pill still lit: the snap-back is the daemon's honesty, not ours.
+  const [pendingSource, setPendingSource] = useState<string | null>(null);
+  const switchSource = useCallback(
+    async (name: string) => {
+      setPendingSource(name);
+      try {
+        await setSource(name);
+        await poll(); // reflect the swap (or its refusal) immediately
+      } catch {
+        setPendingSource(null); // a 422/network refusal never started a swap
+      }
+    },
+    [poll],
+  );
+  useEffect(() => {
+    if (pendingSource === null) return;
+    if (state?.source === pendingSource) {
+      setPendingSource(null);
+      return;
+    }
+    // The rover open is bounded at ~4s; well past that means the swap failed
+    // (source_change_failed in the event log tells the story).
+    const t = setTimeout(() => setPendingSource(null), 8000);
+    return () => clearTimeout(t);
+  }, [pendingSource, state?.source]);
+
   // Stand-down: daemon reachable but the perception engine is idle.
   const paused = !asleep && state !== null && !state.running;
   // Reconnecting: engine running but the source isn't delivering frames (camera
@@ -250,7 +281,17 @@ export default function Dashboard() {
             <PanelLabel
               title="Live Watch"
               right={
-                asleep ? (
+                <span className="flex items-center gap-3">
+                  {(state?.sources?.length ?? 0) >= 2 && (
+                    <SourceToggle
+                      sources={state!.sources!}
+                      active={state!.source ?? null}
+                      pending={pendingSource}
+                      disabled={asleep}
+                      onSwitch={switchSource}
+                    />
+                  )}
+                  {asleep ? (
                   <span className="stamp text-xs text-inkfaint">no signal</span>
                 ) : !state ? (
                   // Pre-first-poll: don't advertise LIVE while the daemon is
@@ -285,7 +326,8 @@ export default function Dashboard() {
                       </span>
                     )}
                   </span>
-                )
+                  )}
+                </span>
               }
             />
             {asleep ? (
@@ -1201,6 +1243,62 @@ function Header({
         </span>
       </div>
     </header>
+  );
+}
+
+/** The Live Watch source switch (issue #236): which feed the daemon's eyes
+ * are on -- the EnhanceToggle nameplate idiom, one pill per advertised source
+ * from first paint (the roster is stable per session, so nothing ever
+ * appears, vanishes, or resizes -- house rule #1). Clicking asks the daemon
+ * to swap (set_source) and the row disables until /state reports the new
+ * source; the visual gap rides the existing reconnecting veil, and a refused
+ * swap leaves /state on the old source so the lit pill simply never moves.
+ * Only rendered at 2+ sources: the synthetic world and older daemons keep
+ * exactly the masthead they had. */
+function SourceToggle({
+  sources,
+  active,
+  pending,
+  disabled,
+  onSwitch,
+}: {
+  sources: string[];
+  active: string | null;
+  pending: string | null;
+  disabled: boolean;
+  onSwitch: (name: string) => void;
+}) {
+  return (
+    <span
+      className={`flex items-center gap-1 ${disabled ? "opacity-40" : ""}`}
+    >
+      <span className="stamp text-[9px] text-inkfaint">eyes</span>
+      <span className="flex overflow-hidden rounded-sm border border-line">
+        {sources.map((name) => (
+          <button
+            key={name}
+            type="button"
+            onClick={() => onSwitch(name)}
+            disabled={disabled || pending !== null || name === active}
+            aria-pressed={name === active}
+            title={
+              name === active
+                ? `the daemon is watching through ${name}`
+                : `switch the daemon's eyes to ${name}`
+            }
+            className={`stamp px-2 py-0.5 text-[9px] transition-colors ${
+              name === active
+                ? "bg-panel2 text-squirrel"
+                : name === pending
+                  ? "text-turkey"
+                  : "text-inkfaint hover:text-inkdim"
+            }`}
+          >
+            {name}
+          </button>
+        ))}
+      </span>
+    </span>
   );
 }
 

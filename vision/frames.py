@@ -7,8 +7,10 @@
 #
 #   - SyntheticFrameSource  (here)          -- camera-free, for tests / dev / the
 #                                              MCC frontend before the real feed
-#   - the real RTSP+YOLO source (Phase 2b-ii) -- same interface, real animals
-#   - a rover camera (someday)               -- same interface again
+#   - TrackedStreamSource   (here)          -- any video stream through the real
+#                                              model + tracker: the Amcrest over
+#                                              RTSP ('driveway') or the rover's
+#                                              MJPEG feed ('rover', issue #236)
 #
 # Keeping perception behind this interface means the daemon's presentation and
 # storage logic has exactly one implementation, so it can't drift between the
@@ -57,6 +59,17 @@ def rtsp_url():
     path = "/cam/realmonitor?channel=1&subtype=0"
     return (f"rtsp://{user}:{pw}@{host}:554{path}",
             f"rtsp://{user}:***@{host}:554{path}")
+
+
+def rover_url():
+    """The rover camera URL from MERLE_ROVER_STREAM -> (url, redacted_url). The
+    Waveshare ugv app owns the rover's camera and serves it as HTTP MJPEG on
+    :5000 (until the Helm B0 cutover, #203); the daemon consumes it read-only,
+    like any browser tab would. No credentials in this URL, so the redacted
+    twin is the URL itself -- returned as a pair anyway so both URL builders
+    share one shape."""
+    url = os.environ.get("MERLE_ROVER_STREAM", "http://merle:5000/video_feed")
+    return url, url
 
 
 @dataclass
@@ -207,37 +220,68 @@ class FreshestFrameReader(threading.Thread):
         self._stopping.set()
 
 
-class RTSPFrameSource(FrameSource):
-    """The real perception source: the Amcrest RTSP feed through the same model +
-    tracker as live.py, sharing perception.py so the two can't drift. Reads the
-    camera password from MERLE_RTSP_PASS (never hardcoded) and the model from
-    MERLE_MODEL (default models/current.pt). ultralytics is imported lazily here
-    so the daemon and its tests stay importable without torch installed.
+# The rover's app answers instantly when up, but a powered-off rover means TCP
+# packets into the void -- FFmpeg's default open would sit there for minutes,
+# and a source SWAP (issue #236) happens in the worker's own thread. Bound it:
+# a switch to a dead rover must fail in seconds, not wedge perception.
+ROVER_OPEN_TIMEOUT_MS = 4000
+
+_MODEL = None   # (model, path) -- see load_model()
+
+
+def load_model():
+    """The shared YOLO model, loaded AND warmed up exactly once per process ->
+    (model, model_path). Model first, camera second (issue #29): YOLO(...)
+    takes seconds and the first inference pays CUDA init on top; with a stream
+    already open that wait used to pile up as queued frames -- the daemon's
+    permanent 6-7s delay. The dummy predict (not track: the tracker must see
+    only real frames) forces the one-time warmup before any frame can queue.
+    Cached at module level (issue #236) so a runtime source SWAP costs an
+    open-the-capture, never a second model load. ultralytics is imported
+    lazily so the daemon and its tests stay importable without torch."""
+    global _MODEL
+    if _MODEL is None:
+        from ultralytics import YOLO   # lazy: heavy, GPU-specific, camera-only path
+        model_path = os.environ.get("MERLE_MODEL", "models/current.pt")
+        model = YOLO(model_path)
+        model.predict(np.zeros((360, 640, 3), np.uint8),
+                      imgsz=perception.IMGSZ, quantize=perception.QUANTIZE,
+                      verbose=False)
+        _MODEL = (model, model_path)
+    return _MODEL
+
+
+class TrackedStreamSource(FrameSource):
+    """The real perception source: a video stream through the same model +
+    tracker as live.py, sharing perception.py so the two can't drift. Which
+    stream is the constructor's business (issue #236) -- the Amcrest over RTSP
+    (driveway_source) and the rover's HTTP MJPEG feed (rover_source) are the
+    same machinery with a different URL.
 
     Latency discipline (issue #29): the model is loaded AND warmed up before the
-    RTSP connection opens (so no frames queue while CUDA initializes), and a
+    stream connection opens (so no frames queue while CUDA initializes), and a
     FreshestFrameReader drains the stream from the moment it opens. read() hands
     the worker the newest frame every time; the old fixed 6-7s backlog can no
     longer form -- at startup or after any mid-run stall."""
 
-    def __init__(self):
-        from ultralytics import YOLO   # lazy: heavy, GPU-specific, camera-only path
-
-        self.url, redacted = rtsp_url()
-        self.host = os.environ.get("MERLE_RTSP_HOST", "192.168.1.102")
+    def __init__(self, source_id, url, redacted, open_params=None):
+        self.source_id = source_id
+        self.url = url
+        self._open_params = list(open_params or [])
+        # Read once at open by FFmpeg. rtsp_transport is meaningless for the
+        # rover's HTTP feed (FFmpeg ignores options the demuxer doesn't know,
+        # at worst with a log line); nobuffer/low_delay apply to both.
         os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", RTSP_FFMPEG_OPTIONS)
 
-        # Model first, camera second: YOLO(...) takes seconds and the first
-        # inference pays CUDA init on top. With the stream already open that
-        # wait used to pile up as queued frames -- the daemon's permanent 6-7s
-        # delay. The dummy predict (not track: the tracker must see only real
-        # frames) forces the one-time warmup cost before any frame can queue.
-        model_path = os.environ.get("MERLE_MODEL", "models/current.pt")
-        self.model = YOLO(model_path)
-        self.model.predict(np.zeros((360, 640, 3), np.uint8),
-                           imgsz=perception.IMGSZ, quantize=perception.QUANTIZE,
-                           verbose=False)
+        self.model, model_path = load_model()
         self.names = self.model.names
+        # A fresh source must start with a fresh tracker: the first track()
+        # call goes out with persist=False, which makes ultralytics rebuild its
+        # internal trackers instead of stitching this stream onto the previous
+        # source's track state (verified in ultralytics' on_predict_start:
+        # existing trackers are kept only when persist is set). Subsequent
+        # calls persist as always.
+        self._persist = False
         # Track lifecycle logging (issue #74, Phase 0): on by default, cheap
         # (a line per birth/stitch/death, not per frame); MERLE_TRACK_LOG=0
         # silences it.
@@ -251,7 +295,7 @@ class RTSPFrameSource(FrameSource):
         # first real frame (the one honest source; also tracks a mid-run
         # camera settings change).
         self._provenance = {
-            "source": "rtsp", "url": redacted, "resolution": None,
+            "source": source_id, "url": redacted, "resolution": None,
             "imgsz": perception.IMGSZ, "quantize": perception.QUANTIZE,
             "model": model_path,
             "classes": [self.names[i] for i in sorted(self.names)],
@@ -259,12 +303,12 @@ class RTSPFrameSource(FrameSource):
 
         cap = self._open()
         if not cap.isOpened():
-            raise RuntimeError(f"Could not open the RTSP stream at {self.host}. Check "
-                               "the camera is reachable and MERLE_RTSP_* are correct.")
+            raise RuntimeError(f"Could not open the {source_id} stream at {redacted}. "
+                               "Check the camera is reachable and its env vars are correct.")
         w, h = cap.get(cv2.CAP_PROP_FRAME_WIDTH), cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
         if w and h:
             self._provenance["resolution"] = [int(w), int(h)]
-        self._reader = FreshestFrameReader(cap, self._open, label=self.host)
+        self._reader = FreshestFrameReader(cap, self._open, label=source_id)
         self._reader.start()
         self._seq = 0
 
@@ -272,7 +316,7 @@ class RTSPFrameSource(FrameSource):
         # NOTE: no CAP_PROP_BUFFERSIZE here -- it is silently ignored by the
         # FFmpeg backend (cap.set returns False). Low latency comes from the
         # FreshestFrameReader draining the queue, not from a buffer setting.
-        return cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
+        return cv2.VideoCapture(self.url, cv2.CAP_FFMPEG, self._open_params)
 
     def provenance(self):
         return dict(self._provenance)
@@ -289,8 +333,10 @@ class RTSPFrameSource(FrameSource):
             self._provenance["resolution"] = [w, h]
         results = self.model.track(frame, conf=perception.DETECT_FLOOR,
                                    imgsz=perception.IMGSZ,
-                                   quantize=perception.QUANTIZE, persist=True,
+                                   quantize=perception.QUANTIZE,
+                                   persist=self._persist,
                                    tracker=perception.TRACKER_YAML, verbose=False)
+        self._persist = True
         live, coasting = self.tm.ingest(
             perception.extract_detections(results[0], self.names))
         dets = [Detection(tid, perception.voted(t), tuple(t["xyxy"]), t["conf"])
@@ -305,3 +351,20 @@ class RTSPFrameSource(FrameSource):
         # the daemon-thread flag lets process exit reap it.
         self._reader.stop()
         self._reader.join(timeout=2)
+
+
+def driveway_source():
+    """The Amcrest driveway cam over RTSP -- the original daemon source."""
+    url, redacted = rtsp_url()
+    return TrackedStreamSource("driveway", url, redacted)
+
+
+def rover_source():
+    """The rover's camera via the Waveshare app's MJPEG feed (issue #236),
+    with a bounded open so switching to a powered-off rover fails in seconds
+    (the worker then stays on its previous source) instead of wedging the
+    perception loop for FFmpeg's default forever."""
+    url, redacted = rover_url()
+    return TrackedStreamSource("rover", url, redacted,
+                               open_params=[cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,
+                                            ROVER_OPEN_TIMEOUT_MS])

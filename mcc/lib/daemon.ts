@@ -24,6 +24,11 @@ export type DaemonState = {
   /** The model's class roster, in class-id order. Optional so a dashboard
    * newer than its daemon degrades to present-species-only rows. */
   species?: string[];
+  /** Which feed the daemon's eyes are on, and what it could switch to
+   * (issue #236). Optional/null/[] on older daemons and in the synthetic
+   * world -- the dashboard's cue to render no source toggle at all. */
+  source?: string | null;
+  sources?: string[];
   live: {
     counts: Record<string, number>;
     tracks: Track[];
@@ -51,6 +56,18 @@ export async function sendControl(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(value === undefined ? { action } : { action, value }),
+  });
+  if (!res.ok) throw new Error(`daemon /control -> ${res.status}`);
+}
+
+/** Point the daemon's eyes at another advertised source (issue #236). The
+ * daemon swaps between perception loop passes; /state reports the new source
+ * once the swap lands (or keeps the old one if the target wouldn't open). */
+export async function setSource(source: string): Promise<void> {
+  const res = await fetch("/daemon/control", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "set_source", source }),
   });
   if (!res.ok) throw new Error(`daemon /control -> ${res.status}`);
 }
