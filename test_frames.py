@@ -125,6 +125,18 @@ def test_rtsp_url_requires_the_password(monkeypatch):
         frames.rtsp_url()
 
 
+def test_rover_url_default_and_override(monkeypatch):
+    # The rover feed (issue #236): the Waveshare app's MJPEG endpoint by
+    # default, overridable as one whole URL. No credentials, so the redacted
+    # twin is the URL itself -- same (url, redacted) shape as rtsp_url().
+    monkeypatch.delenv("MERLE_ROVER_STREAM", raising=False)
+    assert frames.rover_url() == ("http://merle:5000/video_feed",
+                                  "http://merle:5000/video_feed")
+    monkeypatch.setenv("MERLE_ROVER_STREAM", "http://10.0.0.9:8554/feed")
+    url, redacted = frames.rover_url()
+    assert url == redacted == "http://10.0.0.9:8554/feed"
+
+
 def test_synthetic_provenance_is_honest_about_what_it_lacks():
     prov = SyntheticFrameSource().provenance()
     assert prov["source"] == "synthetic"

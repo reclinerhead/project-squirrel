@@ -12,7 +12,8 @@
 #   GET  /snapshot     the latest annotated frame, one JPEG
 #   GET  /history      N-day census + hard-frame trend + training runs (JSON)
 #   GET  /history/day  hourly arrivals for one date (JSON)
-#   POST /control      start/stop the loop, toggle recording, set the crowd threshold
+#   POST /control      start/stop the loop, toggle recording, set the crowd
+#                      threshold, switch the frame source (issue #236)
 #
 # Events also go out live on the MQTT bus (bus.py, topic driveway/events) for
 # decoupled subscribers -- narrators, dashboards, future rover processes. SQLite
@@ -22,9 +23,11 @@
 # fired on -- to driveway/frames/<frame_id>/{full,thumb} (issue #90), where
 # frame_archiver on pearl files it for the Field Journal.
 #
-# The frame source is selected by MERLE_SOURCE: 'camera' (default, the real
-# RTSP + YOLO + ByteTrack feed) or 'synthetic' (camera-free, used by tests/CI
-# and frontend work).
+# The frame source world is selected by MERLE_SOURCE: 'camera' (default) is the
+# real YOLO + ByteTrack feed with a SWITCHABLE upstream -- 'driveway' (the
+# Amcrest over RTSP) or 'rover' (the rover's MJPEG feed), toggled at runtime
+# via POST /control set_source (issue #236). 'synthetic' is the camera-free
+# world used by tests/CI and frontend work: one source, no switching.
 #
 # Run it:  uvicorn merle_daemon:app        (MERLE_DB overrides the db path;
 #                                           MERLE_MQTT -- required -- points at
@@ -163,9 +166,11 @@ def next_stream_part(jpeg, seq, last_seq):
 def annotate(frame, dets):
     """Draw boxes + labels via the shared drawer, so the stream matches live.py
     (coasting tracks grey; annotations scaled for the frame size, since it's
-    tuned for 4K)."""
+    tuned for 4K). The scale is floored (issue #236): the rover's feed can be
+    480p, where an unclamped 4K-relative scale draws hairline boxes and
+    unreadable labels."""
     items = [(d.track_id, d.species, d.box, not d.coasting) for d in dets]
-    scale = frame.shape[0] / 2160
+    scale = max(frame.shape[0] / 2160, 0.5)
     return perception.draw_tracks(frame, items, CLASS_COLORS, scale=scale)
 
 
@@ -177,6 +182,8 @@ class Control:
         self.running = True
         self.recording = False
         self.crowd_threshold = 5
+        self.pending_source = None   # a validated source name the worker should
+                                     # swap to between loop passes (issue #236)
 
 
 class SharedState:
@@ -195,15 +202,26 @@ class SharedState:
         self.signal = True          # is the source currently delivering frames?
         self.provenance = {}        # what the source is connected to (issue #74)
         self.churn = None           # tracker churn metrics, None for trackerless sources
+        # The switchable-source world (issue #236). session_id above is MUTABLE
+        # now: a source swap mints a fresh session (a new source restarts
+        # ByteTrack ids at 1; reusing the session would upsert into existing
+        # sighting rows). source_name/sources_roster are None/[] in the
+        # single-source worlds (synthetic, tests without a registry), which is
+        # how /state tells the dashboard there is nothing to toggle.
+        self.source_name = None
+        self.sources_roster = []
 
 
 class Worker(threading.Thread):
     """The perception loop, headless. Pulls frames from the source, annotates,
     encodes, publishes to SharedState, and persists sightings/events to SQLite."""
 
-    def __init__(self, source, state, conn, control, db_lock, publisher):
+    def __init__(self, source, state, conn, control, db_lock, publisher,
+                 sources=None):
         super().__init__(daemon=True)
         self.source = source
+        self.sources = sources or {}   # name -> zero-arg factory (issue #236);
+                                       # empty in the single-source worlds
         self.state = state
         self.conn = conn
         self.control = control
@@ -222,6 +240,8 @@ class Worker(threading.Thread):
         self.presence = perception.SpeciesPresence(ARRIVE_AFTER, DEPART_AFTER)
         self._prov_logged = False   # one [provenance] line, once frames flow
         self._churn_at = 0.0        # last provenance/churn refresh (~1/s is plenty)
+        self._swaps = 0             # source swaps this run (disambiguates
+                                    # same-second session ids, issue #236)
         self.writer = None                    # cv2.VideoWriter while recording
         self.clip_path = None
 
@@ -321,6 +341,56 @@ class Worker(threading.Thread):
         self.writer = None
         self.clip_path = None
 
+    def _swap_source(self):
+        """Swap the frame source between loop passes (issue #236). Build the
+        new source BEFORE closing the old one, so a failed build (rover off,
+        typo'd URL) leaves the current feed running untouched -- the failure
+        becomes a source_change_failed event and the dashboard's pill snaps
+        back on its next poll. On success: finish any open clip first (the
+        resolution may change under the writer), mint a NEW session_id (a
+        fresh source restarts ByteTrack ids at 1 -- reusing the session would
+        upsert into existing sighting rows), and reset the presence debounce
+        QUIETLY -- a camera switch is not a departure, so zero arrival/
+        departure events may fire from switching."""
+        name = self.control.pending_source
+        self.control.pending_source = None
+        if name is None or name == self.state.source_name or name not in self.sources:
+            return   # /control validates; this is the worker's belt-and-suspenders
+        ts = datetime.now().isoformat(timespec="seconds")
+        old = self.state.source_name
+        try:
+            new_source = self.sources[name]()
+        except Exception as e:
+            print(f"Source switch to {name} failed: {e}")
+            self._event(ts, "source_change_failed", {"to": name, "error": str(e)})
+            return
+        if self.writer is not None:
+            self._finish_clip(ts)   # control.recording stays as set: recording
+                                    # simply continues into a fresh clip on the
+                                    # new source's resolution
+        self.source.close()
+        self.source = new_source
+        self.presence = perception.SpeciesPresence(ARRIVE_AFTER, DEPART_AFTER)
+        self._frame_seq = 0
+        self._prov_logged = False
+        self._churn_at = 0.0
+        # Second-resolution stamps can collide with the session being replaced
+        # (a swap in the boot second -- rare at the desk, normal in the test
+        # suite), and the id MUST change or the fresh tracker's restarted ids
+        # upsert into the old session's rows. The swap counter disambiguates;
+        # 's' keeps it filesystem-safe for the frame ids minted from it.
+        self._swaps += 1
+        session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if self.state.session_id.startswith(session_id):
+            session_id = f"{session_id}s{self._swaps}"
+        with self.state.lock:
+            self.state.session_id = session_id
+            self.state.source_name = name
+            self.state.counts = {}
+            self.state.tracks = []
+        self._event(ts, "source_changed", {"from": old, "to": name})
+        print(f"[source] switched {old} -> {name} (session {session_id})")
+
     def run(self):
         while not self._stop.is_set():
             # Measure the true loop rate: wall-clock between the START of each
@@ -331,6 +401,11 @@ class Worker(threading.Thread):
                 self._loop_times.append(now_perf - self._prev_loop)
             self._prev_loop = now_perf
             t0 = now_perf
+
+            # Before the stood-down check, deliberately: a switch clicked while
+            # the station is standing down should still take effect.
+            if self.control.pending_source is not None:
+                self._swap_source()
 
             if not self.control.running:
                 time.sleep(0.05)
@@ -415,8 +490,10 @@ class Worker(threading.Thread):
 
 
 class ControlCommand(BaseModel):
-    action: str                      # start | stop | record_on | record_off | set_crowd_threshold
+    action: str                      # start | stop | record_on | record_off |
+                                     # set_crowd_threshold | set_source
     value: int | None = None
+    source: str | None = None        # set_source's target (issue #236)
 
 
 def _read_db_summary(conn, session_id, db_lock):
@@ -429,12 +506,21 @@ def _read_db_summary(conn, session_id, db_lock):
         }
 
 
-def create_app(source, conn, publisher=None):
+def create_app(source, conn, publisher=None, sources=None, active=None):
     """Build the FastAPI app around a frame source and an open DB connection.
     Factored out so tests can pass a synthetic source + in-memory DB + a fake
     publisher (asserting on bus traffic without a broker). The default publisher
     is resilient to a missing broker, so the daemon runs fine without Mosquitto
-    -- events then live only in SQLite and nobody narrates them."""
+    -- events then live only in SQLite and nobody narrates them.
+
+    `sources` (issue #236) opts into the switchable-source world: a dict of
+    name -> zero-arg factory (or a zero-arg callable returning that dict or
+    None, resolved at STARTUP like `source` -- the module-level app passes
+    make_sources so import stays side-effect-free), with `active` naming the
+    initial source (default: the dict's first key). When present, the initial
+    source is built from the registry and `source` is ignored; when absent
+    (tests, synthetic mode), `source` behaves exactly as it always has and
+    /state advertises nothing to toggle."""
     storage.seed_training_runs(conn)
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     state = SharedState(session_id)
@@ -466,13 +552,25 @@ def create_app(source, conn, publisher=None):
             if publisher is None
             else publisher
         )
-        src = source() if callable(source) else source
-        worker = Worker(src, state, conn, control, db_lock, pub)
+        # The switchable-source world (issue #236): resolve the registry at
+        # startup (it may be a callable, same deal as `source`), build the
+        # active entry, and advertise the roster on /state.
+        registry = sources() if callable(sources) else sources
+        if registry:
+            first = active if active is not None else next(iter(registry))
+            src = registry[first]()
+            with state.lock:
+                state.source_name = first
+                state.sources_roster = list(registry)
+        else:
+            src = source() if callable(source) else source
+        worker = Worker(src, state, conn, control, db_lock, pub,
+                        sources=registry)
         worker.start()
         yield
         worker.stop()
         worker.join(timeout=2)
-        src.close()
+        worker.source.close()   # the worker's CURRENT source, not the boot one
         if publisher is None:
             pub.close()
 
@@ -490,12 +588,23 @@ def create_app(source, conn, publisher=None):
                     "signal": state.signal}
             provenance = dict(state.provenance)
             churn = state.churn
+            # Mutable since issue #236: a source swap mints a fresh session,
+            # so /state (and the DB summary below) must read the current one.
+            session = state.session_id
+            source_name = state.source_name
+            roster = list(state.sources_roster)
         return {
-            "session_id": session_id,
+            "session_id": session,
             "running": control.running,
             "recording": control.recording,
             "crowd_threshold": control.crowd_threshold,
             "species": SPECIES,
+            # The switchable-source roster (issue #236): which feed the daemon
+            # is perceiving and what it could switch to. null/[] in the
+            # single-source worlds, which is the dashboard's cue to render no
+            # toggle at all (the species-roster degrade precedent).
+            "source": source_name,
+            "sources": roster,
             "live": live,
             # Issue #74, Phase 0: what the source is connected to (stream,
             # native resolution, imgsz, model, classes) and the tracker churn
@@ -503,7 +612,7 @@ def create_app(source, conn, publisher=None):
             # for trackerless sources (synthetic).
             "provenance": provenance,
             "churn": churn,
-            **_read_db_summary(conn, session_id, db_lock),
+            **_read_db_summary(conn, session, db_lock),
         }
 
     @app.get("/snapshot")
@@ -575,10 +684,29 @@ def create_app(source, conn, publisher=None):
             if cmd.value is None or cmd.value < 1:
                 return Response(status_code=422, content="value must be >= 1")
             control.crowd_threshold = cmd.value
+        elif cmd.action == "set_source":
+            # Validated against the roster HERE (a typo'd name answers 422,
+            # not a silent no-op); the actual swap happens in the worker
+            # between loop passes -- see Worker._swap_source. Switching to
+            # the already-active source is an honest no-op.
+            with state.lock:
+                roster = list(state.sources_roster)
+                current = state.source_name
+            if not roster:
+                return Response(status_code=422,
+                                content="this daemon has no switchable sources")
+            if cmd.source is None or cmd.source not in roster:
+                return Response(status_code=422,
+                                content=f"unknown source: {cmd.source}")
+            if cmd.source != current:
+                control.pending_source = cmd.source
         else:
             return Response(status_code=422, content=f"unknown action: {cmd.action}")
+        with state.lock:
+            source_name = state.source_name
         return {"running": control.running, "recording": control.recording,
-                "crowd_threshold": control.crowd_threshold}
+                "crowd_threshold": control.crowd_threshold,
+                "source": source_name}
 
     return app
 
@@ -590,11 +718,25 @@ def make_source():
     at import, so importing this module never opens the camera or loads the model."""
     if os.environ.get("MERLE_SOURCE", "camera") == "synthetic":
         return SyntheticFrameSource()
-    from vision.frames import RTSPFrameSource   # lazy: heavy + camera-only
-    return RTSPFrameSource()
+    from vision.frames import driveway_source
+    return driveway_source()
 
 
-# Module-level app for `uvicorn merle_daemon:app`. make_source is passed as a
-# FACTORY (not called here) so import stays side-effect-free; the lifespan calls
-# it at startup.
-app = create_app(make_source, storage.connect(os.environ.get("MERLE_DB", "merle.db")))
+def make_sources():
+    """The switchable-source registry for the camera world (issue #236):
+    'driveway' (the Amcrest over RTSP, first = the default active source) and
+    'rover' (the Waveshare app's MJPEG feed). None in the synthetic world --
+    there is nothing honest to switch to without a camera, and tests/CI stay
+    exactly as they were. Called at startup, not at import, same as
+    make_source."""
+    if os.environ.get("MERLE_SOURCE", "camera") == "synthetic":
+        return None
+    from vision.frames import driveway_source, rover_source
+    return {"driveway": driveway_source, "rover": rover_source}
+
+
+# Module-level app for `uvicorn merle_daemon:app`. make_source/make_sources are
+# passed as FACTORIES (not called here) so import stays side-effect-free; the
+# lifespan calls them at startup.
+app = create_app(make_source, storage.connect(os.environ.get("MERLE_DB", "merle.db")),
+                 sources=make_sources)
