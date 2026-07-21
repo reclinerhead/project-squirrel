@@ -2,22 +2,13 @@
   "bus": "ws://192.168.1.64:9001",
   "tiles": [
     {
-      "name": "Merle",
+      "name": "Merle Control Center",
       "icon": "binoculars",
       "color": "#ff7031",
       "url": "http://mcc.lan/",
       "status": "live",
       "presence": "services/merle-daemon/status",
       "description": "the driveway field station — live watch, field journal, census"
-    },
-    {
-      "name": "Music",
-      "icon": "note",
-      "color": "#e0b25c",
-      "url": "http://music.lan/",
-      "status": "live",
-      "presence": "music/status",
-      "description": "the record library — 25,000 tracks, the Denon, the thumbs"
     },
     {
       "name": "Weather Post",
@@ -29,12 +20,22 @@
       "description": "willard's station view — the driveway sky, writ large"
     },
     {
-      "name": "Mole",
-      "icon": "mound",
-      "color": "#8a7a63",
-      "url": "/mole/",
+      "name": "Music",
+      "icon": "note",
+      "color": "#e0b25c",
+      "url": "http://music.lan/",
       "status": "live",
-      "description": "the mole hole — where the ads go in and don't come back"
+      "presence": "music/status",
+      "description": "the record library — 25,000 tracks, the Denon, the thumbs"
+    },
+    {
+      "name": "Aviary",
+      "icon": "bird",
+      "color": "#9db35c",
+      "url": "http://mcc.lan/aviary",
+      "status": "live",
+      "presence": "audio/status",
+      "description": "earl's birdwatch — the life list, live arrivals, the recordings"
     },
     {
       "name": "Hearth",
@@ -45,20 +46,19 @@
       "description": "the family site — its own fire, tended elsewhere"
     },
     {
+      "name": "Mole (DNS and DHCP)",
+      "icon": "mound",
+      "color": "#8a7a63",
+      "url": "/mole/",
+      "status": "live",
+      "description": "the mole hole — where the ads go in and don't come back"
+    },
+    {
       "name": "Security",
       "icon": "tower",
       "color": "#7d93b2",
       "status": "soon",
       "description": "frigate's watchtower — eyes on the perimeter"
-    },
-    {
-      "name": "Aviary",
-      "icon": "bird",
-      "color": "#9db35c",
-      "url": "http://mcc.lan/aviary",
-      "status": "live",
-      "presence": "audio/status",
-      "description": "earl's birdwatch — the life list, live arrivals, the recordings"
     }
   ]
 }
