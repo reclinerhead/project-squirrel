@@ -76,7 +76,7 @@ function makeTile(tile) {
   }
   const status = document.createElement("span");
   status.className = "tile-status stamp";
-  status.textContent = live ? "open trail" : "coming soon";
+  status.textContent = live ? "Online" : "coming soon";
   right.append(lamp, status);
   top.append(blaze, right);
 
