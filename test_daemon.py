@@ -616,3 +616,62 @@ def test_switch_finalizes_an_open_recording(tmp_path, monkeypatch):
         body = _wait_for(c, lambda b: b["source"] == "b")
         assert "clip_recorded" in [e["kind"] for e in body["recent_events"]]
         assert body["recording"] is True   # recording continues on the new source
+
+
+# --- per-source frame rate (issue #238) --------------------------------------
+# The rover runs at 30fps, the driveway at 15; the worker paces to whichever is
+# active and sizes recorded clips to it. The rate is a source PROPERTY, so it's
+# proven here with synthetic sources that declare one -- no camera, no model.
+
+
+class _RatedSynthetic(SyntheticFrameSource):
+    """A synthetic source that declares a frame rate, standing in for a real
+    source's target_fps (which lives on TrackedStreamSource, model-dependent)."""
+
+    def __init__(self, target_fps, **kw):
+        super().__init__(**kw)
+        self.target_fps = target_fps
+
+
+def _record_a_clip(c, tmp_path):
+    """Record for a beat, stop, and return the finalized clip's cv2 fps."""
+    c.post("/control", json={"action": "record_on"})
+    time.sleep(0.3)
+    c.post("/control", json={"action": "record_off"})
+    path = _wait_for(
+        c, lambda b: any(e["kind"] == "clip_recorded" for e in b["recent_events"])
+    )
+    clip = next(e for e in path["recent_events"] if e["kind"] == "clip_recorded")
+    cap = cv2.VideoCapture(str(tmp_path / clip["details"]["path"]))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    cap.release()
+    return round(fps)
+
+
+def test_clip_is_written_at_the_sources_declared_fps(tmp_path, monkeypatch):
+    # A 30fps source writes a 30fps clip -- guards the 2x-playback regression:
+    # a rover clip written at the old global 15 would play back at double speed.
+    monkeypatch.chdir(tmp_path)
+    app = _app(_RatedSynthetic(30))
+    with TestClient(app) as c:
+        _wait_for_first_frame(c)
+        assert _record_a_clip(c, tmp_path) == 30
+
+
+def test_clip_falls_back_to_the_daemon_default_fps(tmp_path, monkeypatch):
+    # A source with no declared rate (the plain synthetic source, and any test
+    # fake) writes at the daemon default -- the driveway/synthetic guard.
+    monkeypatch.chdir(tmp_path)
+    app = _app(SyntheticFrameSource())
+    with TestClient(app) as c:
+        _wait_for_first_frame(c)
+        assert _record_a_clip(c, tmp_path) == merle_daemon.TARGET_FPS
+
+
+def test_provenance_schema_carries_target_fps(client):
+    # Both worlds serve the same /state provenance shape (issue #238 adds
+    # target_fps), so the dashboard reads one schema -- null in the synthetic
+    # world, the source's real rate on a camera.
+    prov = client.get("/state").json()["provenance"]
+    assert "target_fps" in prov
+    assert prov["target_fps"] is None   # synthetic declares no rate
