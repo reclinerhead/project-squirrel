@@ -31,7 +31,7 @@ snapshots/, debug_frames/); it shares perception.py with the daemon.
 
 ## Quick start — running the station
 
-The station spans two machines. **pearl** (`192.168.1.64`, always-on Ubuntu) hosts the broker (Mosquitto), the narrator (Marlin), the weather post (`weatherpost/weather.py`), and the production dashboard (MCC, `http://pearl:3000`) — always up, nothing to start. **bluejay** (the Windows desktop) runs only the perception daemon, the one process that needs its GPU and camera, from the repo root (PowerShell). Bluejay's standing Ollama install also serves the narrator's LLM calls (port 11434) — not a Merle process, nothing to start. Everything meets on the bus and tolerates the others being absent:
+The station spans three machines, and one of them drives. **pearl** (`192.168.1.64`, always-on Ubuntu) hosts the broker (Mosquitto), the narrator (Marlin), the weather post (`weatherpost/weather.py`), the listener (Earl, `listener/earl.py`), and the production dashboard (MCC, `http://pearl:3000`) — always up, nothing to start. **bluejay** (the Windows desktop) runs only the perception daemon, the one process that needs its GPU and camera, from the repo root (PowerShell). **merle** (`192.168.1.103`, Pi 5) is the rover — the Waveshare UGV stack (`ugv`, `http://merle:5000`) with Jim the field narrator riding along; intermittently off or out of range by nature, and nothing else waits on it (runbook: `Servers/Merle.md`). Bluejay's standing Ollama install also serves the narrator's LLM calls (port 11434) — not a Merle process, nothing to start. Everything meets on the bus and tolerates the others being absent:
 
 ```powershell
 # Perception daemon (needs MERLE_RTSP_PASS for the camera and MERLE_MQTT
