@@ -63,7 +63,22 @@ CLASS_COLORS = perception.class_colors(CLASS_NAMES)
 # class (stable panel geometry) instead of only the species currently counted.
 SPECIES = [CLASS_NAMES[i] for i in sorted(CLASS_NAMES)]
 
-TARGET_FPS = 15          # cap the loop; the real camera runs ~15fps anyway
+TARGET_FPS = 15          # DEFAULT loop pace / fallback only (issue #238): the
+                         # worker now paces to the ACTIVE source's own target_fps
+                         # (driveway 15, rover 30), read via getattr so a source
+                         # without the attr (synthetic, test fakes) keeps this.
+STREAM_POLL_S = 1.0 / 120  # how often the /stream generator wakes to check for a
+                         # new frame -- deliberately far faster than any source
+                         # publishes (issue #238). next_stream_part's seq-gating
+                         # (issue #49) sends only NEW frames, so a tight poll adds
+                         # no bytes for a 15fps or stood-down source; delivery is
+                         # paced by the worker's publish rate, never this poll.
+                         # Why so tight: on Windows (bluejay) asyncio.sleep()
+                         # quantizes to the ~15.6ms system timer, so a 1/30 poll
+                         # rounded up toward 1/21 and starved the 30fps rover feed
+                         # even though the worker loop was hitting 30. A sub-tick
+                         # request floors at ~15.6ms (~64 wakes/s) -- comfortably
+                         # above 30fps -- so every published frame goes out prompt.
 CROWD_COOLDOWN = 10.0    # seconds between crowd-snapshot events, like live.py
 NO_FRAME_RETRY = 0.25    # pause between reads while the source has no frame
 STREAM_WIDTH = 1920      # /stream rides a downscaled copy: the camera's 4K
@@ -297,7 +312,7 @@ class Worker(threading.Thread):
             return
         self._churn_at = now
         prov = getattr(self.source, "provenance", dict)()
-        fps = self.state.fps or TARGET_FPS
+        fps = self.state.fps or self._target_fps()
         churn = getattr(self.source, "metrics", lambda fps: None)(fps)
         with self.state.lock:
             self.state.provenance = prov
@@ -310,12 +325,21 @@ class Worker(threading.Thread):
                   f"classes={prov.get('classes')}")
             self._prov_logged = True
 
+    def _target_fps(self):
+        """The active source's frame rate (issue #238) -- the worker paces to it
+        and clips are sized to it. getattr-defensive: the synthetic source and
+        test fakes have no target_fps and fall back to the daemon default."""
+        return getattr(self.source, "target_fps", TARGET_FPS)
+
     def _record(self, annotated, ts):
         """Drive the clip recorder off control.recording. Records the ANNOTATED
         stream (boxes and all): the dashboard's clips are for watching/sharing a
         moment. live.py's V key still writes RAW clips, which is what you sample
         for training stills. All handled in this one worker thread, so the
-        VideoWriter is never touched cross-thread."""
+        VideoWriter is never touched cross-thread. The clip is written at the
+        ACTIVE source's fps (issue #238): a 30fps rover clip written at 15 would
+        play back at 2x -- and a swap finalizes the open clip, so the next one
+        opens at the new source's rate."""
         if self.control.recording:
             if self.writer is None:
                 os.makedirs("debug_frames", exist_ok=True)
@@ -323,7 +347,7 @@ class Worker(threading.Thread):
                 h, w = annotated.shape[:2]
                 writer = cv2.VideoWriter(self.clip_path,
                                          cv2.VideoWriter_fourcc(*"mp4v"),
-                                         TARGET_FPS, (w, h))
+                                         self._target_fps(), (w, h))
                 if not writer.isOpened():
                     print(f"Recording failed to open: {self.clip_path}")
                     self.control.recording = False   # flip back so /state is honest
@@ -479,9 +503,12 @@ class Worker(threading.Thread):
                 if len(self._loop_times) > 1:
                     self.state.fps = round(len(self._loop_times) / sum(self._loop_times), 1)
 
-            # Pace to TARGET_FPS (measured into the next loop's interval above).
+            # Pace to the ACTIVE source's fps (issue #238; measured into the next
+            # loop's interval above). The rover asks for 30, the driveway 15 --
+            # and FreshestFrameReader blocks on new frames anyway, so this is a
+            # ceiling, never a way to over-serve a slower camera.
             dt = time.perf_counter() - t0
-            time.sleep(max(0.0, 1.0 / TARGET_FPS - dt))
+            time.sleep(max(0.0, 1.0 / self._target_fps() - dt))
 
         # Loop ended (stop or lost feed): close any open clip so it isn't left
         # truncated.
@@ -639,7 +666,7 @@ def create_app(source, conn, publisher=None, sources=None, active=None):
                 part, last_seq = next_stream_part(jpeg, seq, last_seq)
                 if part is not None:
                     yield part
-                await asyncio.sleep(1.0 / TARGET_FPS)
+                await asyncio.sleep(STREAM_POLL_S)
         return StreamingResponse(
             gen(), media_type="multipart/x-mixed-replace; boundary=frame")
 

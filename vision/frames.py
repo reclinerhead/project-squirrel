@@ -126,7 +126,8 @@ class SyntheticFrameSource(FrameSource):
         # honestly null -- the dashboard can render one schema for both worlds.
         return {"source": "synthetic", "url": None,
                 "resolution": [self.w, self.h],
-                "imgsz": None, "quantize": None, "model": None,
+                "imgsz": None, "quantize": None, "target_fps": None,
+                "model": None,
                 "classes": ["squirrel", "chipmunk"]}
 
     def read(self):
@@ -226,6 +227,19 @@ class FreshestFrameReader(threading.Thread):
 # a switch to a dead rover must fail in seconds, not wedge perception.
 ROVER_OPEN_TIMEOUT_MS = 4000
 
+# Per-source frame rate + inference size (issue #238). fps is a source PROPERTY,
+# not a global cap: the daemon paces the worker (and sizes recorded clips) to
+# the ACTIVE source's rate, so the two cameras run at their own honest speeds.
+DEFAULT_FPS = 15         # the safe default; the Amcrest is ~15fps native
+ROVER_FPS = 30           # the rover's MJPEG feed measured at ~30fps (its whole
+                         # point is smooth motion for a moving camera)
+# The rover is 640x480 native, so perception.IMGSZ (1920, a 3x upscale tuned to
+# rescue tiny distant animals in the Amcrest's 4K frame) buys no real detail and
+# ~9x the GPU work -- exactly the headroom 30fps inference needs on a card shared
+# with Ollama. 640 keeps the rover at its trained scale; revisit per the field
+# once real animals are in view (the issue's measure-then-tune note).
+ROVER_IMGSZ = 640
+
 _MODEL = None   # (model, path) -- see load_model()
 
 
@@ -264,10 +278,16 @@ class TrackedStreamSource(FrameSource):
     the worker the newest frame every time; the old fixed 6-7s backlog can no
     longer form -- at startup or after any mid-run stall."""
 
-    def __init__(self, source_id, url, redacted, open_params=None):
+    def __init__(self, source_id, url, redacted, open_params=None,
+                 imgsz=None, target_fps=None):
         self.source_id = source_id
         self.url = url
         self._open_params = list(open_params or [])
+        # Per-source inference size and frame rate (issue #238). imgsz is used
+        # in read() and reported in provenance; target_fps is advertised for the
+        # daemon to pace the worker and size recorded clips to THIS source.
+        self.imgsz = imgsz if imgsz is not None else perception.IMGSZ
+        self.target_fps = target_fps if target_fps is not None else DEFAULT_FPS
         # Read once at open by FFmpeg. rtsp_transport is meaningless for the
         # rover's HTTP feed (FFmpeg ignores options the demuxer doesn't know,
         # at worst with a log line); nobuffer/low_delay apply to both.
@@ -296,7 +316,8 @@ class TrackedStreamSource(FrameSource):
         # camera settings change).
         self._provenance = {
             "source": source_id, "url": redacted, "resolution": None,
-            "imgsz": perception.IMGSZ, "quantize": perception.QUANTIZE,
+            "imgsz": self.imgsz, "quantize": perception.QUANTIZE,
+            "target_fps": self.target_fps,
             "model": model_path,
             "classes": [self.names[i] for i in sorted(self.names)],
         }
@@ -332,7 +353,7 @@ class TrackedStreamSource(FrameSource):
         if self._provenance["resolution"] != [w, h]:
             self._provenance["resolution"] = [w, h]
         results = self.model.track(frame, conf=perception.DETECT_FLOOR,
-                                   imgsz=perception.IMGSZ,
+                                   imgsz=self.imgsz,
                                    quantize=perception.QUANTIZE,
                                    persist=self._persist,
                                    tracker=perception.TRACKER_YAML, verbose=False)
@@ -363,8 +384,11 @@ def rover_source():
     """The rover's camera via the Waveshare app's MJPEG feed (issue #236),
     with a bounded open so switching to a powered-off rover fails in seconds
     (the worker then stays on its previous source) instead of wedging the
-    perception loop for FFmpeg's default forever."""
+    perception loop for FFmpeg's default forever. Runs at 30fps / imgsz 640
+    (issue #238): its own rate for smooth motion, its own inference size for
+    the headroom to sustain it."""
     url, redacted = rover_url()
     return TrackedStreamSource("rover", url, redacted,
                                open_params=[cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,
-                                            ROVER_OPEN_TIMEOUT_MS])
+                                            ROVER_OPEN_TIMEOUT_MS],
+                               imgsz=ROVER_IMGSZ, target_fps=ROVER_FPS)
