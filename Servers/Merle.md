@@ -13,6 +13,49 @@ the guy out in the field among the beasts — the unit rides along.
 *Canonical copy of this doc lives in the repo at `Servers/Merle.md`; keep any
 copy on merle in sync when it changes.*
 
+> **Note:** much of this doc below (Jim the narrator) predates the 2026-07-15
+> reflash for the Waveshare rover install and is stale. The Wi-Fi section is
+> current.
+
+---
+
+## Wi-Fi — the U7 must win, or the rover silently falls back home
+
+Since the reflash, Wi-Fi is managed by **NetworkManager** (`nmcli`), not
+`wpa_supplicant`. Two profiles exist:
+
+- `project-squirrel-u7` — the outdoor Ubiquiti U7 AP (set up 2026-07-18).
+- `preconfigured` — Todd's home 2.4GHz network, created by Pi OS imaging.
+  This is the **original** setup network and stays as a deliberate fallback.
+
+NetworkManager does **not** roam between different SSIDs on its own — once
+connected to one, it stays until that one drops. At equal autoconnect-priority
+(both default 0), any blip (rover booting before the U7 is up, a weak U7
+moment, the U7 rebooting) makes merle grab `preconfigured` and sit there — it
+looks exactly like a failed or weak U7 when the U7 is fine. This cost an hour
+of AP troubleshooting on 2026-07-21 before we found it had silently fallen
+back.
+
+**Fix (applied 2026-07-21):** give the U7 a higher priority so it always wins
+when visible, keeping home as a genuine fallback:
+
+```
+sudo nmcli connection modify project-squirrel-u7 connection.autoconnect-priority 10
+nmcli -f NAME,AUTOCONNECT-PRIORITY connection show     # U7=10, preconfigured=0
+```
+
+Check what it's actually on, and force a switch if needed:
+
+```
+nmcli -f NAME,DEVICE connection show --active          # want project-squirrel-u7 on wlan0
+iwgetid -r                                             # prints the live SSID
+sudo nmcli connection up project-squirrel-u7           # force it back onto the U7
+```
+
+Adding a new AP later: `sudo nmcli device wifi connect "SSID" password "PW"`,
+then set its priority the same way. Don't delete `preconfigured` — a rover
+with zero known networks is a rover you're plugging a keyboard into.
+
 ---
 
 ## What runs here
