@@ -488,6 +488,22 @@ Environment=MERLE_EARL_CLIPS=/srv/media-cache/earl
 WantedBy=multi-user.target
 ```
 
+**Since #247 the amcrest source reads Frigate's restream**, not the camera —
+a drop-in (the house `cache.conf` pattern,
+`/etc/systemd/system/earl-listener.service.d/restream.conf`):
+
+```
+[Service]
+Environment=MERLE_RTSP_URL=rtsp://127.0.0.1:8554/driveway
+```
+
+Loopback on purpose (go2rtc is on this box), credential-free (the restream
+carries none — the `MERLE_RTSP_PASS` line above stays as the direct-camera
+fallback: remove the drop-in + `daemon-reload` + restart and Earl goes back
+to the Amcrest itself, e.g. with Frigate down for surgery). Audio still
+arrives via `-allowed_media_types audio` — same AAC track, one fewer camera
+session.
+
 `earl-sightings.service` is the same skeleton with
 `ExecStart=/home/todd/project-squirrel/venv/bin/python -m listener.sightings`,
 `Environment=MERLE_EARL_DB=/home/todd/project-squirrel/earl.db`,

@@ -20,6 +20,7 @@
 
 import math
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -43,18 +44,41 @@ READ_TIMEOUT = 1.0         # seconds read() waits for a fresh frame before
 RTSP_FFMPEG_OPTIONS = "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay"
 
 
+def redact_rtsp(url):
+    """rtsp://user:pass@host/... -> rtsp://user:***@host/... A restream URL
+    carries no credentials and passes through unchanged; the mask exists so a
+    direct camera URL pasted into MERLE_RTSP_URL can never leak into logs or
+    /state -- the fail-safe lives in the redactor, not in trusting the env."""
+    return re.sub(r"(?<=//)([^/@:]+):[^@/]+@", r"\1:***@", url)
+
+
 def rtsp_url():
-    """The camera URL from MERLE_RTSP_* -> (url, redacted_url). ONE
-    construction shared by the daemon source and the fixture recorder (issue
-    #74 Phase 0: what stream we're on must never be a mystery, so there is
-    exactly one place that decides it). subtype=0 is the Amcrest MAIN stream
-    -- the sub-stream (subtype=1) is low-res and would starve distant-animal
+    """The camera URL -> (url, redacted_url). ONE construction shared by the
+    daemon source and the fixture recorder (issue #74 Phase 0: what stream
+    we're on must never be a mystery, so there is exactly one place that
+    decides it).
+
+    MERLE_RTSP_URL, when set, is used verbatim -- the normal posture since
+    Frigate (issue #247): point it at the go2rtc restream
+    (rtsp://pearl:8554/driveway -- the same 4K main-stream bits, but the one
+    camera connection is Frigate's). A restream URL carries no credentials,
+    so no password is required in this form.
+
+    Unset, the direct-Amcrest construction below stands unchanged, still
+    fail-loud on a missing MERLE_RTSP_PASS -- the in-a-pinch fallback for a
+    Frigate that's down. subtype=0 is the Amcrest MAIN stream -- the
+    sub-stream (subtype=1) is low-res and would starve distant-animal
     detection. The redacted twin is for logs and /state; the password never
     leaves the process."""
+    override = os.environ.get("MERLE_RTSP_URL", "").strip()
+    if override:
+        return override, redact_rtsp(override)
     user = os.environ.get("MERLE_RTSP_USER", "admin")
     pw = os.environ.get("MERLE_RTSP_PASS")
     if not pw:
-        raise RuntimeError("MERLE_RTSP_PASS is not set -- needed for the camera source.")
+        raise RuntimeError("MERLE_RTSP_PASS is not set -- needed for the "
+                           "camera source (or set MERLE_RTSP_URL to the "
+                           "Frigate restream).")
     host = os.environ.get("MERLE_RTSP_HOST", "192.168.1.102")
     path = "/cam/realmonitor?channel=1&subtype=0"
     return (f"rtsp://{user}:{pw}@{host}:554{path}",
