@@ -57,3 +57,17 @@ http://mcc, http://mcc.lan {
 http://music, http://music.lan {
 	reverse_proxy 127.0.0.1:3001
 }
+
+# Frigate, the NVR (epic #243). Its own hostname rather than a pearl/frigate
+# path because Frigate's UI does not survive subpath serving (absolute asset
+# URLs). Frigate speaks TLS on 8971 with a self-signed cert, so this is the
+# one upstream Caddy talks https to — skip-verify is fine on loopback. The
+# house stays plain HTTP out front; Frigate's own login rides through it
+# (its auth cookie is not Secure-flagged by default, so http works).
+http://frigate, http://frigate.lan {
+	reverse_proxy https://127.0.0.1:8971 {
+		transport http {
+			tls_insecure_skip_verify
+		}
+	}
+}

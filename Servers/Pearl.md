@@ -29,6 +29,7 @@ outage brings her back without anyone going downstairs.
 | Deploys   | `merle-autodeploy`| —                              | Deploy watcher (issue #95): polls origin/main, pulls + restarts the Merle units on merge |
 | Caddy     | `caddy`           | 80 (HTTP)                      | The front door (issue #141): named URLs instead of ports — `pearl/mole` → Pi-hole, `mcc.lan` → :3000, `music.lan` → :3001 |
 | Pi-hole   | `pihole-FTL`      | 53, 67 (DHCP), web on 127.0.0.1:8081 | Household DNS + DHCP; admin UI reached through Caddy at `pearl/mole` |
+| Frigate   | `frigate` (Docker container — the box's only one, NOT a systemd unit) | 8971 (UI, TLS), 8554 (RTSP restream), 8555 (WebRTC) | The NVR (epic #243): 24/7 recording to the Purple drive + Coral detection; UI through Caddy at `frigate.lan` |
 
 Not here: the perception daemon and camera (those live on bluejay,
 `192.168.1.79` — they need the GPU), and Jim, the second narrator (he lives
@@ -131,10 +132,13 @@ sudo ss -tlnp
 Expected: 22 (ssh), 53 (pihole), 80 (caddy), 1883 + 9001 (mosquitto),
 3000 (mcc-dashboard), 3001 (music-app), 8090 (music-daemon), and
 127.0.0.1:8081 (pihole web, loopback only — Caddy is the only way in).
-Nothing on 443: Caddy runs plain HTTP on the LAN (`auto_https off`), and
-TLS is the epic's Deferred section. Anything else deserves a question.
-(Marlin, Willard, and the frame archiver listen on nothing — they only talk
-to the broker.)
+Frigate's ports show as `docker-proxy` processes: 8971 (UI, TLS — the one
+https listener on the box), 8554 (go2rtc RTSP restream), 8555 (WebRTC).
+Its internal unauthenticated API (container port 5000) is deliberately
+unpublished — nothing on the LAN can reach it. Nothing on 443: Caddy runs
+plain HTTP on the LAN (`auto_https off`), and TLS is the epic's Deferred
+section. Anything else deserves a question. (Marlin, Willard, and the frame
+archiver listen on nothing — they only talk to the broker.)
 
 ---
 
@@ -1219,6 +1223,85 @@ unit over; the browser never sees this address (the app proxies
 
 ---
 
+## Frigate (the NVR — epic #243)
+
+The one Docker container on the box, and deliberately **not a systemd unit**:
+Frigate's supported deployment is a container, and `restart: unless-stopped`
++ an enabled `docker` service stand in for systemd supervision. Compose file
+and config are versioned at `frigate/` in the repo (see [the frigate
+spoke](../docs/guide/frigate.md) for the architecture); the camera password
+lives in `~/project-squirrel/frigate/.env` (gitignored — template in
+`env.example`).
+
+**Deploying config changes is manual** — `merle-autodeploy` pulls the repo
+but never touches containers. After a merge that changes `frigate/`:
+
+```
+cd ~/project-squirrel/frigate
+cp config.yml /srv/frigate/config/config.yml
+docker compose up -d --force-recreate frigate
+```
+
+The repo config is the source of truth; the copy under `/srv/frigate/config`
+is Frigate's working copy (it stamps migration versions there, and the UI's
+config editor writes there) — every deploy overwrites it, which is the point.
+
+Ops:
+
+```
+docker ps                                        # is she up (expect "healthy")
+docker compose -f ~/project-squirrel/frigate/compose.yaml logs -f frigate
+docker stats frigate --no-stream                 # load at a glance
+```
+
+Steady-state load (measured 2026-07-22, one 4K camera, Coral detecting):
+container ~50–65% CPU total — mostly go2rtc + the record remux — and the UI's
+System page shows ~10.6 ms inference. If the container is instead eating
+multiple cores, the detector has fallen back to CPU: check
+`docker logs frigate | grep -i tpu` for "TPU found" and check `/dev/apex_0`
+exists (below).
+
+**Storage**: the external 4 TB WD Purple, whole (`sdb1` → `/srv/frigate`,
+mounted by UUID with `nofail` — external USB, enumeration order is a promise
+nobody made). `config/` is Frigate's DB + deployed config; `media/` is
+recordings and snapshots. Retention (continuous 14 days, alert/detection
+clips + snapshots 30) is config, not architecture — knobs in
+`frigate/config.yml`. All of it is a rolling window; nothing here joins the
+irreplaceable-files list.
+
+**Auth**: Frigate's own login on 8971 (TLS, self-signed). The first-run admin
+password prints once in `docker logs frigate` ("Created a default user") —
+it was changed in the UI on day one; manage users in Settings → Users. The
+unauthenticated internal port (5000) is not published.
+
+**MQTT**: publishes `frigate/*` to the house broker (host IP in the config —
+the container's localhost is itself). `frigate/available` is retained
+online/offline and feeds the Homestead tile's lamp for free.
+
+### The Coral driver (issue #244 — read before any kernel upgrade)
+
+Detection runs on the PCIe Coral Edge TPU (`/dev/apex_0`, mapped into the
+container). The gasket/apex driver is **built from patched source via DKMS**
+— Ubuntu 26.04 carries no `gasket-dkms` package and upstream
+`google/gasket-driver` is unmaintained. The patched tree lives at
+`/usr/src/gasket-1.0` (working copy `~/gasket-driver`); the hand-written
+`dkms.conf` sets `AUTOINSTALL=YES` and overrides the Makefile's
+`uname -r` trap (`MAKE[0]="make KVERSION=${kernelver}"`), so a kernel bump
+*should* rebuild unattended. If it doesn't — the historical failure mode is
+one-line kernel API rot (#244 hit two: `no_llseek` deleted in 6.12,
+`MODULE_IMPORT_NS` demanding a string since 6.13) — patch `/usr/src/gasket-1.0`,
+then:
+
+```
+sudo dkms build -m gasket -v 1.0 && sudo dkms install -m gasket -v 1.0
+sudo modprobe apex && ls -l /dev/apex_0    # expect crw-rw---- root:apex
+```
+
+Perms are the `apex` group via `/etc/udev/rules.d/65-apex.rules`; the full
+friction log is on issue #244.
+
+---
+
 ## The front door (Caddy)
 
 Unit: `caddy` (the stock apt unit — it already runs `/usr/bin/caddy run
@@ -1261,6 +1344,7 @@ What routes where:
 | `pearl/mole` (or `.64/mole`) | proxies Pi-hole's admin on loopback:8081 — the UI lives at `/mole` natively (`webserver.paths.webhome = "/mole/"` in `pihole.toml`, issue #143), so nothing rewrites paths; `/api` rides along because the v6 admin UI calls it and its path ignores webhome |
 | `mcc/` or `mcc.lan` | proxies the MCC dashboard (:3000) |
 | `music/` or `music.lan` | proxies the music app (:3001) |
+| `frigate/` or `frigate.lan` | proxies Frigate's UI (https://127.0.0.1:8971, skip-verify — the one TLS upstream; its own hostname because Frigate's UI breaks under a subpath) |
 
 **Homestead deploys by pull alone** — it's static files with no build step,
 so `merle-autodeploy`'s ordinary `git pull` *is* its deploy; no gate, no
@@ -1275,8 +1359,8 @@ spellings for every site. Phones don't reliably apply the suffix; use the
 full `.lan` names there (the launchpad's tiles do).
 
 The names themselves live in Pi-hole (Settings → Local DNS Records):
-`mcc.lan` and `music.lan`, both → `192.168.1.64`. `pearl.lan` already
-resolved before any of this and needed nothing.
+`mcc.lan`, `music.lan`, and `frigate.lan`, all → `192.168.1.64`. `pearl.lan`
+already resolved before any of this and needed nothing.
 
 **Not proxied on purpose**: the broker's WebSocket (:9001) — browsers speak
 MQTT to it directly and the MCC's `NEXT_PUBLIC_MERLE_MQTT_WS` names it
@@ -1348,7 +1432,9 @@ A false positive is a log entry, not a crisis.
 sudo reboot
 ```
 
-Everything comes back on its own. Verified.
+Everything comes back on its own. Verified. (Frigate included: the `docker`
+service is enabled and the container's `restart: unless-stopped` brings it
+up with the TPU bound — no hands.)
 
 Unattended security upgrades are on, with automatic reboot at 02:00.
 Config: `/etc/apt/apt.conf.d/50unattended-upgrades`

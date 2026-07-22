@@ -57,7 +57,9 @@
       "name": "Security",
       "icon": "tower",
       "color": "#7d93b2",
-      "status": "soon",
+      "url": "http://frigate.lan/",
+      "status": "live",
+      "presence": "frigate/available",
       "description": "frigate's watchtower — eyes on the perimeter"
     }
   ]
