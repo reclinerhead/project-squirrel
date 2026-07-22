@@ -31,7 +31,7 @@ The external 4 TB WD Purple (`sdb1`, ext4, mounted at `/srv/frigate` by UUID wit
 
 ### The restream (why nothing else talks to the camera)
 
-go2rtc inside Frigate republishes both camera streams at `rtsp://pearl:8554/driveway` (4K + audio) and `rtsp://pearl:8554/driveway_sub`. Everything that used to hold its own session to the Amcrest — the Merle daemon on bluejay, Earl's `amcrest` audio source, `tools/live.py` — repoints at the restream in Phase 3 (#247), after which the camera serves exactly one client. Adding a camera is a copy-pasted `go2rtc`/`cameras` block pair plus the wiring.
+go2rtc inside Frigate republishes both camera streams at `rtsp://pearl:8554/driveway` (4K + audio) and `rtsp://pearl:8554/driveway_sub`. Everything that used to hold its own session to the Amcrest reads the restream since #247: the Merle daemon and `tools/live.py` via `MERLE_RTSP_URL=rtsp://pearl:8554/driveway` (User-level on bluejay, consumed by `rtsp_url()` in `vision/frames.py`), Earl's `amcrest` audio source via the same variable at loopback in his unit drop-in. The restream is credential-free, so no password rides along; the direct-camera construction survives in both consumers as the fail-loud fallback (unset the override, set `MERLE_RTSP_PASS`) for a Frigate that's down. **The camera serves exactly one client: Frigate.** Adding a camera is a copy-pasted `go2rtc`/`cameras` block pair plus the wiring.
 
 ### Access and integration
 

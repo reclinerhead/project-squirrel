@@ -9,9 +9,9 @@ Personal learning project — wildlife observation in the author's own driveway,
 ## System overview
 
 ```
- bluejay (Windows desktop: GPU + camera)      │  pearl (192.168.1.64, always-on Ubuntu)
+ bluejay (Windows desktop: GPU)               │  pearl (192.168.1.64, always-on Ubuntu)
                                               │
-Amcrest PoE cam ──RTSP/TCP──▶ Merle daemon ───┼─MQTT driveway/events─▶ Mosquitto ◀──▶ narrator.py
+Frigate restream ─rtsp:8554─▶ Merle daemon ───┼─MQTT driveway/events─▶ Mosquitto ◀──▶ narrator.py
               (YOLO26s + ByteTrack            │      (MERLE_MQTT)   (the event bus)     (Marlin)
                + FastAPI + SQLite)            │                          │                 │
                     │ localhost HTTP          │                          │                 │
@@ -27,6 +27,11 @@ Amcrest PoE cam ──RTSP/TCP──▶ Merle daemon ───┼─MQTT drivewa
 
 live.py remains the standalone desktop vision stack (hard_frames/ harvest,
 snapshots/, debug_frames/); it shares perception.py with the daemon.
+
+The Amcrest PoE cam's ONLY RTSP client is Frigate (NVR, Docker on pearl,
+epic #243) -- 24/7 recording + Coral detection; the daemon, live.py, and
+Earl's driveway audio all read its go2rtc restream (#247). See
+docs/guide/frigate.md.
 ```
 
 ## Quick start — running the station

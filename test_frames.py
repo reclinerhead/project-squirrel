@@ -108,6 +108,10 @@ def test_stop_joins_promptly_and_releases_capture():
 # --- provenance (issue #74, Phase 0) -------------------------------------------
 
 def test_rtsp_url_builds_and_redacts(monkeypatch):
+    # delenv the #247 override: the direct-camera form must be exactly what
+    # it always was -- including on a dev box where the restream is the
+    # ambient default.
+    monkeypatch.delenv("MERLE_RTSP_URL", raising=False)
     monkeypatch.setenv("MERLE_RTSP_PASS", "sekrit")
     monkeypatch.setenv("MERLE_RTSP_HOST", "10.0.0.5")
     monkeypatch.delenv("MERLE_RTSP_USER", raising=False)
@@ -120,9 +124,32 @@ def test_rtsp_url_builds_and_redacts(monkeypatch):
 
 
 def test_rtsp_url_requires_the_password(monkeypatch):
+    monkeypatch.delenv("MERLE_RTSP_URL", raising=False)
     monkeypatch.delenv("MERLE_RTSP_PASS", raising=False)
     with pytest.raises(RuntimeError, match="MERLE_RTSP_PASS"):
         frames.rtsp_url()
+
+
+def test_rtsp_url_override_is_the_restream(monkeypatch):
+    # Issue #247: MERLE_RTSP_URL points the daemon at Frigate's go2rtc
+    # restream -- used verbatim, no password required (a restream URL carries
+    # no credentials), and the redacted twin is honestly the URL itself, so
+    # /state shows exactly what the daemon is watching.
+    monkeypatch.setenv("MERLE_RTSP_URL", "rtsp://pearl:8554/driveway")
+    monkeypatch.delenv("MERLE_RTSP_PASS", raising=False)
+    url, redacted = frames.rtsp_url()
+    assert url == redacted == "rtsp://pearl:8554/driveway"
+
+
+def test_rtsp_url_override_still_redacts_embedded_creds(monkeypatch):
+    # A direct camera URL pasted into the override must not leak either --
+    # the fail-safe lives in the redactor, not in trusting the operator.
+    monkeypatch.setenv("MERLE_RTSP_URL",
+                       "rtsp://admin:sekrit@10.0.0.5:554/cam?channel=1")
+    url, redacted = frames.rtsp_url()
+    assert "sekrit" in url
+    assert redacted == "rtsp://admin:***@10.0.0.5:554/cam?channel=1"
+    assert "sekrit" not in redacted
 
 
 def test_rover_url_default_and_override(monkeypatch):
