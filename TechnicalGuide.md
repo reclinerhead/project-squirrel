@@ -108,6 +108,7 @@ This file is the hub: project-wide context and conventions only. Everything comp
 | [music.md](docs/guide/music.md) | Music, catalog → app: `jukebox/`, `music/` | pearl | epic #115 |
 | [homestead.md](docs/guide/homestead.md) | The front door (Caddy) + Homestead: `launchpad/` | pearl | epic #110 |
 | [helm.md](docs/guide/helm.md) | The rover cockpit (stub — nothing merged yet) | merle + pearl | epic #127 |
+| [frigate.md](docs/guide/frigate.md) | Frigate, the NVR: `frigate/` — 24/7 recording, detection, the go2rtc restream | pearl | epic #243 |
 
 ## Cross-cutting conventions
 

@@ -1,0 +1,88 @@
+# Frigate config -- source of truth lives here in the repo; deploy copies it
+# to /srv/frigate/config/config.yml (see compose.yaml's header for the two
+# commands). Camera credentials arrive via FRIGATE_RTSP_PASSWORD from
+# frigate/.env -- never committed.
+
+mqtt:
+  enabled: true
+  # The house Mosquitto on pearl itself -- host IP because the container sits
+  # on Docker's bridge, where "localhost" is the container. frigate/* topics
+  # land on the same broker as driveway/*, weather/*, audio/*. Nothing
+  # subscribes yet (epic #243's parked list).
+  host: 192.168.1.64
+  topic_prefix: frigate
+
+# go2rtc holds the ONLY sessions to the camera; everything else -- Frigate's
+# own record/detect below, and (Phase 3) the Merle daemon, Earl, live.py --
+# reads the restream at rtsp://pearl:8554/<name>.
+go2rtc:
+  streams:
+    # Main stream: 3840x2160 H.264 @ 15fps + AAC audio (probed 2026-07-22).
+    driveway:
+      - rtsp://admin:{FRIGATE_RTSP_PASSWORD}@192.168.1.102:554/cam/realmonitor?channel=1&subtype=0
+    # Sub-stream: 704x480 H.264 @ 15fps. Detect decodes this, never the 4K --
+    # pearl's CPU is shared with Earl's BirdNET habit.
+    driveway_sub:
+      - rtsp://admin:{FRIGATE_RTSP_PASSWORD}@192.168.1.102:554/cam/realmonitor?channel=1&subtype=1
+
+cameras:
+  driveway:
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/driveway
+          input_args: preset-rtsp-restream
+          roles: [record]
+        - path: rtsp://127.0.0.1:8554/driveway_sub
+          input_args: preset-rtsp-restream
+          roles: [detect]
+      output_args:
+        # The main stream's AAC is already MP4-compatible: copy, never
+        # transcode (recording is a remux, ~zero CPU).
+        record: preset-record-generic-audio-copy
+    detect:
+      enabled: true
+      width: 704
+      height: 480
+      # Conservative on the CPU detector; revisit (or not) once Phase 2 puts
+      # inference on the Coral.
+      fps: 5
+    objects:
+      # Frigate is the generalist of record -- person/vehicle/pet triage.
+      # Squirrels and turkeys remain Merle's department (epic #243: Frigate
+      # is the NVR, Merle is the naturalist).
+      track:
+        - person
+        - car
+        - dog
+        - cat
+        - bird
+
+# Phase 1 stopgap. Phase 2 (#246) swaps this for the Edge TPU:
+#   detectors:
+#     coral:
+#       type: edgetpu
+#       device: pci
+detectors:
+  cpu1:
+    type: cpu
+    num_threads: 2
+
+record:
+  enabled: true
+  # Starting point from epic #243: continuous 14 days, alert/detection clips
+  # 30. Revisit against real disk burn once a week of 4K recordings exists --
+  # the drive is 3.6T and the math gets honest numbers then.
+  retain:
+    days: 14
+    mode: all
+  alerts:
+    retain:
+      days: 30
+  detections:
+    retain:
+      days: 30
+
+snapshots:
+  enabled: true
+  retain:
+    default: 30
