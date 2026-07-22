@@ -35,10 +35,10 @@ go2rtc inside Frigate republishes both camera streams at `rtsp://pearl:8554/driv
 
 ### Access and integration
 
-- **UI / authenticated API on `:8971`** (the unauthenticated internal `:5000` is deliberately not published). First-run admin credentials appear in `docker logs frigate`. A Caddy route + Homestead placard are Phase 4 (#248).
+- **UI / authenticated API on `:8971`** (the unauthenticated internal `:5000` is deliberately not published). Through the front door it's `http://frigate.lan` (its own hostname, not a `pearl/frigate` path — Frigate's UI breaks under subpath serving; Caddy is the house's one TLS-upstream proxy here, skip-verify on loopback). The Homestead's Security tile points at it, with its lamp fed by the retained `frigate/available` topic. First-run admin credentials appear once in `docker logs frigate`; users managed in the UI thereafter.
 - **MQTT**: Frigate publishes `frigate/*` (events, stats, availability) to the house Mosquitto — same broker as `driveway/*` and `audio/*`, by host IP because the container's `localhost` is itself. Nothing subscribes yet; bridging `frigate/events` toward the narrators is on the epic's parked list.
 - **Detector**: the Coral Edge TPU (`edgetpu`/`pci`, `/dev/apex_0` mapped into the container — driver friction log lives on #244). Measured ~10.6 ms inference; the Phase 1 CPU detector it replaced burned ~1.5 of pearl's 4 threads for the same work (#246's before/after table). Detect stays at 5 fps — the headroom is banked for future cameras.
 
 ### Ops
 
-`docker compose -f frigate/compose.yaml logs -f frigate` for logs, `docker stats frigate` for load, the UI's System page for per-camera fps/inference metrics. Runbook detail (including the Coral driver's next-kernel-bump notes) lands in `Servers/Pearl.md` with Phase 4.
+`docker compose -f frigate/compose.yaml logs -f frigate` for logs, `docker stats frigate` for load, the UI's System page for per-camera fps/inference metrics. Runbook detail — including the Coral driver's next-kernel-bump recipe — lives in `Servers/Pearl.md` § Frigate.

@@ -68,8 +68,9 @@ same tokens/topo background/type pairing, **copied, not abstracted** (the
 music app's precedent). The tiles are trail placards, not a Card-Card-Card
 grid: each wears a painted **blaze** in the module's own color (hue carries
 identity, the narrators' voice-color idiom — Merle squirrel-orange, Weather
-rain-blue, Music hi-res gold, Mole earth-brown, Hearth ember, and the
-coming-soon pair dimmed to a whisper). Fonts are the same Fraunces/Sometype
+rain-blue, Music hi-res gold, Mole earth-brown, Hearth ember, Security
+watchtower steel-blue since Frigate went live in epic #243 — any
+coming-soon tile dims to a whisper). Fonts are the same Fraunces/Sometype
 Mono subsets next/font self-hosts for the MCC, with its fallback metrics
 copied so the swap can't shift layout; the grid reserves two placard rows
 before `tiles.json` lands (house rule #1).
