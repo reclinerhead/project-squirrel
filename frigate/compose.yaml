@@ -1,0 +1,48 @@
+# Frigate NVR on pearl (epic #243, Phase 1 -- issue #245).
+#
+# The one container on the box, and deliberately NOT a systemd unit like the
+# rest of the Merle services -- Frigate's supported deployment is Docker, and
+# fighting that buys nothing. Docker's own restart policy stands in for
+# systemd's (restart: unless-stopped survives reboots via docker.service).
+#
+# Deploying config changes is MANUAL -- merle-autodeploy knows nothing about
+# containers. From the pearl checkout:
+#
+#   cp frigate/config.yml /srv/frigate/config/config.yml
+#   docker compose -f frigate/compose.yaml up -d --force-recreate frigate
+#
+# The repo's config.yml is the source of truth; the copy under /srv/frigate
+# is Frigate's working copy (it stamps migration versions into it, and the
+# UI's config editor writes there -- re-deploying overwrites, which is the
+# point). Secrets ride frigate/.env beside this file (gitignored by the root
+# .env* rule; template in env.example).
+services:
+  frigate:
+    container_name: frigate
+    image: ghcr.io/blakeblackshear/frigate:stable
+    restart: unless-stopped
+    stop_grace_period: 30s
+    # Detect runs on the 704x480 sub-stream; 128mb is generous headroom for
+    # that (and for camera #2 when the wiring happens).
+    shm_size: "128mb"
+    env_file: .env
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      # Frigate's writable home: its DB, model cache, and the deployed copy
+      # of config.yml (see the deploy note above).
+      - /srv/frigate/config:/config
+      # The Purple drive is Frigate's, whole (epic #243): recordings and
+      # snapshots land here.
+      - /srv/frigate/media:/media/frigate
+      - type: tmpfs
+        target: /tmp/cache
+        tmpfs:
+          size: 1000000000
+    ports:
+      - "8971:8971" # web UI + authenticated API (initial admin password: docker logs frigate)
+      - "8554:8554" # go2rtc RTSP restream -- Phase 3's consumers read this
+      - "8555:8555/tcp" # WebRTC
+      - "8555:8555/udp"
+    # Phase 2 (#246) adds:
+    #   devices:
+    #     - /dev/apex_0:/dev/apex_0
