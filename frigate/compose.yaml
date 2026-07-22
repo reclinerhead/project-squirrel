@@ -43,6 +43,7 @@ services:
       - "8554:8554" # go2rtc RTSP restream -- Phase 3's consumers read this
       - "8555:8555/tcp" # WebRTC
       - "8555:8555/udp"
-    # Phase 2 (#246) adds:
-    #   devices:
-    #     - /dev/apex_0:/dev/apex_0
+    # The Coral Edge TPU (Phase 2, #246). Host perms are root:apex 0660
+    # (Phase 0's udev rule); the container runs as root, so the map is enough.
+    devices:
+      - /dev/apex_0:/dev/apex_0

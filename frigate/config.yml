@@ -43,8 +43,8 @@ cameras:
       enabled: true
       width: 704
       height: 480
-      # Conservative on the CPU detector; revisit (or not) once Phase 2 puts
-      # inference on the Coral.
+      # Conservative on purpose even with the Coral: the ~10ms inference
+      # headroom is banked for cameras #2 and #3, not spent here.
       fps: 5
     objects:
       # Frigate is the generalist of record -- person/vehicle/pet triage.
@@ -57,15 +57,12 @@ cameras:
         - cat
         - bird
 
-# Phase 1 stopgap. Phase 2 (#246) swaps this for the Edge TPU:
-#   detectors:
-#     coral:
-#       type: edgetpu
-#       device: pci
+# The Coral Edge TPU (PCIe, /dev/apex_0 -- driver saga on #244). ~10.6ms
+# inference vs the ~1.5 cores the Phase 1 CPU detector burned (#246).
 detectors:
-  cpu1:
-    type: cpu
-    num_threads: 2
+  coral:
+    type: edgetpu
+    device: pci
 
 record:
   enabled: true

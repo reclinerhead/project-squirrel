@@ -37,7 +37,7 @@ go2rtc inside Frigate republishes both camera streams at `rtsp://pearl:8554/driv
 
 - **UI / authenticated API on `:8971`** (the unauthenticated internal `:5000` is deliberately not published). First-run admin credentials appear in `docker logs frigate`. A Caddy route + Homestead placard are Phase 4 (#248).
 - **MQTT**: Frigate publishes `frigate/*` (events, stats, availability) to the house Mosquitto — same broker as `driveway/*` and `audio/*`, by host IP because the container's `localhost` is itself. Nothing subscribes yet; bridging `frigate/events` toward the narrators is on the epic's parked list.
-- **Detector**: CPU (`num_threads: 2`) as the Phase 1 stopgap; Phase 2 (#246) swaps in the Coral Edge TPU (`/dev/apex_0`, PCIe — driver friction log lives on #244).
+- **Detector**: the Coral Edge TPU (`edgetpu`/`pci`, `/dev/apex_0` mapped into the container — driver friction log lives on #244). Measured ~10.6 ms inference; the Phase 1 CPU detector it replaced burned ~1.5 of pearl's 4 threads for the same work (#246's before/after table). Detect stays at 5 fps — the headroom is banked for future cameras.
 
 ### Ops
 
