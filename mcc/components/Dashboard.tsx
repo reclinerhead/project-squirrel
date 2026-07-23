@@ -2452,7 +2452,7 @@ function WeatherPost() {
       : null;
   const hoveredFrac = hovered ? (hovered.ts - ts0) / (ts1 - ts0) : 0;
   const nights = hasChart
-    ? nightBands(current?.sunrise ?? null, current?.sunset ?? null, ts0, ts1)
+    ? nightBands(current?.lat ?? null, current?.lon ?? null, ts0, ts1)
     : [];
 
   const round = wxRound;
@@ -3300,8 +3300,8 @@ export function WeatherStationView({
       : { observed: [], coming: [], bridged: false };
   const allPts = [...trend.observed, ...trend.coming];
   const nights = nightBands(
-    current?.sunrise ?? null,
-    current?.sunset ?? null,
+    current?.lat ?? null,
+    current?.lon ?? null,
     ts0,
     ts1,
   );
