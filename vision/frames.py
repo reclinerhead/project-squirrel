@@ -58,27 +58,35 @@ def rtsp_url():
     we're on must never be a mystery, so there is exactly one place that
     decides it).
 
-    MERLE_RTSP_URL, when set, is used verbatim -- the normal posture since
-    Frigate (issue #247): point it at the go2rtc restream
-    (rtsp://pearl:8554/driveway -- the same 4K main-stream bits, but the one
-    camera connection is Frigate's). A restream URL carries no credentials,
-    so no password is required in this form.
+    MERLE_RTSP_URL, when set, is used verbatim -- the explicit override,
+    and the break-glass slot: paste the direct camera URL here (credentials
+    and all -- the redactor masks them) for a Frigate that's down.
 
-    Unset, the direct-Amcrest construction below stands unchanged, still
-    fail-loud on a missing MERLE_RTSP_PASS -- the in-a-pinch fallback for a
-    Frigate that's down. subtype=0 is the Amcrest MAIN stream -- the
-    sub-stream (subtype=1) is low-res and would starve distant-animal
-    detection. The redacted twin is for logs and /state; the password never
-    leaves the process."""
+    Otherwise the feed registry (feeds.yml, issue #270) supplies the
+    naturalist feed's URL -- the normal posture: Frigate's credential-free
+    go2rtc restream (#247), the same 4K main-stream bits with the one
+    camera connection being Frigate's. A malformed registry raises HERE,
+    loudly -- falling back to a direct camera session on a config typo
+    would silently break the one-client rule.
+
+    On a box with no registry file at all, the direct-Amcrest construction
+    below stands unchanged, still fail-loud on a missing MERLE_RTSP_PASS.
+    subtype=0 is the Amcrest MAIN stream -- the sub-stream (subtype=1) is
+    low-res and would starve distant-animal detection. The redacted twin is
+    for logs and /state; the password never leaves the process."""
     override = os.environ.get("MERLE_RTSP_URL", "").strip()
     if override:
         return override, redact_rtsp(override)
+    import feeds
+    if feeds.registry_path().exists():
+        feed = feeds.feed_for("naturalist")
+        return feed.url, redact_rtsp(feed.url)
     user = os.environ.get("MERLE_RTSP_USER", "admin")
     pw = os.environ.get("MERLE_RTSP_PASS")
     if not pw:
         raise RuntimeError("MERLE_RTSP_PASS is not set -- needed for the "
-                           "camera source (or set MERLE_RTSP_URL to the "
-                           "Frigate restream).")
+                           "camera source (or set MERLE_RTSP_URL, or point "
+                           "MERLE_FEEDS at a feed registry).")
     host = os.environ.get("MERLE_RTSP_HOST", "192.168.1.102")
     path = "/cam/realmonitor?channel=1&subtype=0"
     return (f"rtsp://{user}:{pw}@{host}:554{path}",

@@ -25,28 +25,30 @@ go2rtc:
     candidates:
       - 192.168.1.64:8555
   streams:
+    # The rear camera, watching the driveway ("driveway" until #270's feed
+    # registry renamed every camera for its location).
     # Main stream: 3840x2160 H.264 @ 15fps + AAC audio (probed 2026-07-22).
-    driveway:
+    house-rear:
       - rtsp://admin:{FRIGATE_RTSP_PASSWORD}@192.168.1.102:554/cam/realmonitor?channel=1&subtype=0
     # Sub-stream: 704x480 H.264 @ 15fps. Detect decodes this, never the 4K --
     # pearl's CPU is shared with Earl's BirdNET habit.
-    driveway_sub:
+    house-rear_sub:
       - rtsp://admin:{FRIGATE_RTSP_PASSWORD}@192.168.1.102:554/cam/realmonitor?channel=1&subtype=1
-    # The front-door camera (issue #269) -- same Amcrest model as the driveway
-    # cam, same admin credential, so the same URL shape and stream split.
+    # The front-door camera (issue #269) -- same Amcrest model as house-rear,
+    # same admin credential, so the same URL shape and stream split.
     house-front:
       - rtsp://admin:{FRIGATE_RTSP_PASSWORD}@192.168.1.173:554/cam/realmonitor?channel=1&subtype=0
     house-front_sub:
       - rtsp://admin:{FRIGATE_RTSP_PASSWORD}@192.168.1.173:554/cam/realmonitor?channel=1&subtype=1
 
 cameras:
-  driveway:
+  house-rear:
     ffmpeg:
       inputs:
-        - path: rtsp://127.0.0.1:8554/driveway
+        - path: rtsp://127.0.0.1:8554/house-rear
           input_args: preset-rtsp-restream
           roles: [record]
-        - path: rtsp://127.0.0.1:8554/driveway_sub
+        - path: rtsp://127.0.0.1:8554/house-rear_sub
           input_args: preset-rtsp-restream
           roles: [detect]
       output_args:
@@ -70,11 +72,10 @@ cameras:
         - dog
         - cat
         - bird
-  # Camera #2 (issue #269): the front door. Mirrors the driveway camera --
-  # record remuxes the 4K main stream, detect decodes the sub-stream. The
-  # Coral's inference headroom was banked for exactly this (#246). detect
-  # width/height assume the same 704x480 sub-stream as the driveway cam
-  # (same model) -- verify against the probe on the UI System page at deploy.
+  # Camera #2 (issue #269): the front door. Mirrors house-rear -- record
+  # remuxes the 4K main stream, detect decodes the 704x480 sub-stream
+  # (verified against the probe at deploy, 2026-07-23). The Coral's
+  # inference headroom was banked for exactly this (#246).
   house-front:
     ffmpeg:
       inputs:

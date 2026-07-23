@@ -28,10 +28,10 @@ Frigate restream ─rtsp:8554─▶ Merle daemon ───┼─MQTT driveway/ev
 live.py remains the standalone desktop vision stack (hard_frames/ harvest,
 snapshots/, debug_frames/); it shares perception.py with the daemon.
 
-The Amcrest PoE cam's ONLY RTSP client is Frigate (NVR, Docker on pearl,
-epic #243) -- 24/7 recording + Coral detection; the daemon, live.py, and
-Earl's driveway audio all read its go2rtc restream (#247). See
-docs/guide/frigate.md.
+Each Amcrest PoE cam's ONLY RTSP client is Frigate (NVR, Docker on pearl,
+epic #243) -- 24/7 recording + Coral detection of house-rear + house-front;
+the daemon, live.py, and Earl all read its go2rtc restream (#247), finding
+their feeds in feeds.yml (#270). See docs/guide/frigate.md.
 ```
 
 ## Quick start — running the station
@@ -39,8 +39,8 @@ docs/guide/frigate.md.
 The station spans three machines, and one of them drives. **pearl** (`192.168.1.64`, always-on Ubuntu) hosts the broker (Mosquitto), the narrator (Marlin), the weather post (`weatherpost/weather.py`), the listener (Earl, `listener/earl.py`), and the production dashboard (MCC, `http://pearl:3000`) — always up, nothing to start. **bluejay** (the Windows desktop) runs only the perception daemon, the one process that needs its GPU and camera, from the repo root (PowerShell). **merle** (`192.168.1.103`, Pi 5) is the rover — the Waveshare UGV stack (`ugv`, `http://merle:5000`) with Jim the field narrator riding along; intermittently off or out of range by nature, and nothing else waits on it (runbook: `Servers/Merle.md`). Bluejay's standing Ollama install also serves the narrator's LLM calls (port 11434) — not a Merle process, nothing to start. Everything meets on the bus and tolerates the others being absent:
 
 ```powershell
-# Perception daemon (needs MERLE_RTSP_PASS for the camera and MERLE_MQTT
-# for the bus -- both set User-level on bluejay;
+# Perception daemon (camera URL comes from feeds.yml since #270 -- no RTSP
+# env needed; MERLE_MQTT for the bus is set User-level on bluejay;
 # set MERLE_SOURCE=synthetic for the camera-free world).
 # --host 0.0.0.0 so pearl's production dashboard can reach it across the
 # LAN (loopback-only was the one-box era); needs a one-time Windows
@@ -119,7 +119,8 @@ This file is the hub: project-wide context and conventions only. Everything comp
 
 The rules that hold across every component, stated once. Each spoke assumes them.
 
-- **`MERLE_*` env vars, required-no-default.** Anything a service cannot run correctly without (`MERLE_MQTT`, `MERLE_LATLON`, `MERLE_RTSP_PASS` where a camera is a source) raises at startup rather than defaulting — a misconfigured service must never look healthy while publishing into the void.
+- **`MERLE_*` env vars, required-no-default.** Anything a service cannot run correctly without (`MERLE_MQTT`, `MERLE_LATLON`) raises at startup rather than defaulting — a misconfigured service must never look healthy while publishing into the void.
+- **`feeds.yml` is the feed registry** (repo root, #270). Every video/audio feed — the cameras' restreams, the rover mic — is declared once there, with per-consumer flags (`earl:`, `naturalist:`); code dispatches on a feed's `kind`, never its name. Adding, retiring, or re-routing a feed is a registry edit; renaming one is a data migration (feed names double as published source labels — runbook in `Servers/Pearl.md`). `feeds.py` is the fail-loud loader; `MERLE_FEEDS` points at an alternate registry (tests, break-glass direct-camera files).
 - **Retained topics carry state, event topics carry moments.** A retained message is "the current truth, answered instantly on subscribe" (presence lamps, journals, weather); an event is a thing that happened once. Never retain an event.
 - **Timestamps split by namespace.** `driveway/*` and the daemon's SQLite use ISO-8601 local strings; the weather and audio namespaces (and their stores) use unix epoch seconds — a deliberate divergence, argued in [the weather spoke](docs/guide/weather.md).
 - **Pure logic is unit-tested; I/O seams are desk-tested.** Ranking, gating, parsing, bucketing live in pure functions with tests beside them; camera/broker/LLM boundaries get desk procedures in the spokes and runbooks instead.
