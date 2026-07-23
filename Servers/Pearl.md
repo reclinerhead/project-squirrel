@@ -480,29 +480,29 @@ Restart=on-failure
 Environment=PYTHONUNBUFFERED=1
 Environment=MERLE_MQTT=localhost:1883
 Environment=MERLE_LATLON=42.29,-85.59
-Environment=MERLE_RTSP_PASS=<the camera password>
-Environment=MERLE_EARL_SOURCES=amcrest
 Environment=MERLE_EARL_CLIPS=/srv/media-cache/earl
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-**Since #247 the amcrest source reads Frigate's restream**, not the camera —
-a drop-in (the house `cache.conf` pattern,
-`/etc/systemd/system/earl-listener.service.d/restream.conf`):
+**Which sources run, and how each is captured, lives in the repo's
+`feeds.yml` since #270** — every feed flagged `earl: true` (today:
+house-rear + house-front audio off Frigate's restream, the rover mic over
+ssh). No source env vars in the unit anymore: the old
+`MERLE_EARL_SOURCES` / `MERLE_RTSP_*` / `MERLE_EARL_ROVER_CMD` family is
+retired, and the `restream.conf` / `rover.conf` drop-ins from the #247/#172
+era are deleted (`rm /etc/systemd/system/earl-listener.service.d/*.conf`,
+`daemon-reload`, restart). Dropping a camera from Earl (say, if two BirdNET
+workers strain the box) is `earl: false` in `feeds.yml` + autodeploy, not a
+unit edit. **Earl's venv needs pyyaml** for the registry loader:
+`~/earl-venv/bin/pip install pyyaml` (one-time, done at #270 deploy).
 
-```
-[Service]
-Environment=MERLE_RTSP_URL=rtsp://127.0.0.1:8554/driveway
-```
-
-Loopback on purpose (go2rtc is on this box), credential-free (the restream
-carries none — the `MERLE_RTSP_PASS` line above stays as the direct-camera
-fallback: remove the drop-in + `daemon-reload` + restart and Earl goes back
-to the Amcrest itself, e.g. with Frigate down for surgery). Audio still
-arrives via `-allowed_media_types audio` — same AAC track, one fewer camera
-session.
+**Frigate down for surgery?** The break-glass is a local, uncommitted
+registry: copy `feeds.yml` somewhere private, put the direct camera URL
+(credentials inline) in the rtsp feed, and add a drop-in setting
+`Environment=MERLE_FEEDS=/home/todd/feeds-direct.yml`; remove it to return
+to the restream. The redactor keeps the password out of the journal.
 
 `earl-sightings.service` is the same skeleton with
 `ExecStart=/home/todd/project-squirrel/venv/bin/python -m listener.sightings`,
@@ -513,16 +513,43 @@ sightings unit owns clip retention, so it needs Earl's clip dir), and
 (default 90). Then the usual:
 `sudo systemctl daemon-reload && sudo systemctl enable --now earl-listener earl-sightings`.
 
-**The rover is enabled as a drop-in** (installed 2026-07-18, the
-music-daemon `cache.conf` pattern):
-`/etc/systemd/system/earl-listener.service.d/rover.conf` sets
-`Environment=MERLE_EARL_SOURCES=amcrest,rover`, so the base unit stays
-exactly what's documented above and dropping the rover again is one `rm` +
-`daemon-reload` + restart. It rides pearl→merle ssh keys (todd's
-`~/.ssh/id_ed25519`, comment `pearl-earl-rover`, installed the same day —
-`BatchMode` must keep working). A rover that's off or unreachable is just a
-dark entry on `audio/sources` cycling its restart backoff — that's the
-designed steady state, not a problem.
+**The rover feed** rides pearl→merle ssh keys (todd's `~/.ssh/id_ed25519`,
+comment `pearl-earl-rover`, installed 2026-07-18 — `BatchMode` must keep
+working); its capture command is the `cmd` of the `rover` feed in
+`feeds.yml`. A rover that's off or unreachable is just a dark entry on
+`audio/sources` cycling its restart backoff — that's the designed steady
+state, not a problem.
+
+**The #270 rename migration (`amcrest` → `house-rear`), run 2026-07-23** —
+kept here because a future feed rename repeats it. Feed names are published
+source labels AND clip-path prefixes, so a rename rewrites history in three
+places, with both units stopped so no writer races it:
+
+```
+sudo systemctl stop earl-listener earl-sightings
+python3 - <<'EOF'
+import sqlite3
+db = sqlite3.connect("/home/todd/project-squirrel/earl.db")
+db.execute("UPDATE sightings SET source='house-rear',"
+           " clip=REPLACE(clip,'amcrest/','house-rear/')"
+           " WHERE source='amcrest'")
+db.execute("UPDATE life_list SET first_source='house-rear',"
+           " first_clip=REPLACE(first_clip,'amcrest/','house-rear/')"
+           " WHERE first_source='amcrest'")
+db.commit()
+print("sightings:", db.execute("SELECT source, COUNT(*) FROM sightings"
+                               " GROUP BY source").fetchall())
+print("life_list:", db.execute("SELECT first_source, COUNT(*) FROM life_list"
+                               " GROUP BY first_source").fetchall())
+EOF
+mv /srv/media-cache/earl/amcrest /srv/media-cache/earl/house-rear
+sudo systemctl start earl-listener earl-sightings
+```
+
+The clip-path `REPLACE` is load-bearing: paths are stored source-prefixed
+(`<source>/<ts>-<species>.wav`), so skipping it strands every historical
+clip behind a dead path after the directory move. The `species/` portrait
+shelf shares the clips dir but is source-less — untouched.
 
 Watching Earl work:
 

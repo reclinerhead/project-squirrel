@@ -86,13 +86,13 @@ pearl (`192.168.1.64` — see `Servers/Pearl.md`); the perception daemon,
 camera, and Ollama are on bluejay (`192.168.1.79`). Jim listens on nothing —
 he only talks to the broker.
 
-**One more job uses this box without running on it: merle is Earl's second
-pair of ears.** Pearl's `earl-listener` pulls the rover's USB camera mic over
-ssh — a drop-in (`earl-listener.service.d/rover.conf`, added 2026-07-18) sets
-`MERLE_EARL_SOURCES=amcrest,rover`, and the `rover` source is literally
+**One more job uses this box without running on it: merle is one of Earl's
+ears.** Pearl's `earl-listener` pulls the rover's USB camera mic over
+ssh — the `rover` feed in the repo's `feeds.yml` (issue #270; a `command`
+kind, `earl: true`) is literally
 `ssh todd@merle arecord -D plughw:0,0 …` piped back to BirdNET on pearl
-(pearl→merle ssh keys are a deploy step; `MERLE_EARL_ROVER_CMD` overrides the
-whole command). Nothing to install or restart on merle for this; when the
+(pearl→merle ssh keys are a deploy step; editing the feed's `cmd` changes
+the capture). Nothing to install or restart on merle for this; when the
 rover is off or out of range the source shows `offline` on `audio/sources`
 and cycles its restart backoff — the designed steady state, not a fault.
 See the Earl spoke (`docs/guide/earl.md`).

@@ -107,11 +107,12 @@ def test_stop_joins_promptly_and_releases_capture():
 
 # --- provenance (issue #74, Phase 0) -------------------------------------------
 
-def test_rtsp_url_builds_and_redacts(monkeypatch):
-    # delenv the #247 override: the direct-camera form must be exactly what
-    # it always was -- including on a dev box where the restream is the
-    # ambient default.
+def test_rtsp_url_builds_and_redacts(monkeypatch, tmp_path):
+    # delenv the override and point MERLE_FEEDS at a file that isn't there:
+    # a box with no registry at all (#270). The direct-camera form must be
+    # exactly what it always was.
     monkeypatch.delenv("MERLE_RTSP_URL", raising=False)
+    monkeypatch.setenv("MERLE_FEEDS", str(tmp_path / "no-such-feeds.yml"))
     monkeypatch.setenv("MERLE_RTSP_PASS", "sekrit")
     monkeypatch.setenv("MERLE_RTSP_HOST", "10.0.0.5")
     monkeypatch.delenv("MERLE_RTSP_USER", raising=False)
@@ -123,10 +124,45 @@ def test_rtsp_url_builds_and_redacts(monkeypatch):
     assert "sekrit" not in redacted
 
 
-def test_rtsp_url_requires_the_password(monkeypatch):
+def test_rtsp_url_requires_the_password(monkeypatch, tmp_path):
     monkeypatch.delenv("MERLE_RTSP_URL", raising=False)
+    monkeypatch.setenv("MERLE_FEEDS", str(tmp_path / "no-such-feeds.yml"))
     monkeypatch.delenv("MERLE_RTSP_PASS", raising=False)
     with pytest.raises(RuntimeError, match="MERLE_RTSP_PASS"):
+        frames.rtsp_url()
+
+
+def test_rtsp_url_reads_the_registry(monkeypatch, tmp_path):
+    # The normal posture since #270: no env override, the feed registry
+    # supplies the naturalist feed's URL -- Frigate's credential-free
+    # restream, so the redacted twin is honestly the URL itself.
+    registry = tmp_path / "feeds.yml"
+    registry.write_text(
+        "feeds:\n"
+        "  house-rear:\n"
+        "    kind: rtsp\n"
+        "    url: rtsp://pearl:8554/house-rear\n"
+        "    naturalist: true\n")
+    monkeypatch.delenv("MERLE_RTSP_URL", raising=False)
+    monkeypatch.setenv("MERLE_FEEDS", str(registry))
+    url, redacted = frames.rtsp_url()
+    assert url == redacted == "rtsp://pearl:8554/house-rear"
+
+
+def test_rtsp_url_malformed_registry_fails_loud(monkeypatch, tmp_path):
+    # A registry that EXISTS but is broken must raise, never quietly fall
+    # back to a direct camera session -- that would break the one-client
+    # rule (#247) on a config typo.
+    registry = tmp_path / "feeds.yml"
+    registry.write_text(
+        "feeds:\n"
+        "  house-rear:\n"
+        "    kind: rtsp\n"          # kind rtsp with no url: malformed
+        "    naturalist: true\n")
+    monkeypatch.delenv("MERLE_RTSP_URL", raising=False)
+    monkeypatch.setenv("MERLE_FEEDS", str(registry))
+    monkeypatch.setenv("MERLE_RTSP_PASS", "sekrit")   # must NOT be reached
+    with pytest.raises(RuntimeError, match="needs a non-empty 'url'"):
         frames.rtsp_url()
 
 
@@ -134,11 +170,12 @@ def test_rtsp_url_override_is_the_restream(monkeypatch):
     # Issue #247: MERLE_RTSP_URL points the daemon at Frigate's go2rtc
     # restream -- used verbatim, no password required (a restream URL carries
     # no credentials), and the redacted twin is honestly the URL itself, so
-    # /state shows exactly what the daemon is watching.
-    monkeypatch.setenv("MERLE_RTSP_URL", "rtsp://pearl:8554/driveway")
+    # /state shows exactly what the daemon is watching. Since #270 the
+    # override outranks the registry -- explicit env beats file config.
+    monkeypatch.setenv("MERLE_RTSP_URL", "rtsp://pearl:8554/house-rear")
     monkeypatch.delenv("MERLE_RTSP_PASS", raising=False)
     url, redacted = frames.rtsp_url()
-    assert url == redacted == "rtsp://pearl:8554/driveway"
+    assert url == redacted == "rtsp://pearl:8554/house-rear"
 
 
 def test_rtsp_url_override_still_redacts_embedded_creds(monkeypatch):
