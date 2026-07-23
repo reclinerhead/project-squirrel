@@ -489,11 +489,28 @@ def test_hard_frames_by_day_survives_missing_folder():
     assert trend == [{"date": "2026-07-06", "n": 0}, {"date": "2026-07-07", "n": 0}]
 
 
+# --- the switchable-source registry (issues #236, #274) ----------------------
+# make_sources() returns FACTORIES, not instances, so asserting the roster
+# opens no stream and loads no model -- the keys are what the MCC's source
+# toggle renders as pills. The factories themselves (which do open hardware)
+# are covered by test_frames.py's URL tests and verified against cameras.
+
+def test_make_sources_advertises_the_three_eyes(monkeypatch):
+    monkeypatch.delenv("MERLE_SOURCE", raising=False)
+    roster = merle_daemon.make_sources()
+    assert list(roster) == ["house-rear", "house-front", "rover"]  # order = pills
+
+
+def test_make_sources_is_none_in_the_synthetic_world(monkeypatch):
+    monkeypatch.setenv("MERLE_SOURCE", "synthetic")
+    assert merle_daemon.make_sources() is None
+
+
 # --- source switching (issue #236) -------------------------------------------
 # The switch mechanic is source-agnostic, so it's proven here with a registry
 # of two synthetic factories -- no camera, no model, no rover. The real
-# driveway/rover constructions are covered by test_frames.py's URL tests and
-# verified against hardware.
+# house-rear/house-front/rover constructions are covered by test_frames.py's
+# URL tests and verified against hardware.
 
 
 def _switch_app(conn=None, registry=None, publisher=None):

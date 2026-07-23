@@ -8,9 +8,10 @@
 #   - SyntheticFrameSource  (here)          -- camera-free, for tests / dev / the
 #                                              MCC frontend before the real feed
 #   - TrackedStreamSource   (here)          -- any video stream through the real
-#                                              model + tracker: the Amcrest over
-#                                              RTSP ('driveway') or the rover's
-#                                              MJPEG feed ('rover', issue #236)
+#                                              model + tracker: the Amcrests over
+#                                              RTSP ('house-rear'/'house-front')
+#                                              or the rover's MJPEG feed
+#                                              ('rover', issues #236, #274)
 #
 # Keeping perception behind this interface means the daemon's presentation and
 # storage logic has exactly one implementation, so it can't drift between the
@@ -300,9 +301,9 @@ def load_model():
 class TrackedStreamSource(FrameSource):
     """The real perception source: a video stream through the same model +
     tracker as live.py, sharing perception.py so the two can't drift. Which
-    stream is the constructor's business (issue #236) -- the Amcrest over RTSP
-    (driveway_source) and the rover's HTTP MJPEG feed (rover_source) are the
-    same machinery with a different URL.
+    stream is the constructor's business (issue #236) -- the Amcrests over RTSP
+    (house_rear_source, house_front_source) and the rover's HTTP MJPEG feed
+    (rover_source) are the same machinery with a different URL.
 
     Latency discipline (issue #29): the model is loaded AND warmed up before the
     stream connection opens (so no frames queue while CUDA initializes), and a
@@ -406,10 +407,32 @@ class TrackedStreamSource(FrameSource):
         self._reader.join(timeout=2)
 
 
-def driveway_source():
-    """The Amcrest driveway cam over RTSP -- the original daemon source."""
+def house_front_url():
+    """The front-door camera's restream URL -> (url, redacted). A selectable
+    eye (issue #274), registry-only: unlike rtsp_url()'s naturalist default,
+    house-front has NO MERLE_RTSP_URL override or direct-camera fallback --
+    it is new, with no legacy camera session to fall back to. The URL lives
+    in feeds.yml (#270), so there is still exactly one place it is decided.
+    A restream URL carries no credentials, so the redacted twin is itself."""
+    import feeds
+    url = feeds.feed("house-front").url
+    return url, redact_rtsp(url)
+
+
+def house_rear_source():
+    """The rear camera (watching the driveway) over RTSP -- the original
+    daemon source (`driveway_source` until #274) and the naturalist's default
+    eye. URL from rtsp_url(): the MERLE_RTSP_URL override, else the registry's
+    naturalist feed, else the direct-camera break-glass (#270)."""
     url, redacted = rtsp_url()
-    return TrackedStreamSource("driveway", url, redacted)
+    return TrackedStreamSource("house-rear", url, redacted)
+
+
+def house_front_source():
+    """The front-door camera over RTSP -- a selectable eye (issue #274),
+    same machinery as house_rear_source with its URL from the registry."""
+    url, redacted = house_front_url()
+    return TrackedStreamSource("house-front", url, redacted)
 
 
 def rover_source():
