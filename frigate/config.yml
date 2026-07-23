@@ -32,6 +32,12 @@ go2rtc:
     # pearl's CPU is shared with Earl's BirdNET habit.
     driveway_sub:
       - rtsp://admin:{FRIGATE_RTSP_PASSWORD}@192.168.1.102:554/cam/realmonitor?channel=1&subtype=1
+    # The front-door camera (issue #269) -- same Amcrest model as the driveway
+    # cam, same admin credential, so the same URL shape and stream split.
+    house-front:
+      - rtsp://admin:{FRIGATE_RTSP_PASSWORD}@192.168.1.173:554/cam/realmonitor?channel=1&subtype=0
+    house-front_sub:
+      - rtsp://admin:{FRIGATE_RTSP_PASSWORD}@192.168.1.173:554/cam/realmonitor?channel=1&subtype=1
 
 cameras:
   driveway:
@@ -58,6 +64,34 @@ cameras:
       # Frigate is the generalist of record -- person/vehicle/pet triage.
       # Squirrels and turkeys remain Merle's department (epic #243: Frigate
       # is the NVR, Merle is the naturalist).
+      track:
+        - person
+        - car
+        - dog
+        - cat
+        - bird
+  # Camera #2 (issue #269): the front door. Mirrors the driveway camera --
+  # record remuxes the 4K main stream, detect decodes the sub-stream. The
+  # Coral's inference headroom was banked for exactly this (#246). detect
+  # width/height assume the same 704x480 sub-stream as the driveway cam
+  # (same model) -- verify against the probe on the UI System page at deploy.
+  house-front:
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/house-front
+          input_args: preset-rtsp-restream
+          roles: [record]
+        - path: rtsp://127.0.0.1:8554/house-front_sub
+          input_args: preset-rtsp-restream
+          roles: [detect]
+      output_args:
+        record: preset-record-generic-audio-copy
+    detect:
+      enabled: true
+      width: 704
+      height: 480
+      fps: 5
+    objects:
       track:
         - person
         - car
