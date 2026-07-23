@@ -24,10 +24,11 @@
 # frame_archiver on pearl files it for the Field Journal.
 #
 # The frame source world is selected by MERLE_SOURCE: 'camera' (default) is the
-# real YOLO + ByteTrack feed with a SWITCHABLE upstream -- 'driveway' (the
-# Amcrest over RTSP) or 'rover' (the rover's MJPEG feed), toggled at runtime
-# via POST /control set_source (issue #236). 'synthetic' is the camera-free
-# world used by tests/CI and frontend work: one source, no switching.
+# real YOLO + ByteTrack feed with a SWITCHABLE upstream -- 'house-rear' (the
+# driveway Amcrest), 'house-front' (the front-door Amcrest), or 'rover' (the
+# rover's MJPEG feed), toggled at runtime via POST /control set_source
+# (issues #236, #274). 'synthetic' is the camera-free world used by tests/CI
+# and frontend work: one source, no switching.
 #
 # Run it:  uvicorn merle_daemon:app        (MERLE_DB overrides the db path;
 #                                           MERLE_MQTT -- required -- points at
@@ -745,21 +746,26 @@ def make_source():
     at import, so importing this module never opens the camera or loads the model."""
     if os.environ.get("MERLE_SOURCE", "camera") == "synthetic":
         return SyntheticFrameSource()
-    from vision.frames import driveway_source
-    return driveway_source()
+    from vision.frames import house_rear_source
+    return house_rear_source()
 
 
 def make_sources():
-    """The switchable-source registry for the camera world (issue #236):
-    'driveway' (the Amcrest over RTSP, first = the default active source) and
-    'rover' (the Waveshare app's MJPEG feed). None in the synthetic world --
-    there is nothing honest to switch to without a camera, and tests/CI stay
-    exactly as they were. Called at startup, not at import, same as
-    make_source."""
+    """The switchable-source registry for the camera world (issues #236, #274):
+    the three eyes -- 'house-rear' (the driveway Amcrest, first = the default
+    active source at boot), 'house-front' (the front-door Amcrest), and 'rover'
+    (the Waveshare app's MJPEG feed). Values are FACTORIES, not instances, so
+    building this registry opens no stream; the MCC's source toggle renders one
+    pill per key. None in the synthetic world -- there is nothing honest to
+    switch to without a camera, and tests/CI stay exactly as they were. Called
+    at startup, not at import, same as make_source."""
     if os.environ.get("MERLE_SOURCE", "camera") == "synthetic":
         return None
-    from vision.frames import driveway_source, rover_source
-    return {"driveway": driveway_source, "rover": rover_source}
+    from vision.frames import (house_front_source, house_rear_source,
+                               rover_source)
+    return {"house-rear": house_rear_source,
+            "house-front": house_front_source,
+            "rover": rover_source}
 
 
 # Module-level app for `uvicorn merle_daemon:app`. make_source/make_sources are

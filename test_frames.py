@@ -189,6 +189,34 @@ def test_rtsp_url_override_still_redacts_embedded_creds(monkeypatch):
     assert "sekrit" not in redacted
 
 
+def test_house_front_url_from_registry(monkeypatch, tmp_path):
+    # The front-door eye (issue #274): registry-only, no override/fallback --
+    # the URL is whatever feeds.yml says, redacted twin = itself (a restream
+    # carries no credentials).
+    registry = tmp_path / "feeds.yml"
+    registry.write_text(
+        "feeds:\n"
+        "  house-front:\n"
+        "    kind: rtsp\n"
+        "    url: rtsp://pearl:8554/house-front\n"
+        "    earl: true\n")
+    monkeypatch.setenv("MERLE_FEEDS", str(registry))
+    assert frames.house_front_url() == ("rtsp://pearl:8554/house-front",
+                                        "rtsp://pearl:8554/house-front")
+
+
+def test_house_front_url_missing_feed_fails_loud(monkeypatch, tmp_path):
+    # A registry without house-front is a misconfiguration, not a silent
+    # unswitchable eye.
+    registry = tmp_path / "feeds.yml"
+    registry.write_text(
+        "feeds:\n  house-rear:\n    kind: rtsp\n    url: rtsp://x\n"
+        "    naturalist: true\n")
+    monkeypatch.setenv("MERLE_FEEDS", str(registry))
+    with pytest.raises(RuntimeError, match="no feed named 'house-front'"):
+        frames.house_front_url()
+
+
 def test_rover_url_default_and_override(monkeypatch):
     # The rover feed (issue #236): the Waveshare app's MJPEG endpoint by
     # default, overridable as one whole URL. No credentials, so the redacted
