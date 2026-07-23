@@ -22,9 +22,11 @@ services:
     image: ghcr.io/blakeblackshear/frigate:stable
     restart: unless-stopped
     stop_grace_period: 30s
-    # Detect runs on the 704x480 sub-stream; 128mb is generous headroom for
-    # that (and for camera #2 when the wiring happens).
-    shm_size: "128mb"
+    # Detect runs on the 704x480 sub-streams. Frigate's own footer check asked
+    # for >=142mb once house-front made it two cameras (128mb was fine with
+    # one); 256mb banks room for a camera #3. A tmpfs cap, not a reservation --
+    # unused headroom costs pearl nothing.
+    shm_size: "256mb"
     env_file: .env
     volumes:
       - /etc/localtime:/etc/localtime:ro
