@@ -513,6 +513,19 @@ sightings unit owns clip retention, so it needs Earl's clip dir), and
 (default 90). Then the usual:
 `sudo systemctl daemon-reload && sudo systemctl enable --now earl-listener earl-sightings`.
 
+**Issue #232 deploy note (add `MERLE_LATLON` to `earl-sightings`).** The
+locations model seeds location 1 (Home) from `MERLE_LATLON` the first time the
+upgraded `connect()` runs, so add `Environment=MERLE_LATLON=42.29,-85.59` to
+`earl-sightings.service` (the same value `earl-listener` already carries) and
+`daemon-reload` + restart the unit. It is **not fatal if you forget** — the
+sightings unit treats it as optional and seeds a `(0,0)` placeholder, which
+self-heals to the real coords on the next restart once the env is present —
+but set it so Home's coordinates are right from the first upgrade. The schema
+upgrade itself (the `locations` table, `sightings.location_id` backfilling
+every existing row to Home, the `life_list` re-key) is automatic and in place:
+autodeploy restarts the unit, `connect()` runs the idempotent upgrade, done —
+no migration script, nothing to run by hand.
+
 **The rover feed** rides pearl→merle ssh keys (todd's `~/.ssh/id_ed25519`,
 comment `pearl-earl-rover`, installed 2026-07-18 — `BatchMode` must keep
 working); its capture command is the `cmd` of the `rover` feed in
